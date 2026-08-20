@@ -1,0 +1,36 @@
+print("Welcome to the roulette game!")
+print("You can bet on a number between 0 and 9.")
+mem[0:32]=1000
+
+printn("You have ")
+out(0:32)
+print(" credits.")
+print("What would you like to bet on?")
+printn("> ")
+input(1, 36:8)
+
+sub(48, 36:8, 36:8) #subtract ascii value of 0 from the input to get the number#
+rand(32:4)
+mod(10, 32:4, 32:4)
+
+printn("You bet on ")
+out(36:8)
+printn(". The winning number is ")
+out(32:4)
+print(".")
+
+comparev(36:8, 32:4, 44:2)
+isequal(0, 44:2, 46:1)
+not(46:1, 47:1)
+
+ifsubroutine(46:1, 553)
+ifsubroutine(47:1, 623)
+setcur(105)
+
+print("You lost! You lose 100 credits.")
+sub(100, 0:32, 0:32)
+return
+
+print("You won! You get 100 credits.")
+add(100, 0:32, 0:32)
+return
