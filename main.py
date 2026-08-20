@@ -47,7 +47,9 @@ shr(addr1:size1, addr2:size2, addr3:size3) - perform a bitwise shift right opera
 subroutine(cur) - call a subroutine at a certain position in the program
 return - return from a subroutine
 if(addr:size, cur) - if the value of a memory address with a certain size is not 0, jump to a certain position in the program
+ifnot(addr:size, cur) - if the value of a memory address with a certain size is 0, jump to a certain position in the program
 ifsubroutine(addr:size, cur) - if the value of a memory address with a certain size is not 0, call a subroutine at a certain position in the program
+ifnotsubroutine(addr:size, cur) - if the value of a memory address with a certain size is 0, call a subroutine at a certain position in the program
 sleep(ms) - sleep for a certain amount of milliseconds
 exit - exit the program
 '''
@@ -707,9 +709,9 @@ while running and cur < len(program):
         cur += 2
 
         if val == get_val(mem, addr1, size1):
-            set_val(mem, 0, 1, 2)
+            set_val(mem, addr2, 1, size2)
         else:
-            set_val(mem, 0, 0, 2)
+            set_val(mem, addr2, 0, size2)
     if tok == "not":
         cur += 1
         tok = readuntil(program, cur, ":")
@@ -1057,6 +1059,26 @@ while running and cur < len(program):
 
         if get_val(mem, addr, size) != 0:
             cur = target
+    if tok == "ifnot":
+        cur += 1
+        tok = readuntil(program, cur, ":")
+        cur += len(tok)
+        addr = int(tok)
+
+        cur += 1
+        tok = readuntil(program, cur, ",")
+        cur += len(tok)
+        size = int(tok)
+
+        cur += 1
+        tok = readuntil(program, cur, ")")
+        cur += len(tok)
+        target = int(tok)
+
+        cur += 2
+
+        if get_val(mem, addr, size) == 0:
+            cur = target
     if tok == "ifsubroutine":
         cur += 1
         tok = readuntil(program, cur, ":")
@@ -1076,6 +1098,27 @@ while running and cur < len(program):
         cur += 2
 
         if get_val(mem, addr, size) != 0:
+            nextreturn = cur
+            cur = target
+    if tok == "ifnotsubroutine":
+        cur += 1
+        tok = readuntil(program, cur, ":")
+        cur += len(tok)
+        addr = int(tok)
+
+        cur += 1
+        tok = readuntil(program, cur, ",")
+        cur += len(tok)
+        size = int(tok)
+
+        cur += 1
+        tok = readuntil(program, cur, ")")
+        cur += len(tok)
+        target = int(tok)
+
+        cur += 2
+
+        if get_val(mem, addr, size) == 0:
             nextreturn = cur
             cur = target
     if tok == "sleep":

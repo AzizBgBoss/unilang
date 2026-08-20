@@ -21,11 +21,13 @@ print(".")
 
 comparev(36:8, 32:4, 44:2)
 isequal(0, 44:2, 46:1)
-not(46:1, 47:1)
 
-ifsubroutine(46:1, 553)
-ifsubroutine(47:1, 623)
-setcur(105)
+ifsubroutine(46:1, 690)
+ifnotsubroutine(46:1, 620)
+if(0:32, 105)
+
+print("You lost all your credits! 5 gangsters are coming to kill you!")
+exit
 
 print("You lost! You lose 100 credits.")
 sub(100, 0:32, 0:32)
