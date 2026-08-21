@@ -18,7 +18,8 @@ Tips:
 6 - enable 8-bit color graphics (128x64) (8 x 128 x 64 = 65536 bits = 8192 bytes)
 
 Commands:
-#...# - comment (stops until the next #)
+#...# - comment
+!...! - keyword (use it to jump to its position in the program)
 flag[n]=val - set the value of a flag with a certain index to a 4-bit value
 isflagsupported(n, val, addr:size) - check if a flag with a certain index is supported (changes based on platforms)
 mem[addr:size]=val - set the value of a memory address with a certain size
@@ -46,6 +47,9 @@ cur - print the current position in the program
 memory - print the current state of memory
 flags - print the current state of flags
 setcur(pos) - set the current position in the program
+setcurv(addr:size) - set the current position in the program to the value of a memory address
+getcur(addr:size) - get the current position in the program and store it in a memory address
+getkeyword(keyword, addr:size) - get the cursor index of a keyword to jump to and store it in a memory address
 compare(val, addr1:size1, addr2:size2) - compare a value to a memory address with a certain size and store the result in a special memory address (0 = equal, 1 = val > addr2, 2 = val < addr2)
 comparev(addr1:size1, addr2:size2, addr3:size3) - compare two memory addresses with certain sizes and store the result in a special memory address (0 = equal, 1 = addr1 > addr2, 2 = addr1 < addr2)
 isequal(val, addr1:size1, addr2:size2) - check if a value is equal to a memory address with a certain size and store the result in a special memory address (0 = not equal, 1 = equal)
@@ -60,11 +64,12 @@ shl(addr1:size1, addr2:size2, addr3:size3) - perform a bitwise shift left operat
 shr(addr1:size1, addr2:size2, addr3:size3) - perform a bitwise shift right operation on a memory address with a certain size and store it in another memory address with a certain size (you can use the same memory address for both the input and output)
 subroutine(cur) - call a subroutine at a certain position in the program
 return - return from a subroutine
-if(addr:size, cur) - if the value of a memory address with a certain size is not 0, jump to a certain position in the program
-ifnot(addr:size, cur) - if the value of a memory address with a certain size is 0, jump to a certain position in the program
-ifsubroutine(addr:size, cur) - if the value of a memory address with a certain size is not 0, call a subroutine at a certain position in the program
-ifnotsubroutine(addr:size, cur) - if the value of a memory address with a certain size is 0, call a subroutine at a certain position in the program
+if(addr1:size1, addr2:size2) - if the value of a memory address with a certain size is not 0, jump to the cursor index stored in another memory address
+ifnot(addr1:size1, addr2:size2) - if the value of a memory address with a certain size is 0, jump to the cursor index stored in another memory address
+ifsubroutine(addr1:size1, addr2:size2) - if the value of a memory address with a certain size is not 0, call a subroutine at the cursor index stored in another memory address
+ifnotsubroutine(addr1:size1, addr2:size2) - if the value of a memory address with a certain size is 0, call a subroutine at the cursor index stored in another memory address
 sleep(ms) - sleep for a certain amount of milliseconds
+gettime(addr:size) - get the current time and store it in a memory address with a certain size
 exit - exit the program
 '''
 
@@ -159,6 +164,10 @@ while running and cur < len(program):
                     canvas.create_rectangle(x*10, y*10, x*10+10, y*10+10, fill="white", outline="")
     if program[cur] == "#":
         tok = readuntil(program, cur, "#")
+        cur += len(tok) + 1
+        continue
+    if program[cur] == "-":
+        tok = readuntil(program, cur, "-")
         cur += len(tok) + 1
         continue
     tok = readuntilcutoff(program, cur)
@@ -732,6 +741,56 @@ while running and cur < len(program):
         tok = readuntil(program, cur, ")")
         cur += len(tok)
         cur = int(tok)
+    if tok == "setcurv":
+        cur += 1
+        tok = readuntil(program, cur, ":")
+        cur += len(tok)
+        addr = int(tok)
+
+        cur += 1
+        tok = readuntil(program, cur, ")")
+        cur += len(tok)
+        size = int(tok)
+
+        cur = get_val(mem, addr, size)
+    if tok == "getcur":
+        cur += 1
+        tok = readuntil(program, cur, ":")
+        cur += len(tok)
+        addr = int(tok)
+
+        cur += 1
+        tok = readuntil(program, cur, ")")
+        cur += len(tok)
+        size = int(tok)
+
+        cur += 2
+
+        set_val(mem, addr, cur, size)
+    if tok == "getkeyword":
+        cur += 1
+        tok = readuntil(program, cur, ",")
+        cur += len(tok)
+        keyword = f"-{tok}-"
+
+        cur += 1
+        tok = readuntil(program, cur, ":")
+        cur += len(tok)
+        addr = int(tok)
+
+        cur += 1
+        tok = readuntil(program, cur, ")")
+        cur += len(tok)
+        size = int(tok)
+
+        cur += 2
+
+        try:
+            target = program.index(keyword)
+        except:
+            target = 0
+
+        set_val(mem, addr, target, size) 
     if tok == "compare":
         cur += 1
         tok = readuntil(program, cur, ",")
@@ -1177,14 +1236,19 @@ while running and cur < len(program):
         size = int(tok)
 
         cur += 1
+        tok = readuntil(program, cur, ":")
+        cur += len(tok)
+        addr2 = int(tok)
+
+        cur += 1
         tok = readuntil(program, cur, ")")
         cur += len(tok)
-        target = int(tok)
+        size2 = int(tok)
 
         cur += 2
 
         if get_val(mem, addr, size) != 0:
-            cur = target
+            cur = get_val(mem, addr2, size2)
     if tok == "ifnot":
         cur += 1
         tok = readuntil(program, cur, ":")
@@ -1197,14 +1261,19 @@ while running and cur < len(program):
         size = int(tok)
 
         cur += 1
+        tok = readuntil(program, cur, ":")
+        cur += len(tok)
+        addr2 = int(tok)
+
+        cur += 1
         tok = readuntil(program, cur, ")")
         cur += len(tok)
-        target = int(tok)
+        size2 = int(tok)
 
         cur += 2
 
         if get_val(mem, addr, size) == 0:
-            cur = target
+            cur = get_val(mem, addr2, size2)
     if tok == "ifsubroutine":
         cur += 1
         tok = readuntil(program, cur, ":")
@@ -1217,15 +1286,20 @@ while running and cur < len(program):
         size = int(tok)
 
         cur += 1
+        tok = readuntil(program, cur, ":")
+        cur += len(tok)
+        addr2 = int(tok)
+
+        cur += 1
         tok = readuntil(program, cur, ")")
         cur += len(tok)
-        target = int(tok)
+        size2 = int(tok)
 
         cur += 2
 
         if get_val(mem, addr, size) != 0:
             nextreturn = cur
-            cur = target
+            cur = get_val(mem, addr2, size2)
     if tok == "ifnotsubroutine":
         cur += 1
         tok = readuntil(program, cur, ":")
@@ -1238,15 +1312,20 @@ while running and cur < len(program):
         size = int(tok)
 
         cur += 1
+        tok = readuntil(program, cur, ":")
+        cur += len(tok)
+        addr2 = int(tok)
+
+        cur += 1
         tok = readuntil(program, cur, ")")
         cur += len(tok)
-        target = int(tok)
+        size2 = int(tok)
 
         cur += 2
 
         if get_val(mem, addr, size) == 0:
             nextreturn = cur
-            cur = target
+            cur = get_val(mem, addr2, size2)
     if tok == "sleep":
         cur += 1
         tok = readuntil(program, cur, ")")
@@ -1256,5 +1335,19 @@ while running and cur < len(program):
         cur += 2
 
         time.sleep(ms / 1000)
+    if tok == "gettime":
+        cur += 1
+        tok = readuntil(program, cur, ":")
+        cur += len(tok)
+        addr = int(tok)
+
+        cur += 1
+        tok = readuntil(program, cur, ")")
+        cur += len(tok)
+        size = int(tok)
+
+        cur += 2
+
+        set_val(mem, addr, int(time.time() * 1000), size)
     if tok == "exit":
         running = False
