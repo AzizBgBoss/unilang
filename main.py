@@ -62,7 +62,7 @@ xor(addr1:size1, addr2:size2, addr3:size3) - perform a bitwise XOR operation on 
 xnor(addr1:size1, addr2:size2, addr3:size3) - perform a bitwise XNOR operation on two memory addresses with certain sizes and store it in another memory address with a certain size (you can use the same memory address for both the input and output)
 shl(addr1:size1, addr2:size2, addr3:size3) - perform a bitwise shift left operation on a memory address with a certain size and store it in another memory address with a certain size (you can use the same memory address for both the input and output)
 shr(addr1:size1, addr2:size2, addr3:size3) - perform a bitwise shift right operation on a memory address with a certain size and store it in another memory address with a certain size (you can use the same memory address for both the input and output)
-subroutine(cur) - call a subroutine at a certain position in the program
+subroutine(addr:size) - call a subroutine at the cursor index stored in a memory address
 return - return from a subroutine
 if(addr1:size1, addr2:size2) - if the value of a memory address with a certain size is not 0, jump to the cursor index stored in another memory address
 ifnot(addr1:size1, addr2:size2) - if the value of a memory address with a certain size is 0, jump to the cursor index stored in another memory address
@@ -70,6 +70,7 @@ ifsubroutine(addr1:size1, addr2:size2) - if the value of a memory address with a
 ifnotsubroutine(addr1:size1, addr2:size2) - if the value of a memory address with a certain size is 0, call a subroutine at the cursor index stored in another memory address
 sleep(ms) - sleep for a certain amount of milliseconds
 gettime(addr:size) - get the current time and store it in a memory address with a certain size
+getmemsize(addr:size) - get the size of memory in bits and store it in a memory address with a certain size
 exit - exit the program
 '''
 
@@ -77,7 +78,7 @@ import random
 import sys
 import time
 
-memsize = 1024 * 8 * 16
+memsize = 1024 * 8
 supportedFlags = [[0] * 16] * 16
 
 supportedFlags[0][0] = 1 # disabling graphics is ofc supported
@@ -729,9 +730,12 @@ while running and cur < len(program):
     if tok == "cur":
         print(cur)
     if tok == "memory":
-        for i in range(memsize):
-            print(get_bit(mem, i), end = "")
-        print()
+        columns = 10
+        print("    |" + "".join(str(i) for i in range(columns)))
+        print("-" * (5 + columns))
+        for row in range(0, memsize, columns):
+            bits = "".join(str(get_bit(mem, i)) for i in range(row, min(row + columns, memsize)))
+            print(f"{row // columns:<4}|{bits:<{columns}}")
     if tok == "flags":
         for i in range(16 * 16 * 4):
             print(get_bit(flags, i), end = "")
@@ -1218,10 +1222,19 @@ while running and cur < len(program):
         set_val(mem, addr3, result, size3)
     if tok == "subroutine":
         cur += 1
+        tok = readuntil(program, cur, ":")
+        cur += len(tok)
+        addr = int(tok)
+
+        cur += 1
         tok = readuntil(program, cur, ")")
         cur += len(tok)
-        nextreturn = cur + 1
-        cur = int(tok)
+        size = int(tok)
+
+        cur += 2
+
+        nextreturn = cur
+        cur = get_val(mem, addr, size)
     if tok == "return":
         cur = nextreturn
     if tok == "if":
@@ -1349,5 +1362,19 @@ while running and cur < len(program):
         cur += 2
 
         set_val(mem, addr, int(time.time() * 1000), size)
+    if tok == "getmemsize":
+        cur += 1
+        tok = readuntil(program, cur, ":")
+        cur += len(tok)
+        addr = int(tok)
+
+        cur += 1
+        tok = readuntil(program, cur, ")")
+        cur += len(tok)
+        size = int(tok)
+
+        cur += 2
+
+        set_val(mem, addr, memsize, size)
     if tok == "exit":
         running = False

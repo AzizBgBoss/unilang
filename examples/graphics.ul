@@ -1,6 +1,36 @@
+getkeyword(start, 1:32)
 isflagsupported(0, 1, 0:1)
-if(0:1, 94)
+if(0:1, 1:32)
 print("This computer does not support graphics.")
 exit
+
+-start-
 print("This computer supports graphics.")
-exit
+flag[0]=1
+
+#
+0:16 - parameter 1
+16:16 - parameter 2
+32:16 - parameter 3
+48:32 - drawpixel address
+#
+
+getkeyword(drawpixel, 48:32)
+getcur(112:32)
+mem[0:16]=0
+mem[16:16]=0
+mem[32:16]=1
+subroutine(48:32)
+memory
+sleep(1000)
+setcurv(112:32)
+
+-drawpixel-
+getmemsize(80:32)
+sub(1, 80:32, 80:32)
+out(80:32)
+subv(0:16, 80:32, 80:32)
+mul(64, 16:16, 16:16)
+subv(16:16, 80:32, 80:32)
+setmem(32:16, 80:32)
+return
