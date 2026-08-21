@@ -1,0 +1,6 @@
+print("Hello world!");
+print("Say your name: ");
+input(8, 0:8);
+printn("Nice to meet you, ");
+printvn(8, 0:8);
+print("!");
