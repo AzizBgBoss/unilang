@@ -22,7 +22,7 @@ Commands:
 flag[n]=val - set the value of a flag with a certain index to a 4-bit value
 isflagsupported(n, val, addr:size) - check if a flag with a certain index is supported (changes based on platforms)
 mem[addr:size]=val - set the value of a memory address with a certain size
-setmem(addr1:size1, addr2:size2) - set the value of a memory address with a certain size to the value of another memory address with a certain size
+setmem(addr1:size1, addr2:size2) - copy the value of the variable at the address stored in addr1 to the variable at the address stored in addr2. the size of the addresses stored in addr1 and addr2 must be 32, the size of the target variables can change
 outc(addr:size) - output the character of a memory address with a certain size
 out(addr:size) - output the value of a memory address with a certain size
 input(chars, addr:size) - read a certain amount of characters and store them in memory
@@ -71,7 +71,7 @@ import random
 import sys
 import time
 
-memsize = 1024 * 4
+memsize = 1024 * 8 * 16
 supportedFlags = [[0] * 16] * 16
 
 supportedFlags[0][0] = 1 # disabling graphics is ofc supported
@@ -154,7 +154,7 @@ while running and cur < len(program):
         canvas.delete("all")
         for x in range(64):
             for y in range(64):
-                if get_bit(mem, memsize - x * 64 - y - 1):
+                if get_bit(mem, memsize - x - y * 64 - 1):
                     canvas.create_rectangle(x*10, y*10, x*10+10, y*10+10, fill="white", outline="")
     if program[cur] == "#":
         tok = readuntil(program, cur, "#")
@@ -255,7 +255,7 @@ while running and cur < len(program):
         
         cur += 2
         
-        set_val(mem, addr1, get_val(mem, addr2, size2), size1)
+        set_val(mem, get_val(mem, addr1, 32), get_val(mem, get_val(mem, addr2, 32), size2), size1)
     if tok == "outc":
         cur += 1
         tok = readuntil(program, cur, ":")
