@@ -23,6 +23,7 @@ flag[n]=val - set the value of a flag with a certain index to a 4-bit value
 isflagsupported(n, val, addr:size) - check if a flag with a certain index is supported (changes based on platforms)
 mem[addr:size]=val - set the value of a memory address with a certain size
 setmem(addr1:size1, addr2:size2) - copy the value of the variable at the address stored in addr1 to the variable at the address stored in addr2. the size of the addresses stored in addr1 and addr2 must be 32, the size of the target variables can change
+write("text", addr:size) - write text to a memory address with a certain size
 outc(addr:size) - output the character of a memory address with a certain size
 out(addr:size) - output the value of a memory address with a certain size
 input(chars, addr:size) - read a certain amount of characters and store them in memory
@@ -256,6 +257,27 @@ while running and cur < len(program):
         cur += 2
         
         set_val(mem, get_val(mem, addr1, 32), get_val(mem, get_val(mem, addr2, 32), size2), size1)
+    if tok == "write":
+        cur += 2
+        tok = readuntil(program, cur, "\"")
+        cur += len(tok)
+        text = tok
+
+        cur += 2
+        tok = readuntil(program, cur, ":")
+        cur += len(tok)
+        addr = int(tok)
+        
+        cur += 1
+        tok = readuntil(program, cur, ")")
+        cur += len(tok)
+        size = int(tok)
+        
+        cur += 2
+        
+        for i in range(len(text)):
+            set_val(mem, addr + i * size, ord(text[i]), size)
+
     if tok == "outc":
         cur += 1
         tok = readuntil(program, cur, ":")
