@@ -240,7 +240,7 @@ while running and cur < len(program):
         cur += len(tok)
         val = int(tok)
         
-        cur += 2
+        cur += 1
         
         set_val(mem, addr, val, size)
     if tok == "setmem":
@@ -266,7 +266,7 @@ while running and cur < len(program):
         
         cur += 2
         
-        set_val(mem, get_val(mem, addr1, 32), get_val(mem, get_val(mem, addr2, 32), size2), size1)
+        set_val(mem, get_val(mem, addr2, 32), get_val(mem, get_val(mem, addr1, 32), size1), size2)
     if tok == "write":
         cur += 2
         tok = readuntil(program, cur, "\"")

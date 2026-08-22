@@ -17,8 +17,8 @@ flag[0]=1
 
 getkeyword(drawpixel, 48:32)
 getcur(112:32)
-mem[0:16]=0
-mem[16:16]=0
+mem[0:16]=1
+mem[16:16]=1
 mem[32:16]=1
 subroutine(48:32)
 memory
@@ -29,8 +29,9 @@ setcurv(112:32)
 getmemsize(80:32)
 sub(1, 80:32, 80:32)
 out(80:32)
-subv(0:16, 80:32, 80:32)
+subv(80:32, 0:16, 80:32)
 mul(64, 16:16, 16:16)
-subv(16:16, 80:32, 80:32)
-setmem(32:16, 80:32)
+subv(80:32, 16:16, 80:32)
+mem[144:32]=32
+setmem(144:16, 80:1)
 return
