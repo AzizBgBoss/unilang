@@ -41,8 +41,8 @@ setcurv(112:32)
 -drawpixel-
 
 getmemsize(80:32)
-sub(4105, 80:32, 144:32)
-sub(9, 80:32, 80:32)
+sub(4104, 80:32, 144:32)
+sub(8, 80:32, 80:32)
 setmem(144:8, 80:8)
 return
 
