@@ -8,6 +8,7 @@ Tips:
 - 1 bit variables are good for boolean values, 8 bit variables are good for characters, and 32 bit variables are good for integers
 - 2-bit ranges are 0-3, 4-bit ranges are 0-15, 8-bit ranges are 0-255, 16-bit ranges are 0-65535, and 32-bit ranges are 0-4294967295
 - flags are special 1-bit variables that can be used for custom features
+
 - flag 0 (graphics) (this will consume the last n bits of memory):
 0 - disable graphics
 1 - enable monochrome graphics (64x64) (1 x 64 x 64 = 4096 bits = 512 bytes)
@@ -16,6 +17,11 @@ Tips:
 4 - enable monochrome graphics (128x64) (1 x 128 x 64 = 8192 bits = 1024 bytes)
 5 - enable 4-shade grayscale graphics (128x64) (4 x 128 x 64 = 32768 bits = 4096 bytes)
 6 - enable 8-bit color graphics (128x64) (8 x 128 x 64 = 65536 bits = 8192 bytes)
+
+- flag 1 (keyboard) (this will consume the last n bits of memory (after graphics if it's used)) (Only gets supported once graphics are supported and on):
+0 - disable keyboard
+1 - NES style keyboard (Up + Down + Left + Right + A + B + select + start) (1 x 8 = 8 bits)
+On keyboard: (Up + Down + Left + Right + C + V + Backspace + Enter)
 
 Commands:
 #...# - comment
@@ -82,7 +88,20 @@ memsize = 1024 * 8
 supportedFlags = [[0] * 16] * 16
 
 supportedFlags[0][0] = 1 # disabling graphics is ofc supported
-supportedFlags[0][1] = 1 # 64x64@1
+supportedFlags[1][0] = 1 # disabling keyboard is ofc supported
+
+try:
+    import pygame
+    if memsize >= 64 * 64:
+        supportedFlags[0][1] = 1 # 64x64@1
+        if memsize == 64 * 64:
+            print("Warning: The memory size fits perfectly for 64x64@1 graphics. But will not allow for more variables without graphical issues.")
+    else:
+        supportedFlags[0][1] = 0
+        print(f"Graphics not supported because the memory size is too small ({memsize} bits, 64x64@1 requires at least {64 * 64} bits).")
+except:
+    pygame = None
+    print("Pygame not installed. Graphics and keyboard (flag 0-1) will not be supported.")
 
 print(f"Starting unilang interpreter with {memsize} bits of memory ({memsize // 8} bytes)...\n")
 
@@ -144,25 +163,86 @@ mem = bytearray(memsize // 8)
 flags = bytearray(16 * 16 // 8)
 
 nextreturn = 0
+graphics_screen = None
+usedram = 0 # the amount of bits used by special flags from the right
+keyboard_state = 0
 
-import tkinter as tk
+def initialize_graphics():
+    global graphics_screen, usedram
+    if pygame is not None and graphics_screen is None:
+        pygame.init()
+        graphics_screen = pygame.display.set_mode((64 * 10, 64 * 10))
+        supportedFlags[1][1] = 1 # NES is now supported
+        usedram += 64 * 64
 
-def on_close():
-    global running
-    running = False
+def shutdown_graphics():
+    global graphics_screen, usedram, keyboard_state
+    if pygame is not None and graphics_screen is not None:
+        pygame.display.quit()
+        graphics_screen = None
+        keyboard_state = 0
+        supportedFlags[1][1] = 0
+        set_val(flags, 1 * 4, 0, 4)
+        usedram -= 64 * 64
+
+def update_graphics():
+    global running, keyboard_state
+    if graphics_screen is None:
+        return
+
+    key_masks = {
+        pygame.K_UP: 0x80,
+        pygame.K_DOWN: 0x40,
+        pygame.K_LEFT: 0x20,
+        pygame.K_RIGHT: 0x10,
+        pygame.K_c: 0x08,
+        pygame.K_v: 0x04,
+        pygame.K_BACKSPACE: 0x02,
+        pygame.K_RETURN: 0x01,
+    }
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+            return
+        if event.type == pygame.KEYDOWN:
+            keyboard_state |= key_masks.get(event.key, 0)
+        if event.type == pygame.KEYUP:
+            keyboard_state &= ~key_masks.get(event.key, 0)
+
+    graphics_screen.fill((0, 0, 0))
+    for x in range(64):
+        for y in range(64):
+            if get_bit(mem, memsize - x - y * 64 - 1):
+                pygame.draw.rect(graphics_screen, (255, 255, 255), (x * 10, y * 10, 10, 10))
+    pygame.display.flip()
+
+def update_keyboard():
+    global keyboard_state
+    if pygame is None or graphics_screen is None:
+        return
+
+    pygame.event.pump()
+    keys = pygame.key.get_pressed()
+    held_state = (
+        keys[pygame.K_UP] << 7 |
+        keys[pygame.K_DOWN] << 6 |
+        keys[pygame.K_LEFT] << 5 |
+        keys[pygame.K_RIGHT] << 4 |
+        keys[pygame.K_c] << 3 |
+        keys[pygame.K_v] << 2 |
+        keys[pygame.K_BACKSPACE] << 1 |
+        keys[pygame.K_RETURN]
+    )
+    keyboard_state |= held_state
+    set_val(mem, memsize - usedram - 8, keyboard_state, 8)
 
 while running and cur < len(program):
-    if get_val(flags, 0, 4) == 1:
-        try:
-            root.update()
-        except tk.TclError:
-            running = False
+    if get_val(flags, 0 * 4, 4) == 1:
+        update_graphics()
+        if not running:
             break
-        canvas.delete("all")
-        for x in range(64):
-            for y in range(64):
-                if get_bit(mem, memsize - x - y * 64 - 1):
-                    canvas.create_rectangle(x*10, y*10, x*10+10, y*10+10, fill="white", outline="")
+    if get_val(flags, 1 * 4, 4) == 1:
+        update_keyboard()
     if program[cur] == "#":
         tok = readuntil(program, cur, "#")
         cur += len(tok) + 1
@@ -187,18 +267,16 @@ while running and cur < len(program):
         cur += len(tok)
         val = int(tok)
 
-        cur += 2
+        while cur < len(program) and program[cur] in ";\n":
+            cur += 1
 
         if flag == 0:
             if val == 1:
                 if get_val(flags, flag * 4, 4) == 0:
-                    root = tk.Tk()
-                    root.protocol("WM_DELETE_WINDOW", lambda: on_close())
-                    canvas = tk.Canvas(root, width=64*10, height=64*10, bg="black")
-                    canvas.pack()
+                    initialize_graphics()
             if val == 0:
-                if get_val(flags, flag * 4, 4) != 0:
-                    root.destroy()
+                if pygame is not None and get_val(flags, flag * 4, 4) != 0:
+                    shutdown_graphics()
         set_val(flags, flag * 4, val, 4)
     if tok == "isflagsupported":
         cur += 1
@@ -730,8 +808,8 @@ while running and cur < len(program):
     if tok == "cur":
         print(cur)
     if tok == "memory":
-        columns = 10
-        print("    |" + "".join(str(i) for i in range(columns)))
+        columns = 16
+        print("    |" + "".join(hex(i) for i in range(columns)))
         print("-" * (5 + columns))
         for row in range(0, memsize, columns):
             bits = "".join(str(get_bit(mem, i)) for i in range(row, min(row + columns, memsize)))
@@ -1378,3 +1456,6 @@ while running and cur < len(program):
         set_val(mem, addr, memsize, size)
     if tok == "exit":
         running = False
+
+if pygame is not None:
+    pygame.quit()
