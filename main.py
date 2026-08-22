@@ -224,14 +224,14 @@ def update_keyboard():
     pygame.event.pump()
     keys = pygame.key.get_pressed()
     held_state = (
-        keys[pygame.K_UP] << 7 |
-        keys[pygame.K_DOWN] << 6 |
-        keys[pygame.K_LEFT] << 5 |
-        keys[pygame.K_RIGHT] << 4 |
-        keys[pygame.K_c] << 3 |
-        keys[pygame.K_v] << 2 |
-        keys[pygame.K_BACKSPACE] << 1 |
-        keys[pygame.K_RETURN]
+        keys[pygame.K_UP] |
+        keys[pygame.K_DOWN] << 1 |
+        keys[pygame.K_LEFT] << 2 |
+        keys[pygame.K_RIGHT] << 3 |
+        keys[pygame.K_c] << 4 |
+        keys[pygame.K_v] << 5 |
+        keys[pygame.K_BACKSPACE] << 6 |
+        keys[pygame.K_RETURN] << 7
     )
     keyboard_state |= held_state
     set_val(mem, memsize - usedram - 8, keyboard_state, 8)
