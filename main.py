@@ -27,6 +27,7 @@ Operand encoding conventions (all big-endian):
 1 - NES style keyboard (Up + Down + Left + Right + A + B + select + start) (1 x 8 = 8 bits)
 On keyboard: (Up + Down + Left + Right + C + V + Backspace + Enter)
 
+0x00 (nop)              none                                           - do nothing (padding/alignment)
 0x01 (flag)             flag(1), val(1)                                - set the value of a flag with a certain index to a 4-bit value
 0x02 (isflagsupported)  flag(1), val(1), addr(4), size(1)              - check if a flag with a certain index is supported (changes based on platforms)
 0x03 (mem)              addr(4), size(1), val(4)                       - set the value of a memory address with a certain size
@@ -39,7 +40,7 @@ On keyboard: (Up + Down + Left + Right + C + V + Backspace + Enter)
 0x0A (printn)           text(0)                                        - print text without a newline
 0x0B (printv)           chars(4), addr(4), size(1)                     - print a certain amount of characters from memory
 0x0C (printvn)          chars(4), addr(4), size(1)                     - print a certain amount of characters from memory without a newline
-0x0D (rand)             addr(4), size(1)                               - set a memory address with a certain size to a random value
+0x0D (rand)             min(4), max(4), addr(4), size(1)              - set a memory address with a certain size to a random value between min and max (exclusive)
 0x0E (add)              val(4), addr1(4), size1(1), addr2(4)           - add a value to a memory address with a certain size and store it in another memory address
 0x0F (addv)             addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - add two memory addresses with certain sizes and store it in another memory address
 0x10 (sub)              val(4), addr1(4), size1(1), addr2(4)           - subtract a value from a memory address with a certain size and store it in another memory address
@@ -53,13 +54,10 @@ On keyboard: (Up + Down + Left + Right + C + V + Backspace + Enter)
 0x18 (cur)              none                                           - print the current position in the bytecode
 0x19 (memory)           none                                           - print the current state of memory
 0x1A (flags)            none                                           - print the current state of flags
-0x1B (setcur)           pos(4)                                         - set the current position in the bytecode
-0x1C (setcurv)          addr(4), size(1)                               - set the current position in the bytecode to the value of a memory address
-0x1D (getcur)           addr(4), size(1)                               - get the current position in the bytecode and store it in a memory address
-0x1E (getkeyword)       pos(4), addr(4), size(1)                       - store a resolved keyword position (resolved at assembly time) in a memory address
+0x1B (setpc)            pos(4)                                         - set the program counter to a fixed bytecode position
 0x1F (compare)          val(4), addr1(4), size1(1)                     - compare a value to a memory address with a certain size and store the result in a special memory address (0 = equal, 1 = val > addr1, 2 = val < addr1)
 0x20 (comparev)         addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - compare two memory addresses with certain sizes and store the result in a memory address (0 = equal, 1 = addr1 > addr2, 2 = addr1 < addr2)
-0x21 (isequal)          val(4), addr1(4), size1(1), addr2(4)           - check if a value is equal to a memory address with a certain size and store the result (0 or 1) in another memory address
+0x21 (isequal)          val(4), addr1(4), size1(1), addr2(4)           - check if a value is equal to a memory address with a certain size and store the result (0 or 1) in another memory address (size 1)
 0x22 (not)              addr1(4), size1(1), addr2(4), size2(1)         - flip the bits of a memory address with a certain size and store it in another memory address
 0x23 (or)               addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - perform a bitwise OR on two memory addresses and store it in another memory address
 0x24 (and)              addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - perform a bitwise AND on two memory addresses and store it in another memory address
@@ -69,12 +67,12 @@ On keyboard: (Up + Down + Left + Right + C + V + Backspace + Enter)
 0x28 (xnor)             addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - perform a bitwise XNOR on two memory addresses and store it in another memory address
 0x29 (shl)              addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - perform a bitwise shift left on a memory address and store it in another memory address
 0x2A (shr)              addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - perform a bitwise shift right on a memory address and store it in another memory address
-0x2B (subroutine)       addr(4), size(1)                               - call a subroutine at the position stored in a memory address
+0x2B (subroutine)       pos(4)                                         - call a subroutine at a fixed bytecode position
 0x2C (return)           none                                           - return from a subroutine
-0x2D (if)               addr(4), size(1), addr2(4), size2(1)           - if the value of a memory address is not 0, jump to the position stored in another memory address
-0x2E (ifnot)            addr(4), size(1), addr2(4), size2(1)           - if the value of a memory address is 0, jump to the position stored in another memory address
-0x2F (ifsubroutine)     addr(4), size(1), addr2(4), size2(1)           - if the value of a memory address is not 0, call a subroutine at the position stored in another memory address
-0x30 (ifnotsubroutine)  addr(4), size(1), addr2(4), size2(1)           - if the value of a memory address is 0, call a subroutine at the position stored in another memory address
+0x2D (if)               addr(4), size(1), pos(4)                       - if the value of a memory address is not 0, jump to a fixed bytecode position
+0x2E (ifnot)            addr(4), size(1), pos(4)                       - if the value of a memory address is 0, jump to a fixed bytecode position
+0x2F (ifsubroutine)     addr(4), size(1), pos(4)                       - if the value of a memory address is not 0, call a subroutine at a fixed bytecode position
+0x30 (ifnotsubroutine)  addr(4), size(1), pos(4)                       - if the value of a memory address is 0, call a subroutine at a fixed bytecode position
 0x31 (sleep)            ms(4)                                          - sleep for a certain amount of milliseconds
 0x32 (gettime)          addr(4), size(1)                               - get the current time and store it in a memory address
 0x33 (getmemsize)       addr(4), size(1)                               - get the size of memory in bits and store it in a memory address
@@ -87,6 +85,7 @@ import time
 
 # commandname: {"byte": the opcode byte, "operands": number of operands, "sizes": byte width of each operand (0 = length-prefixed text)}
 op_codes = {
+    "nop":              {"byte": 0x00, "operands": 0, "sizes": []},
     "flag":             {"byte": 0x01, "operands": 2, "sizes": [1, 1]},              # flag, val
     "isflagsupported":  {"byte": 0x02, "operands": 4, "sizes": [1, 1, 4, 1]},        # flag, val, addr, size
     "mem":              {"byte": 0x03, "operands": 3, "sizes": [4, 1, 4]},           # addr, size, val
@@ -99,7 +98,7 @@ op_codes = {
     "printn":           {"byte": 0x0A, "operands": 1, "sizes": [0]},                 # text
     "printv":           {"byte": 0x0B, "operands": 3, "sizes": [4, 4, 1]},           # chars, addr, size
     "printvn":          {"byte": 0x0C, "operands": 3, "sizes": [4, 4, 1]},           # chars, addr, size
-    "rand":             {"byte": 0x0D, "operands": 2, "sizes": [4, 1]},              # addr, size
+    "rand":             {"byte": 0x0D, "operands": 4, "sizes": [4, 4, 4, 1]},        # min, max, addr, size
     "add":              {"byte": 0x0E, "operands": 4, "sizes": [4, 4, 1, 1]},        # val, addr1, size1, addr2 -- see note
     "addv":             {"byte": 0x0F, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},  # addr1,size1,addr2,size2,addr3,size3
     "sub":              {"byte": 0x10, "operands": 4, "sizes": [4, 4, 1, 4]},
@@ -113,10 +112,7 @@ op_codes = {
     "cur":              {"byte": 0x18, "operands": 0, "sizes": []},
     "memory":           {"byte": 0x19, "operands": 0, "sizes": []},
     "flags":            {"byte": 0x1A, "operands": 0, "sizes": []},
-    "setcur":           {"byte": 0x1B, "operands": 1, "sizes": [4]},                 # pos
-    "setcurv":          {"byte": 0x1C, "operands": 2, "sizes": [4, 1]},              # addr, size
-    "getcur":           {"byte": 0x1D, "operands": 2, "sizes": [4, 1]},              # addr, size
-    "getkeyword":       {"byte": 0x1E, "operands": 3, "sizes": [4, 4, 1]},           # target_pos (resolved by assembler), addr, size
+    "setpc":            {"byte": 0x1B, "operands": 1, "sizes": [4]},                 # pos (fixed)
     "compare":          {"byte": 0x1F, "operands": 4, "sizes": [4, 4, 1, 1]},
     "comparev":         {"byte": 0x20, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
     "isequal":          {"byte": 0x21, "operands": 4, "sizes": [4, 4, 1, 1]},
@@ -129,12 +125,12 @@ op_codes = {
     "xnor":             {"byte": 0x28, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
     "shl":              {"byte": 0x29, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
     "shr":              {"byte": 0x2A, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
-    "subroutine":       {"byte": 0x2B, "operands": 2, "sizes": [4, 1]},              # addr, size
+    "subroutine":       {"byte": 0x2B, "operands": 1, "sizes": [4]},                 # pos (fixed)
     "return":           {"byte": 0x2C, "operands": 0, "sizes": []},
-    "if":               {"byte": 0x2D, "operands": 4, "sizes": [4, 1, 4, 1]},        # addr, size, addr2, size2
-    "ifnot":            {"byte": 0x2E, "operands": 4, "sizes": [4, 1, 4, 1]},
-    "ifsubroutine":     {"byte": 0x2F, "operands": 4, "sizes": [4, 1, 4, 1]},
-    "ifnotsubroutine":  {"byte": 0x30, "operands": 4, "sizes": [4, 1, 4, 1]},
+    "if":               {"byte": 0x2D, "operands": 3, "sizes": [4, 1, 4]},           # addr, size, pos (fixed)
+    "ifnot":            {"byte": 0x2E, "operands": 3, "sizes": [4, 1, 4]},
+    "ifsubroutine":     {"byte": 0x2F, "operands": 3, "sizes": [4, 1, 4]},
+    "ifnotsubroutine":  {"byte": 0x30, "operands": 3, "sizes": [4, 1, 4]},
     "sleep":            {"byte": 0x31, "operands": 1, "sizes": [4]},                 # ms
     "gettime":          {"byte": 0x32, "operands": 2, "sizes": [4, 1]},              # addr, size
     "getmemsize":       {"byte": 0x33, "operands": 2, "sizes": [4, 1]},              # addr, size
@@ -312,7 +308,10 @@ while running and pc < len(bytecode):
     sizes = op_codes[cmd]["sizes"]
     operands, pc = read_operands(bytecode, pc, sizes)
 
-    if cmd == "flag":
+    if cmd == "nop":
+        pass
+
+    elif cmd == "flag":
         flag, val = operands
         if flag == 0:
             if val == 1:
@@ -374,8 +373,8 @@ while running and pc < len(bytecode):
             print(chr(get_val(mem, addr + i * size, size)), end="")
 
     elif cmd == "rand":
-        addr, size = operands
-        set_val(mem, addr, random.randint(0, 2 ** size - 1), size)
+        min_val, max_val, addr, size = operands
+        set_val(mem, addr, random.randrange(min_val, max_val), size)
 
     elif cmd == "add":
         val, addr1, size1, addr2 = operands
@@ -440,22 +439,9 @@ while running and pc < len(bytecode):
             print(get_bit(flags, i), end="")
         print()
 
-    elif cmd == "setcur":
+    elif cmd == "setpc":
         pos, = operands
         pc = pos
-
-    elif cmd == "setcurv":
-        addr, size = operands
-        pc = get_val(mem, addr, size)
-
-    elif cmd == "getcur":
-        addr, size = operands
-        set_val(mem, addr, pc, size)
-
-    elif cmd == "getkeyword":
-        target_pos, addr, size = operands
-        # target_pos is resolved to a bytecode offset by the assembler at compile time
-        set_val(mem, addr, target_pos, size)
 
     elif cmd == "compare":
         val, addr1, size1, _pad = operands
@@ -478,9 +464,9 @@ while running and pc < len(bytecode):
     elif cmd == "isequal":
         val, addr1, size1, addr2 = operands
         if val == get_val(mem, addr1, size1):
-            set_val(mem, addr2, 1, size1)
+            set_val(mem, addr2, 1, 1)
         else:
-            set_val(mem, addr2, 0, size1)
+            set_val(mem, addr2, 0, 1)
 
     elif cmd == "not":
         addr1, size1, addr2, size2 = operands
@@ -542,34 +528,34 @@ while running and pc < len(bytecode):
         set_val(mem, addr3, result, size3)
 
     elif cmd == "subroutine":
-        addr, size = operands
+        pos, = operands
         nextreturn = pc
-        pc = get_val(mem, addr, size)
+        pc = pos
 
     elif cmd == "return":
         pc = nextreturn
 
     elif cmd == "if":
-        addr, size, addr2, size2 = operands
+        addr, size, pos = operands
         if get_val(mem, addr, size) != 0:
-            pc = get_val(mem, addr2, size2)
+            pc = pos
 
     elif cmd == "ifnot":
-        addr, size, addr2, size2 = operands
+        addr, size, pos = operands
         if get_val(mem, addr, size) == 0:
-            pc = get_val(mem, addr2, size2)
+            pc = pos
 
     elif cmd == "ifsubroutine":
-        addr, size, addr2, size2 = operands
+        addr, size, pos = operands
         if get_val(mem, addr, size) != 0:
             nextreturn = pc
-            pc = get_val(mem, addr2, size2)
+            pc = pos
 
     elif cmd == "ifnotsubroutine":
-        addr, size, addr2, size2 = operands
+        addr, size, pos = operands
         if get_val(mem, addr, size) == 0:
             nextreturn = pc
-            pc = get_val(mem, addr2, size2)
+            pc = pos
 
     elif cmd == "sleep":
         ms, = operands
