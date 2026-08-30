@@ -99,7 +99,7 @@ op_codes = {
     "printv":           {"byte": 0x0B, "operands": 3, "sizes": [4, 4, 1]},           # chars, addr, size
     "printvn":          {"byte": 0x0C, "operands": 3, "sizes": [4, 4, 1]},           # chars, addr, size
     "rand":             {"byte": 0x0D, "operands": 4, "sizes": [4, 4, 4, 1]},        # min, max, addr, size
-    "add":              {"byte": 0x0E, "operands": 4, "sizes": [4, 4, 1, 1]},        # val, addr1, size1, addr2 -- see note
+    "add":              {"byte": 0x0E, "operands": 4, "sizes": [4, 4, 1, 4]},        # val, addr1, size1, addr2
     "addv":             {"byte": 0x0F, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},  # addr1,size1,addr2,size2,addr3,size3
     "sub":              {"byte": 0x10, "operands": 4, "sizes": [4, 4, 1, 4]},
     "subv":             {"byte": 0x11, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
@@ -115,7 +115,7 @@ op_codes = {
     "setpc":            {"byte": 0x1B, "operands": 1, "sizes": [4]},                 # pos (fixed)
     "compare":          {"byte": 0x1F, "operands": 4, "sizes": [4, 4, 1, 1]},
     "comparev":         {"byte": 0x20, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
-    "isequal":          {"byte": 0x21, "operands": 4, "sizes": [4, 4, 1, 1]},
+    "isequal":          {"byte": 0x21, "operands": 4, "sizes": [4, 4, 1, 4]},
     "not":              {"byte": 0x22, "operands": 4, "sizes": [4, 1, 4, 1]},
     "or":               {"byte": 0x23, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
     "and":              {"byte": 0x24, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
