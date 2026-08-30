@@ -1,13 +1,17 @@
 '''
-unilang by AzizBgBoss
+unilang bytecode VM by AzizBgBoss
 https://github.com/AzizBgBoss/unilang
 
-Tips:
-- Use # to add comments that are ignored by the interpreter
-- Sizes are specified in bits
-- 1 bit variables are good for boolean values, 8 bit variables are good for characters, and 32 bit variables are good for integers
-- 2-bit ranges are 0-3, 4-bit ranges are 0-15, 8-bit ranges are 0-255, 16-bit ranges are 0-65535, and 32-bit ranges are 0-4294967295
-- flags are special 1-bit variables that can be used for custom features
+This VM executes compiled unilang bytecode (produced by a separate converter/assembler or written by hand if you hate yourself enough).
+
+Operand encoding conventions (all big-endian):
+  addr  -> 4 bytes (unsigned int)
+  size  -> 1 byte  (bits, 0-255)
+  val   -> 4 bytes (unsigned int)
+  flag  -> 1 byte
+  count -> 4 bytes
+  pos   -> 4 bytes (bytecode offset, used for jumps/subroutines)
+  text  -> 2 byte length prefix, followed by that many raw bytes
 
 - flag 0 (graphics) (this will consume the last n bits of memory):
 0 - disable graphics
@@ -23,66 +27,122 @@ Tips:
 1 - NES style keyboard (Up + Down + Left + Right + A + B + select + start) (1 x 8 = 8 bits)
 On keyboard: (Up + Down + Left + Right + C + V + Backspace + Enter)
 
-Commands:
-#...# - comment
-!...! - keyword (use it to jump to its position in the program)
-flag[n]=val - set the value of a flag with a certain index to a 4-bit value
-isflagsupported(n, val, addr:size) - check if a flag with a certain index is supported (changes based on platforms)
-mem[addr:size]=val - set the value of a memory address with a certain size
-setmem(addr1:size1, addr2:size2) - copy the value of the variable at the address stored in addr1 to the variable at the address stored in addr2. the size of the addresses stored in addr1 and addr2 must be 32, the size of the target variables can change
-write("text", addr:size) - write text to a memory address with a certain size
-outc(addr:size) - output the character of a memory address with a certain size
-out(addr:size) - output the value of a memory address with a certain size
-input(chars, addr:size) - read a certain amount of characters and store them in memory
-print("text") - print text
-printn("text") - print text without a newline
-printv(chars, addr:size) - print a certain amount of characters from memory
-printvn(chars, addr:size) - print a certain amount of characters from memory without a newline
-rand(addr:size) - set a memory address with a certain size to a random value
-add(val, addr1:size1, addr2:size2) - add a value to a memory address with a certain size and store it in another memory address with a certain size (you can use the same memory address for both the input and output)
-addv(addr1:size1, addr2:size2, addr3:size3) - add two memory addresses with certain sizes and store it in another memory address with a certain size (you can use the same memory address for both the input and output)
-sub(val, addr1:size1, addr2:size2) - subtract a value from a memory address with a certain size and store it in another memory address with a certain size (you can use the same memory address for both the input and output)
-subv(addr1:size1, addr2:size2, addr3:size3) - subtract two memory addresses with certain sizes and store it in another memory address with a certain size (you can use the same memory address for both the input and output)
-mul(val, addr1:size1, addr2:size2) - multiply a value with a memory address with a certain size and store it in another memory address with a certain size (you can use the same memory address for both the input and output)
-mulv(addr1:size1, addr2:size2, addr3:size3) - multiply two memory addresses with certain sizes and store it in another memory address with a certain size (you can use the same memory address for both the input and output)
-div(val, addr1:size1, addr2:size2) - divide a memory address with a certain size by a value and store it in another memory address with a certain size (you can use the same memory address for both the input and output)
-divv(addr1:size1, addr2:size2, addr3:size3) - divide two memory addresses with certain sizes and store it in another memory address with a certain size (you can use the same memory address for both the input and output)
-mod(val, addr1:size1, addr2:size2) - get the modulus of a memory address with a certain size by a value and store it in another memory address with a certain size (you can use the same memory address for both the input and output)
-modv(addr1:size1, addr2:size2, addr3:size3) - get the modulus of two memory addresses with certain sizes and store it in another memory address with a certain size (you can use the same memory address for both the input and output)
-cur - print the current position in the program
-memory - print the current state of memory
-flags - print the current state of flags
-setcur(pos) - set the current position in the program
-setcurv(addr:size) - set the current position in the program to the value of a memory address
-getcur(addr:size) - get the current position in the program and store it in a memory address
-getkeyword(keyword, addr:size) - get the cursor index of a keyword to jump to and store it in a memory address
-compare(val, addr1:size1, addr2:size2) - compare a value to a memory address with a certain size and store the result in a special memory address (0 = equal, 1 = val > addr2, 2 = val < addr2)
-comparev(addr1:size1, addr2:size2, addr3:size3) - compare two memory addresses with certain sizes and store the result in a special memory address (0 = equal, 1 = addr1 > addr2, 2 = addr1 < addr2)
-isequal(val, addr1:size1, addr2:size2) - check if a value is equal to a memory address with a certain size and store the result in a special memory address (0 = not equal, 1 = equal)
-not(addr1:size1, addr2:size2) - flip the bits of a memory address with a certain size and store it in another memory address with a certain size (you can use the same memory address for both the input and output)
-or(addr1:size1, addr2:size2, addr3:size3) - perform a bitwise OR operation on two memory addresses with certain sizes and store it in another memory address with a certain size (you can use the same memory address for both the input and output)
-and(addr1:size1, addr2:size2, addr3:size3) - perform a bitwise AND operation on two memory addresses with certain sizes and store it in another memory address with a certain size (you can use the same memory address for both the input and output)
-nor(addr1:size1, addr2:size2, addr3:size3) - perform a bitwise NOR operation on two memory addresses with certain sizes and store it in another memory address with a certain size (you can use the same memory address for both the input and output)
-nand(addr1:size1, addr2:size2, addr3:size3) - perform a bitwise NAND operation on two memory addresses with certain sizes and store it in another memory address with a certain size (you can use the same memory address for both the input and output)
-xor(addr1:size1, addr2:size2, addr3:size3) - perform a bitwise XOR operation on two memory addresses with certain sizes and store it in another memory address with a certain size (you can use the same memory address for both the input and output)
-xnor(addr1:size1, addr2:size2, addr3:size3) - perform a bitwise XNOR operation on two memory addresses with certain sizes and store it in another memory address with a certain size (you can use the same memory address for both the input and output)
-shl(addr1:size1, addr2:size2, addr3:size3) - perform a bitwise shift left operation on a memory address with a certain size and store it in another memory address with a certain size (you can use the same memory address for both the input and output)
-shr(addr1:size1, addr2:size2, addr3:size3) - perform a bitwise shift right operation on a memory address with a certain size and store it in another memory address with a certain size (you can use the same memory address for both the input and output)
-subroutine(addr:size) - call a subroutine at the cursor index stored in a memory address
-return - return from a subroutine
-if(addr1:size1, addr2:size2) - if the value of a memory address with a certain size is not 0, jump to the cursor index stored in another memory address
-ifnot(addr1:size1, addr2:size2) - if the value of a memory address with a certain size is 0, jump to the cursor index stored in another memory address
-ifsubroutine(addr1:size1, addr2:size2) - if the value of a memory address with a certain size is not 0, call a subroutine at the cursor index stored in another memory address
-ifnotsubroutine(addr1:size1, addr2:size2) - if the value of a memory address with a certain size is 0, call a subroutine at the cursor index stored in another memory address
-sleep(ms) - sleep for a certain amount of milliseconds
-gettime(addr:size) - get the current time and store it in a memory address with a certain size
-getmemsize(addr:size) - get the size of memory in bits and store it in a memory address with a certain size
-exit - exit the program
+0x01 (flag)             flag(1), val(1)                                - set the value of a flag with a certain index to a 4-bit value
+0x02 (isflagsupported)  flag(1), val(1), addr(4), size(1)              - check if a flag with a certain index is supported (changes based on platforms)
+0x03 (mem)              addr(4), size(1), val(4)                       - set the value of a memory address with a certain size
+0x04 (setmem)           addr1(4), size1(1), addr2(4), size2(1)         - copy the value of the variable at the address stored in addr1 to the variable at the address stored in addr2. the size of the addresses stored in addr1 and addr2 must be 32, the size of the target variables can change
+0x05 (write)            text(0), addr(4), size(1)                      - write text to a memory address with a certain size
+0x06 (outc)             addr(4), size(1)                               - output the character of a memory address with a certain size
+0x07 (out)              addr(4), size(1)                               - output the value of a memory address with a certain size
+0x08 (input)            chars(4), addr(4), size(1)                     - read a certain amount of characters and store them in memory
+0x09 (print)            text(0)                                        - print text
+0x0A (printn)           text(0)                                        - print text without a newline
+0x0B (printv)           chars(4), addr(4), size(1)                     - print a certain amount of characters from memory
+0x0C (printvn)          chars(4), addr(4), size(1)                     - print a certain amount of characters from memory without a newline
+0x0D (rand)             addr(4), size(1)                               - set a memory address with a certain size to a random value
+0x0E (add)              val(4), addr1(4), size1(1), addr2(4)           - add a value to a memory address with a certain size and store it in another memory address
+0x0F (addv)             addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - add two memory addresses with certain sizes and store it in another memory address
+0x10 (sub)              val(4), addr1(4), size1(1), addr2(4)           - subtract a value from a memory address with a certain size and store it in another memory address
+0x11 (subv)             addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - subtract two memory addresses with certain sizes and store it in another memory address
+0x12 (mul)              val(4), addr1(4), size1(1), addr2(4)           - multiply a value with a memory address with a certain size and store it in another memory address
+0x13 (mulv)             addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - multiply two memory addresses with certain sizes and store it in another memory address
+0x14 (div)              val(4), addr1(4), size1(1), addr2(4)           - divide a memory address with a certain size by a value and store it in another memory address
+0x15 (divv)             addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - divide two memory addresses with certain sizes and store it in another memory address
+0x16 (mod)              val(4), addr1(4), size1(1), addr2(4)           - get the modulus of a memory address with a certain size by a value and store it in another memory address
+0x17 (modv)             addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - get the modulus of two memory addresses with certain sizes and store it in another memory address
+0x18 (cur)              none                                           - print the current position in the bytecode
+0x19 (memory)           none                                           - print the current state of memory
+0x1A (flags)            none                                           - print the current state of flags
+0x1B (setcur)           pos(4)                                         - set the current position in the bytecode
+0x1C (setcurv)          addr(4), size(1)                               - set the current position in the bytecode to the value of a memory address
+0x1D (getcur)           addr(4), size(1)                               - get the current position in the bytecode and store it in a memory address
+0x1E (getkeyword)       pos(4), addr(4), size(1)                       - store a resolved keyword position (resolved at assembly time) in a memory address
+0x1F (compare)          val(4), addr1(4), size1(1)                     - compare a value to a memory address with a certain size and store the result in a special memory address (0 = equal, 1 = val > addr1, 2 = val < addr1)
+0x20 (comparev)         addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - compare two memory addresses with certain sizes and store the result in a memory address (0 = equal, 1 = addr1 > addr2, 2 = addr1 < addr2)
+0x21 (isequal)          val(4), addr1(4), size1(1), addr2(4)           - check if a value is equal to a memory address with a certain size and store the result (0 or 1) in another memory address
+0x22 (not)              addr1(4), size1(1), addr2(4), size2(1)         - flip the bits of a memory address with a certain size and store it in another memory address
+0x23 (or)               addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - perform a bitwise OR on two memory addresses and store it in another memory address
+0x24 (and)              addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - perform a bitwise AND on two memory addresses and store it in another memory address
+0x25 (nor)              addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - perform a bitwise NOR on two memory addresses and store it in another memory address
+0x26 (nand)             addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - perform a bitwise NAND on two memory addresses and store it in another memory address
+0x27 (xor)              addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - perform a bitwise XOR on two memory addresses and store it in another memory address
+0x28 (xnor)             addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - perform a bitwise XNOR on two memory addresses and store it in another memory address
+0x29 (shl)              addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - perform a bitwise shift left on a memory address and store it in another memory address
+0x2A (shr)              addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - perform a bitwise shift right on a memory address and store it in another memory address
+0x2B (subroutine)       addr(4), size(1)                               - call a subroutine at the position stored in a memory address
+0x2C (return)           none                                           - return from a subroutine
+0x2D (if)               addr(4), size(1), addr2(4), size2(1)           - if the value of a memory address is not 0, jump to the position stored in another memory address
+0x2E (ifnot)            addr(4), size(1), addr2(4), size2(1)           - if the value of a memory address is 0, jump to the position stored in another memory address
+0x2F (ifsubroutine)     addr(4), size(1), addr2(4), size2(1)           - if the value of a memory address is not 0, call a subroutine at the position stored in another memory address
+0x30 (ifnotsubroutine)  addr(4), size(1), addr2(4), size2(1)           - if the value of a memory address is 0, call a subroutine at the position stored in another memory address
+0x31 (sleep)            ms(4)                                          - sleep for a certain amount of milliseconds
+0x32 (gettime)          addr(4), size(1)                               - get the current time and store it in a memory address
+0x33 (getmemsize)       addr(4), size(1)                               - get the size of memory in bits and store it in a memory address
+0xFF (exit)             none                                           - exit the program
 '''
 
 import random
 import sys
 import time
+
+# commandname: {"byte": the opcode byte, "operands": number of operands, "sizes": byte width of each operand (0 = length-prefixed text)}
+op_codes = {
+    "flag":             {"byte": 0x01, "operands": 2, "sizes": [1, 1]},              # flag, val
+    "isflagsupported":  {"byte": 0x02, "operands": 4, "sizes": [1, 1, 4, 1]},        # flag, val, addr, size
+    "mem":              {"byte": 0x03, "operands": 3, "sizes": [4, 1, 4]},           # addr, size, val
+    "setmem":           {"byte": 0x04, "operands": 4, "sizes": [4, 1, 4, 1]},        # addr1, size1, addr2, size2
+    "write":            {"byte": 0x05, "operands": 3, "sizes": [0, 4, 1]},           # text, addr, size
+    "outc":             {"byte": 0x06, "operands": 2, "sizes": [4, 1]},              # addr, size
+    "out":              {"byte": 0x07, "operands": 2, "sizes": [4, 1]},              # addr, size
+    "input":            {"byte": 0x08, "operands": 3, "sizes": [4, 4, 1]},           # chars, addr, size
+    "print":            {"byte": 0x09, "operands": 1, "sizes": [0]},                 # text
+    "printn":           {"byte": 0x0A, "operands": 1, "sizes": [0]},                 # text
+    "printv":           {"byte": 0x0B, "operands": 3, "sizes": [4, 4, 1]},           # chars, addr, size
+    "printvn":          {"byte": 0x0C, "operands": 3, "sizes": [4, 4, 1]},           # chars, addr, size
+    "rand":             {"byte": 0x0D, "operands": 2, "sizes": [4, 1]},              # addr, size
+    "add":              {"byte": 0x0E, "operands": 4, "sizes": [4, 4, 1, 1]},        # val, addr1, size1, addr2 -- see note
+    "addv":             {"byte": 0x0F, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},  # addr1,size1,addr2,size2,addr3,size3
+    "sub":              {"byte": 0x10, "operands": 4, "sizes": [4, 4, 1, 4]},
+    "subv":             {"byte": 0x11, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
+    "mul":              {"byte": 0x12, "operands": 4, "sizes": [4, 4, 1, 4]},
+    "mulv":             {"byte": 0x13, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
+    "div":              {"byte": 0x14, "operands": 4, "sizes": [4, 4, 1, 4]},
+    "divv":             {"byte": 0x15, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
+    "mod":              {"byte": 0x16, "operands": 4, "sizes": [4, 4, 1, 4]},
+    "modv":             {"byte": 0x17, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
+    "cur":              {"byte": 0x18, "operands": 0, "sizes": []},
+    "memory":           {"byte": 0x19, "operands": 0, "sizes": []},
+    "flags":            {"byte": 0x1A, "operands": 0, "sizes": []},
+    "setcur":           {"byte": 0x1B, "operands": 1, "sizes": [4]},                 # pos
+    "setcurv":          {"byte": 0x1C, "operands": 2, "sizes": [4, 1]},              # addr, size
+    "getcur":           {"byte": 0x1D, "operands": 2, "sizes": [4, 1]},              # addr, size
+    "getkeyword":       {"byte": 0x1E, "operands": 3, "sizes": [4, 4, 1]},           # target_pos (resolved by assembler), addr, size
+    "compare":          {"byte": 0x1F, "operands": 4, "sizes": [4, 4, 1, 1]},
+    "comparev":         {"byte": 0x20, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
+    "isequal":          {"byte": 0x21, "operands": 4, "sizes": [4, 4, 1, 1]},
+    "not":              {"byte": 0x22, "operands": 4, "sizes": [4, 1, 4, 1]},
+    "or":               {"byte": 0x23, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
+    "and":              {"byte": 0x24, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
+    "nor":              {"byte": 0x25, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
+    "nand":             {"byte": 0x26, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
+    "xor":              {"byte": 0x27, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
+    "xnor":             {"byte": 0x28, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
+    "shl":              {"byte": 0x29, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
+    "shr":              {"byte": 0x2A, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
+    "subroutine":       {"byte": 0x2B, "operands": 2, "sizes": [4, 1]},              # addr, size
+    "return":           {"byte": 0x2C, "operands": 0, "sizes": []},
+    "if":               {"byte": 0x2D, "operands": 4, "sizes": [4, 1, 4, 1]},        # addr, size, addr2, size2
+    "ifnot":            {"byte": 0x2E, "operands": 4, "sizes": [4, 1, 4, 1]},
+    "ifsubroutine":     {"byte": 0x2F, "operands": 4, "sizes": [4, 1, 4, 1]},
+    "ifnotsubroutine":  {"byte": 0x30, "operands": 4, "sizes": [4, 1, 4, 1]},
+    "sleep":            {"byte": 0x31, "operands": 1, "sizes": [4]},                 # ms
+    "gettime":          {"byte": 0x32, "operands": 2, "sizes": [4, 1]},              # addr, size
+    "getmemsize":       {"byte": 0x33, "operands": 2, "sizes": [4, 1]},              # addr, size
+    "exit":             {"byte": 0xFF, "operands": 0, "sizes": []},
+}
+
+# reverse lookup: opcode byte -> command name
+opcode_by_byte = {v["byte"]: k for k, v in op_codes.items()}
 
 memsize = 1024 * 8
 supportedFlags = [[0] * 16] * 16
@@ -103,7 +163,7 @@ except:
     pygame = None
     print("Pygame not installed. Graphics and keyboard (flag 0-1) will not be supported.")
 
-print(f"Starting unilang interpreter with {memsize} bits of memory ({memsize // 8} bytes)...\n")
+print(f"Starting unilang bytecode VM with {memsize} bits of memory ({memsize // 8} bytes)...\n")
 
 def get_bit(mem, addr):
     return (mem[addr // 8] >> (addr % 8)) & 1
@@ -124,41 +184,39 @@ def get_val(mem, addr, size):
     for i in range(size):
         val |= get_bit(mem, addr + i) << (size - i - 1)
     return val
-        
-def readuntil(program, cur, stop):
-    tok = ""
-    while cur < len(program):
-        if program[cur] not in stop:
-            tok += program[cur]
-            cur += 1
-        else:
-            return tok
-    return tok
-            
-def readuntilcutoff(program, cur):
-    tok = ""
-    while cur < len(program):
-        if program[cur] not in cutoffs:
-            tok += program[cur]
-            cur += 1
-        else:
-            return tok
-    return tok
 
-# check for -f flag in command line arguments
+def read_uint(bytecode, pos, nbytes):
+    val = 0
+    for i in range(nbytes):
+        val = (val << 8) | bytecode[pos + i]
+    return val, pos + nbytes
+
+def read_operands(bytecode, pos, sizes):
+    # reads each operand per the opcode's "sizes" list (0 means length-prefixed text)
+    vals = []
+    for width in sizes:
+        if width == 0:
+            length, pos = read_uint(bytecode, pos, 2)
+            text = bytecode[pos:pos + length].decode("utf-8", errors="replace")
+            pos += length
+            vals.append(text)
+        else:
+            val, pos = read_uint(bytecode, pos, width)
+            vals.append(val)
+    return vals, pos
+
+# check for -f flag in command line arguments (now expects a compiled bytecode file)
 if len(sys.argv) > 1 and sys.argv[1] == "-f":
-    with open(sys.argv[2], "r") as f:
-        program = f.read()
+    with open(sys.argv[2], "rb") as f:
+        bytecode = f.read()
 else:
-    program = input(">")
+    print("Usage: main.py -f <compiled bytecode file>")
+    sys.exit(1)
 
-print(program + '\n')
-
-cutoffs = "[];\n()"
+print(f"Loaded {len(bytecode)} bytes of bytecode.\n")
 
 running = True
-cur = 0
-tok = ""
+pc = 0
 mem = bytearray(memsize // 8)
 flags = bytearray(16 * 16 // 8)
 
@@ -236,40 +294,26 @@ def update_keyboard():
     keyboard_state |= held_state
     set_val(mem, memsize - usedram - 8, keyboard_state, 8)
 
-while running and cur < len(program):
+while running and pc < len(bytecode):
     if get_val(flags, 0 * 4, 4) == 1:
         update_graphics()
         if not running:
             break
     if get_val(flags, 1 * 4, 4) == 1:
         update_keyboard()
-    if program[cur] == "#":
-        tok = readuntil(program, cur, "#")
-        cur += len(tok) + 1
-        continue
-    if program[cur] == "-":
-        tok = readuntil(program, cur, "-")
-        cur += len(tok) + 1
-        continue
-    tok = readuntilcutoff(program, cur)
-    cur += len(tok)
-    if tok.strip() == "":
-        cur += 1
-        continue
-    if tok == "flag":
-        cur += 1
-        tok = readuntil(program, cur, "]")
-        cur += len(tok)
-        flag = int(tok)
 
-        cur += 2
-        tok = readuntil(program, cur, ";\n")
-        cur += len(tok)
-        val = int(tok)
+    opbyte = bytecode[pc]
+    pc += 1
+    cmd = opcode_by_byte.get(opbyte)
+    if cmd is None:
+        print(f"Unknown opcode 0x{opbyte:02X} at position {pc - 1}, halting.")
+        break
 
-        while cur < len(program) and program[cur] in ";\n":
-            cur += 1
+    sizes = op_codes[cmd]["sizes"]
+    operands, pc = read_operands(bytecode, pc, sizes)
 
+    if cmd == "flag":
+        flag, val = operands
         if flag == 0:
             if val == 1:
                 if get_val(flags, flag * 4, 4) == 0:
@@ -278,1183 +322,268 @@ while running and cur < len(program):
                 if pygame is not None and get_val(flags, flag * 4, 4) != 0:
                     shutdown_graphics()
         set_val(flags, flag * 4, val, 4)
-    if tok == "isflagsupported":
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        flag = int(tok)
 
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        val = int(tok) 
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size = int(tok)
-
-        cur += 2
-
+    elif cmd == "isflagsupported":
+        flag, val, addr, size = operands
         set_val(mem, addr, supportedFlags[flag][val], size)
-    if tok == "mem":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr = int(tok)
-        
-        cur += 1
-        tok = readuntil(program, cur, "]")
-        cur += len(tok)
-        size = int(tok)
-        
-        cur += 2
-        tok = readuntil(program, cur, ";\n")
-        cur += len(tok)
-        val = int(tok)
-        
-        cur += 1
-        
-        set_val(mem, addr, val, size)
-    if tok == "setmem":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr1 = int(tok)
-        
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size1 = int(tok)
-        
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-        
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size2 = int(tok)
-        
-        cur += 2
-        
-        set_val(mem, get_val(mem, addr2, 32), get_val(mem, get_val(mem, addr1, 32), size1), size2)
-    if tok == "write":
-        cur += 2
-        tok = readuntil(program, cur, "\"")
-        cur += len(tok)
-        text = tok
 
-        cur += 2
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr = int(tok)
-        
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size = int(tok)
-        
-        cur += 2
-        
+    elif cmd == "mem":
+        addr, size, val = operands
+        set_val(mem, addr, val, size)
+
+    elif cmd == "setmem":
+        addr1, size1, addr2, size2 = operands
+        set_val(mem, get_val(mem, addr2, 32), get_val(mem, get_val(mem, addr1, 32), size1), size2)
+
+    elif cmd == "write":
+        text, addr, size = operands
         for i in range(len(text)):
             set_val(mem, addr + i * size, ord(text[i]), size)
 
-    if tok == "outc":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr = int(tok)
-        
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size = int(tok)
-        
-        cur += 2
-        
-        print(chr(get_val(mem, addr, size)), end = "")
-    if tok == "out":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr = int(tok)
-        
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size = int(tok)
-        
-        cur += 2
-        
-        print(get_val(mem, addr, size), end = "")
-    if tok == "input":
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        chars = int(tok)
+    elif cmd == "outc":
+        addr, size = operands
+        print(chr(get_val(mem, addr, size)), end="")
 
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr = int(tok)
+    elif cmd == "out":
+        addr, size = operands
+        print(get_val(mem, addr, size), end="")
 
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size = int(tok)
-
-        cur += 2
-
+    elif cmd == "input":
+        chars, addr, size = operands
         data = input("")
         for i in range(min(chars, len(data))):
             set_val(mem, addr + i * size, ord(data[i]), size)
-    if tok == "print":
-        cur += 2
-        tok = readuntil(program, cur, "\"")
-        cur += len(tok)
-        print(tok)
 
-        cur += 3
-    if tok == "printn":
-        cur += 2
-        tok = readuntil(program, cur, "\"")
-        cur += len(tok)
-        print(tok, end = "")
+    elif cmd == "print":
+        text, = operands
+        print(text)
 
-        cur += 3
-    if tok == "printv":
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        chars = int(tok)
+    elif cmd == "printn":
+        text, = operands
+        print(text, end="")
 
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size = int(tok)
-
-        cur += 2
-
+    elif cmd == "printv":
+        chars, addr, size = operands
         for i in range(chars):
-            print(chr(get_val(mem, addr + i * size, size)), end = "")
+            print(chr(get_val(mem, addr + i * size, size)), end="")
         print()
-    if tok == "printvn":
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        chars = int(tok)
 
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size = int(tok)
-
-        cur += 2
-
+    elif cmd == "printvn":
+        chars, addr, size = operands
         for i in range(chars):
-            print(chr(get_val(mem, addr + i * size, size)), end = "")
-    if tok == "rand":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr = int(tok)
+            print(chr(get_val(mem, addr + i * size, size)), end="")
 
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size = int(tok)
-
-        cur += 2
-
+    elif cmd == "rand":
+        addr, size = operands
         set_val(mem, addr, random.randint(0, 2 ** size - 1), size)
-    if tok == "add":
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        val = int(tok)
 
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr1 = int(tok)
+    elif cmd == "add":
+        val, addr1, size1, addr2 = operands
+        # note: size2 assumed equal to size1 in this encoding; adjust op_codes sizes if you need distinct size2
+        set_val(mem, addr2, val + get_val(mem, addr1, size1), size1)
 
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 2
-
-        set_val(mem, addr2, val + get_val(mem, addr1, size1), size2)
-    if tok == "addv":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr3 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size3 = int(tok)
-
-        cur += 2
-
+    elif cmd == "addv":
+        addr1, size1, addr2, size2, addr3, size3 = operands
         set_val(mem, addr3, get_val(mem, addr1, size1) + get_val(mem, addr2, size2), size3)
-    if tok == "sub":
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        val = int(tok)
 
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr1 = int(tok)
+    elif cmd == "sub":
+        val, addr1, size1, addr2 = operands
+        set_val(mem, addr2, get_val(mem, addr1, size1) - val, size1)
 
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 2
-
-        set_val(mem, addr2, get_val(mem, addr1, size1) - val, size2)
-    if tok == "subv":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr3 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size3 = int(tok)
-
-        cur += 2
-
+    elif cmd == "subv":
+        addr1, size1, addr2, size2, addr3, size3 = operands
         set_val(mem, addr3, get_val(mem, addr1, size1) - get_val(mem, addr2, size2), size3)
-    if tok == "mul":
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        val = int(tok)
 
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr1 = int(tok)
+    elif cmd == "mul":
+        val, addr1, size1, addr2 = operands
+        set_val(mem, addr2, val * get_val(mem, addr1, size1), size1)
 
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 2
-
-        set_val(mem, addr2, val * get_val(mem, addr1, size1), size2)
-    if tok == "mulv":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr3 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size3 = int(tok)
-
-        cur += 2
-
+    elif cmd == "mulv":
+        addr1, size1, addr2, size2, addr3, size3 = operands
         set_val(mem, addr3, get_val(mem, addr1, size1) * get_val(mem, addr2, size2), size3)
-    if tok == "div":
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        val = int(tok)
 
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 2
-
+    elif cmd == "div":
+        val, addr1, size1, addr2 = operands
         if val != 0:
-            set_val(mem, addr2, get_val(mem, addr1, size1) // val, size2)
-    if tok == "divv":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr1 = int(tok)
+            set_val(mem, addr2, get_val(mem, addr1, size1) // val, size1)
 
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr3 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size3 = int(tok)
-
-        cur += 2
-
+    elif cmd == "divv":
+        addr1, size1, addr2, size2, addr3, size3 = operands
         val2 = get_val(mem, addr2, size2)
         if val2 != 0:
             set_val(mem, addr3, get_val(mem, addr1, size1) // val2, size3)
-    if tok == "mod":
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        val = int(tok)
 
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 2
-
+    elif cmd == "mod":
+        val, addr1, size1, addr2 = operands
         if val != 0:
-            set_val(mem, addr2, get_val(mem, addr1, size1) % val, size2)
-    if tok == "modv":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr1 = int(tok)
+            set_val(mem, addr2, get_val(mem, addr1, size1) % val, size1)
 
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr3 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size3 = int(tok)
-
-        cur += 2
-
+    elif cmd == "modv":
+        addr1, size1, addr2, size2, addr3, size3 = operands
         val2 = get_val(mem, addr2, size2)
         if val2 != 0:
             set_val(mem, addr3, get_val(mem, addr1, size1) % val2, size3)
-    if tok == "cur":
-        print(cur)
-    if tok == "memory":
+
+    elif cmd == "cur":
+        print(pc)
+
+    elif cmd == "memory":
         columns = 16
         print("    |" + "".join(hex(i) for i in range(columns)))
         print("-" * (5 + columns))
         for row in range(0, memsize, columns):
             bits = "".join(str(get_bit(mem, i)) for i in range(row, min(row + columns, memsize)))
             print(f"{row // columns:<4}|{bits:<{columns}}")
-    if tok == "flags":
+
+    elif cmd == "flags":
         for i in range(16 * 16 * 4):
-            print(get_bit(flags, i), end = "")
+            print(get_bit(flags, i), end="")
         print()
-    if tok == "setcur":
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        cur = int(tok)
-    if tok == "setcurv":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr = int(tok)
 
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size = int(tok)
+    elif cmd == "setcur":
+        pos, = operands
+        pc = pos
 
-        cur = get_val(mem, addr, size)
-    if tok == "getcur":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr = int(tok)
+    elif cmd == "setcurv":
+        addr, size = operands
+        pc = get_val(mem, addr, size)
 
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size = int(tok)
+    elif cmd == "getcur":
+        addr, size = operands
+        set_val(mem, addr, pc, size)
 
-        cur += 2
+    elif cmd == "getkeyword":
+        target_pos, addr, size = operands
+        # target_pos is resolved to a bytecode offset by the assembler at compile time
+        set_val(mem, addr, target_pos, size)
 
-        set_val(mem, addr, cur, size)
-    if tok == "getkeyword":
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        keyword = f"-{tok}-"
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size = int(tok)
-
-        cur += 2
-
-        try:
-            target = program.index(keyword)
-        except:
-            target = 0
-
-        set_val(mem, addr, target, size) 
-    if tok == "compare":
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        val = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 2
-
+    elif cmd == "compare":
+        val, addr1, size1, _pad = operands
         if val == get_val(mem, addr1, size1):
             set_val(mem, 0, 0, 2)
         elif val > get_val(mem, addr1, size1):
             set_val(mem, 0, 1, 2)
         else:
             set_val(mem, 0, 2, 2)
-    if tok == "comparev":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr1 = int(tok)
 
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr3 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size3 = int(tok)
-
-        cur += 2
-
+    elif cmd == "comparev":
+        addr1, size1, addr2, size2, addr3, size3 = operands
         if get_val(mem, addr1, size1) == get_val(mem, addr2, size2):
             set_val(mem, addr3, 0, size3)
         elif get_val(mem, addr1, size1) > get_val(mem, addr2, size2):
             set_val(mem, addr3, 1, size3)
         else:
             set_val(mem, addr3, 2, size3)
-    
-    if tok == "isequal":
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        val = int(tok)
 
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 2
-
+    elif cmd == "isequal":
+        val, addr1, size1, addr2 = operands
         if val == get_val(mem, addr1, size1):
-            set_val(mem, addr2, 1, size2)
+            set_val(mem, addr2, 1, size1)
         else:
-            set_val(mem, addr2, 0, size2)
-    if tok == "not":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr1 = int(tok)
+            set_val(mem, addr2, 0, size1)
 
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 2
-
+    elif cmd == "not":
+        addr1, size1, addr2, size2 = operands
         val1 = get_val(mem, addr1, size1)
         result = val1 ^ ((1 << size1) - 1)
         set_val(mem, addr2, result, size2)
-    if tok == "or":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr1 = int(tok)
 
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr3 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size3 = int(tok)
-
-        cur += 2
-
+    elif cmd == "or":
+        addr1, size1, addr2, size2, addr3, size3 = operands
         val1 = get_val(mem, addr1, size1)
         val2 = get_val(mem, addr2, size2)
         set_val(mem, addr3, val1 | val2, size3)
-    if tok == "and":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr1 = int(tok)
 
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr3 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size3 = int(tok)
-
-        cur += 2
-
+    elif cmd == "and":
+        addr1, size1, addr2, size2, addr3, size3 = operands
         val1 = get_val(mem, addr1, size1)
         val2 = get_val(mem, addr2, size2)
         set_val(mem, addr3, val1 & val2, size3)
-    if tok == "nor":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr1 = int(tok)
 
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr3 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size3 = int(tok)
-
-        cur += 2
-
+    elif cmd == "nor":
+        addr1, size1, addr2, size2, addr3, size3 = operands
         val1 = get_val(mem, addr1, size1)
         val2 = get_val(mem, addr2, size2)
         result = ~(val1 | val2) & ((1 << max(size1, size2)) - 1)
         set_val(mem, addr3, result, size3)
-    if tok == "nand":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr1 = int(tok)
 
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr3 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size3 = int(tok)
-
-        cur += 2
-
+    elif cmd == "nand":
+        addr1, size1, addr2, size2, addr3, size3 = operands
         val1 = get_val(mem, addr1, size1)
         val2 = get_val(mem, addr2, size2)
         result = ~(val1 & val2) & ((1 << max(size1, size2)) - 1)
         set_val(mem, addr3, result, size3)
-    if tok == "xor":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr1 = int(tok)
 
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr3 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size3 = int(tok)
-
-        cur += 2
-
+    elif cmd == "xor":
+        addr1, size1, addr2, size2, addr3, size3 = operands
         val1 = get_val(mem, addr1, size1)
         val2 = get_val(mem, addr2, size2)
         set_val(mem, addr3, val1 ^ val2, size3)
-    if tok == "xnor":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr1 = int(tok)
 
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr3 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size3 = int(tok)
-
-        cur += 2
-
+    elif cmd == "xnor":
+        addr1, size1, addr2, size2, addr3, size3 = operands
         val1 = get_val(mem, addr1, size1)
         val2 = get_val(mem, addr2, size2)
         result = ~(val1 ^ val2) & ((1 << max(size1, size2)) - 1)
         set_val(mem, addr3, result, size3)
-    if tok == "shl":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr1 = int(tok)
 
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr3 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size3 = int(tok)
-
-        cur += 2
-
+    elif cmd == "shl":
+        addr1, size1, addr2, size2, addr3, size3 = operands
         val1 = get_val(mem, addr1, size1)
         shift = get_val(mem, addr2, size2)
         result = (val1 << shift) % (2 ** size1)
         set_val(mem, addr3, result, size3)
-    if tok == "shr":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr1 = int(tok)
 
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size1 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr3 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size3 = int(tok)
-
-        cur += 2
-
+    elif cmd == "shr":
+        addr1, size1, addr2, size2, addr3, size3 = operands
         val1 = get_val(mem, addr1, size1)
         shift = get_val(mem, addr2, size2)
         result = val1 >> shift
         set_val(mem, addr3, result, size3)
-    if tok == "subroutine":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr = int(tok)
 
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size = int(tok)
+    elif cmd == "subroutine":
+        addr, size = operands
+        nextreturn = pc
+        pc = get_val(mem, addr, size)
 
-        cur += 2
+    elif cmd == "return":
+        pc = nextreturn
 
-        nextreturn = cur
-        cur = get_val(mem, addr, size)
-    if tok == "return":
-        cur = nextreturn
-    if tok == "if":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 2
-
+    elif cmd == "if":
+        addr, size, addr2, size2 = operands
         if get_val(mem, addr, size) != 0:
-            cur = get_val(mem, addr2, size2)
-    if tok == "ifnot":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr = int(tok)
+            pc = get_val(mem, addr2, size2)
 
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 2
-
+    elif cmd == "ifnot":
+        addr, size, addr2, size2 = operands
         if get_val(mem, addr, size) == 0:
-            cur = get_val(mem, addr2, size2)
-    if tok == "ifsubroutine":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr = int(tok)
+            pc = get_val(mem, addr2, size2)
 
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 2
-
+    elif cmd == "ifsubroutine":
+        addr, size, addr2, size2 = operands
         if get_val(mem, addr, size) != 0:
-            nextreturn = cur
-            cur = get_val(mem, addr2, size2)
-    if tok == "ifnotsubroutine":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr = int(tok)
+            nextreturn = pc
+            pc = get_val(mem, addr2, size2)
 
-        cur += 1
-        tok = readuntil(program, cur, ",")
-        cur += len(tok)
-        size = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr2 = int(tok)
-
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size2 = int(tok)
-
-        cur += 2
-
+    elif cmd == "ifnotsubroutine":
+        addr, size, addr2, size2 = operands
         if get_val(mem, addr, size) == 0:
-            nextreturn = cur
-            cur = get_val(mem, addr2, size2)
-    if tok == "sleep":
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        ms = int(tok)
+            nextreturn = pc
+            pc = get_val(mem, addr2, size2)
 
-        cur += 2
-
+    elif cmd == "sleep":
+        ms, = operands
         time.sleep(ms / 1000)
-    if tok == "gettime":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr = int(tok)
 
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size = int(tok)
-
-        cur += 2
-
+    elif cmd == "gettime":
+        addr, size = operands
         set_val(mem, addr, int(time.time() * 1000), size)
-    if tok == "getmemsize":
-        cur += 1
-        tok = readuntil(program, cur, ":")
-        cur += len(tok)
-        addr = int(tok)
 
-        cur += 1
-        tok = readuntil(program, cur, ")")
-        cur += len(tok)
-        size = int(tok)
-
-        cur += 2
-
+    elif cmd == "getmemsize":
+        addr, size = operands
         set_val(mem, addr, memsize, size)
-    if tok == "exit":
+
+    elif cmd == "exit":
         running = False
 
 if pygame is not None:
