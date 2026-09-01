@@ -55,7 +55,7 @@ On keyboard: (Up + Down + Left + Right + C + V + Backspace + Enter)
 0x19 (memory)           none                                           - print the current state of memory
 0x1A (flags)            none                                           - print the current state of flags
 0x1B (setpc)            pos(4)                                         - set the program counter to a fixed bytecode position
-0x1F (compare)          val(4), addr1(4), size1(1)                     - compare a value to a memory address with a certain size and store the result in a special memory address (0 = equal, 1 = val > addr1, 2 = val < addr1)
+0x1F (compare)          val(4), addr1(4), size1(1), addr2(4), size2(1) - compare a value to a memory address with a certain size and store the result in a special memory address (0 = equal, 1 = val > addr1, 2 = val < addr1)
 0x20 (comparev)         addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - compare two memory addresses with certain sizes and store the result in a memory address (0 = equal, 1 = addr1 > addr2, 2 = addr1 < addr2)
 0x21 (isequal)          val(4), addr1(4), size1(1), addr2(4)           - check if a value is equal to a memory address with a certain size and store the result (0 or 1) in another memory address (size 1)
 0x22 (not)              addr1(4), size1(1), addr2(4), size2(1)         - flip the bits of a memory address with a certain size and store it in another memory address
@@ -113,7 +113,7 @@ op_codes = {
     "memory":           {"byte": 0x19, "operands": 0, "sizes": []},
     "flags":            {"byte": 0x1A, "operands": 0, "sizes": []},
     "setpc":            {"byte": 0x1B, "operands": 1, "sizes": [4]},                 # pos (fixed)
-    "compare":          {"byte": 0x1F, "operands": 4, "sizes": [4, 4, 1, 1]},
+    "compare":          {"byte": 0x1F, "operands": 5, "sizes": [4, 4, 1, 4, 1]},
     "comparev":         {"byte": 0x20, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
     "isequal":          {"byte": 0x21, "operands": 4, "sizes": [4, 4, 1, 4]},
     "not":              {"byte": 0x22, "operands": 4, "sizes": [4, 1, 4, 1]},
@@ -134,14 +134,15 @@ op_codes = {
     "sleep":            {"byte": 0x31, "operands": 1, "sizes": [4]},                 # ms
     "gettime":          {"byte": 0x32, "operands": 2, "sizes": [4, 1]},              # addr, size
     "getmemsize":       {"byte": 0x33, "operands": 2, "sizes": [4, 1]},              # addr, size
+    "refreshscreen":   {"byte": 0x34, "operands": 0, "sizes": []},
     "exit":             {"byte": 0xFF, "operands": 0, "sizes": []},
 }
 
 # reverse lookup: opcode byte -> command name
 opcode_by_byte = {v["byte"]: k for k, v in op_codes.items()}
 
-memsize = 1024 * 8
-supportedFlags = [[0] * 16] * 16
+memsize = 1024 * 8 * 16
+supportedFlags = [[0] * 16 for _ in range(16)]
 
 supportedFlags[0][0] = 1 # disabling graphics is ofc supported
 supportedFlags[1][0] = 1 # disabling keyboard is ofc supported
@@ -162,9 +163,11 @@ except:
 print(f"Starting unilang bytecode VM with {memsize} bits of memory ({memsize // 8} bytes)...\n")
 
 def get_bit(mem, addr):
+    addr %= memsize  # wrap out-of-range addresses instead of crashing
     return (mem[addr // 8] >> (addr % 8)) & 1
 
 def set_bit(mem, addr, val):
+    addr %= memsize
     if val:
         mem[addr // 8] |= (1 << (addr % 8))
     else:
@@ -240,35 +243,26 @@ def shutdown_graphics():
         usedram -= 64 * 64
 
 def update_graphics():
-    global running, keyboard_state
+    global running
     if graphics_screen is None:
         return
-
-    key_masks = {
-        pygame.K_UP: 0x80,
-        pygame.K_DOWN: 0x40,
-        pygame.K_LEFT: 0x20,
-        pygame.K_RIGHT: 0x10,
-        pygame.K_c: 0x08,
-        pygame.K_v: 0x04,
-        pygame.K_BACKSPACE: 0x02,
-        pygame.K_RETURN: 0x01,
-    }
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
             return
-        if event.type == pygame.KEYDOWN:
-            keyboard_state |= key_masks.get(event.key, 0)
-        if event.type == pygame.KEYUP:
-            keyboard_state &= ~key_masks.get(event.key, 0)
 
+def render_screen():
+    if graphics_screen is None:
+        return
     graphics_screen.fill((0, 0, 0))
     for x in range(64):
         for y in range(64):
             if get_bit(mem, memsize - x - y * 64 - 1):
                 pygame.draw.rect(graphics_screen, (255, 255, 255), (x * 10, y * 10, 10, 10))
     pygame.display.flip()
+    if usedram > 0:
+        for addr in range(memsize - usedram, memsize):
+            set_bit(mem, addr, 0)
 
 def update_keyboard():
     global keyboard_state
@@ -287,7 +281,7 @@ def update_keyboard():
         keys[pygame.K_BACKSPACE] << 6 |
         keys[pygame.K_RETURN] << 7
     )
-    keyboard_state |= held_state
+    keyboard_state = held_state
     set_val(mem, memsize - usedram - 8, keyboard_state, 8)
 
 while running and pc < len(bytecode):
@@ -444,13 +438,13 @@ while running and pc < len(bytecode):
         pc = pos
 
     elif cmd == "compare":
-        val, addr1, size1, _pad = operands
+        val, addr1, size1, addr2, size2 = operands
         if val == get_val(mem, addr1, size1):
-            set_val(mem, 0, 0, 2)
+            set_val(mem, addr2, 0, size2)
         elif val > get_val(mem, addr1, size1):
-            set_val(mem, 0, 1, 2)
+            set_val(mem, addr2, 1, size2)
         else:
-            set_val(mem, 0, 2, 2)
+            set_val(mem, addr2, 2, size2)
 
     elif cmd == "comparev":
         addr1, size1, addr2, size2, addr3, size3 = operands
@@ -568,6 +562,9 @@ while running and pc < len(bytecode):
     elif cmd == "getmemsize":
         addr, size = operands
         set_val(mem, addr, memsize, size)
+
+    elif cmd == "refreshscreen":
+        render_screen()
 
     elif cmd == "exit":
         running = False
