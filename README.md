@@ -1,13 +1,13 @@
 # unilang
 
-A custom low-level programming language / bytecode ISA (`unilang`, aka "Universal
-Assembly") targeting NDS/GBA-class and Arduino-class hardware, plus a small C
-subset compiler that targets it.
+A custom low-level programming language / bytecode ISA (`uniClang`) targeting
+NDS/GBA-class and Arduino-class hardware, plus a small C-like compiler that
+emits bytecode for it.
 
 - `main.py` - the unilang bytecode VM (interprets compiled `.ulc` files)
-- `compiler.py` - a basic C-to-`.ulc` compiler (uses `pycparser`)
+- `compiler.py` - the uniClang compiler (reads `.uc` source and emits `.ulc`)
 - `test.ul` - a hand-written example in unilang's own text/assembly form
-- `examples/` - compiled `.ulc` bytecode examples, including `pong.c`
+- `examples/` - source/examples such as `pong.c` and compiled `.ulc` bytecode
 
 ---
 
@@ -108,12 +108,12 @@ Run bytecode with: `python main.py -f program.ulc`
 
 ```
 pip install pycparser
-python compiler.py input.c -o output.ulc
+python compiler.py input.uc -o output.ulc
 python main.py -f output.ulc
 ```
 
-It parses a **deliberately small subset of C** with `pycparser` and emits
-`.ulc` bytecode directly (no separate assembler step).
+It parses a **deliberately small subset of C-like syntax** with `pycparser`
+and emits `.ulc` bytecode directly (no separate assembler step).
 
 ### Memory sizing
 
@@ -143,8 +143,10 @@ silently corrupt each other. If you see this, increase `memsize` in
 
 - `uint32 main() { ... }` - the entry point; its body is compiled last, after
   `exit` is appended.
-- Fixed-width unsigned types: `bool`, `uint2`, `uint4`, `uint8`, `uint16`, and
-  `uint32`. Declarations may have an initializer: `uint8 x;` or `uint16 x = 5;`
+- Fixed-width unsigned types: `bool`, `uint1`, `uint2`, `uint4`, `uint8`,
+  `uint16`, and `uint32`. `bool` is an alias of `uint1`, and `true` / `false`
+  are exactly `1` / `0`.
+- Declarations may have an initializer: `uint8 x;` or `uint16 x = 5;`
 - Assignment: `x = expr;`
 - Arithmetic: `+ - * / %` (binary), `x++` / `x--`
 - Comparisons: `== != < > <= >=` (used in `if`/`while` conditions)
@@ -207,8 +209,9 @@ copy". This sidesteps unilang's lack of a real call stack entirely, so:
 
 ### Other limitations
 
-- Only fixed-width unsigned types are supported: `bool` (1 bit), `uint2`,
-  `uint4`, `uint8`, `uint16`, and `uint32`. There are no arrays, pointers,
+- Only fixed-width unsigned types are supported: `bool` / `uint1` (1 bit),
+  `uint2`, `uint4`, `uint8`, `uint16`, and `uint32`. There are no arrays,
+  pointers,
   structs, or floats.
 - No `for` loops (use `while`), no `&&`/`||` (split into nested `if`s).
 - No `#include` processing - preprocessor lines are simply stripped before

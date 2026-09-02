@@ -1,10 +1,11 @@
 '''
-Basic C -> unilang bytecode (.ulc) compiler by AzizBgBoss
+uniClang -> unilang bytecode (.ulc) compiler by AzizBgBoss
 https://github.com/AzizBgBoss/unilang
 
+Source files use the .uc extension; compiled bytecode uses .ulc.
 Requires pycparser:  pip install pycparser
 
-See README.md for full documentation of the C subset and the .ulc bytecode format.
+See README.md for full documentation of the uniClang subset and the .ulc bytecode format.
 
 Function calls are implemented by INLINING the callee's body at the call site
 (with fresh, uniquely-named parameter/local/return addresses per call) rather
@@ -29,6 +30,7 @@ time and prints a warning (it still runs — it just may misbehave, e.g. by
 colliding with the graphics framebuffer) if there isn't enough room.
 '''
 
+import re
 import sys
 import pycparser
 from pycparser import c_ast
@@ -66,11 +68,13 @@ OPS = {
     "sleep":     (0x31, [4]),                   # ms
     "getmemsize": (0x33, [4, 1]),               # addr, size
     "refreshscreen": (0x34, []),
+    "getflag":   (0x35, [1, 4, 1]),             # flag_index, addr, size
     "exit":      (0xFF, []),
 }
 
 TYPE_BITS = {
     "bool": 1,
+    "uint1": 1,
     "uint2": 2,
     "uint4": 4,
     "uint8": 8,
@@ -99,6 +103,7 @@ class Compiler:
         self.vars = {}              # name -> bit address (current scope view)
         self.var_sizes = {}         # name -> bit width (current scope view)
         self.addr_sizes = {}        # allocated address -> bit width
+        self.alloc_meta = {}        # name -> {"kind": "scalar"|"array", "bits":..., "count":...}
         self.next_addr = VARS_START
         self.next_temp = 0
         self.function_asts = {}     # name -> FuncDef node
@@ -111,6 +116,50 @@ class Compiler:
         self.required_bits_patch_pos = None  # byte offset to patch once we know final memory usage
         self.setpixel_scratch = None       # shared scratch addresses, allocated once, reused per call
         self.getkey_scratch = None
+
+    @staticmethod
+    def rewrite_alloc_syntax(source):
+        alloc_meta = {}
+
+        def replace_alloc(match):
+            item_bits = int(match.group(1))
+            count = match.group(2)
+            name = match.group(3)
+            array_count = match.group(4)
+
+            if count is not None:
+                array_count = int(count)
+                if array_count <= 0:
+                    raise NotImplementedError(f"alloc<{item_bits}> cannot allocate a non-positive array size")
+                alloc_meta[name] = {"kind": "array", "bits": item_bits, "count": array_count}
+                return f"uint32 {name}[{array_count}];"
+
+            if array_count is not None:
+                array_count = int(array_count)
+                if array_count <= 0:
+                    raise NotImplementedError(f"alloc<{item_bits}> cannot allocate a non-positive array size")
+                alloc_meta[name] = {"kind": "array", "bits": item_bits, "count": array_count}
+                return f"uint32 {name}[{array_count}];"
+
+            alloc_meta[name] = {"kind": "scalar", "bits": item_bits}
+            return f"uint32 {name};"
+
+        pattern = re.compile(r"(?m)^\s*alloc\s+(\d+)\s*(?:\*\s*(\d+)\s*)?([A-Za-z_]\w*)\s*(?:\[(\d+)\])?\s*;\s*$")
+        rewritten = pattern.sub(replace_alloc, source)
+        return rewritten, alloc_meta
+
+    @staticmethod
+    def rewrite_mem_syntax(source):
+        lines = []
+        for line in source.split('\n'):
+            if 'MEMORY' not in line or line.strip().startswith('printf'):
+                lines.append(line)
+            else:
+                line = re.sub(r"MEMORY\s*\[([^:\]]+)\s*:\s*([^\]]+)\]\s*=\s*([^;]+);", r"__mem_store(\1, \2, \3);", line)
+                line = re.sub(r"=\s*MEMORY\s*\[([^:\]]+)\s*:\s*([^\]]+)\]", r"= __mem_load(\1, \2)", line)
+                line = re.sub(r"&\s*MEMORY\s*\[([^:\]]+)\s*:\s*([^\]]+)\]", r"__mem_ptr(\1, \2)", line)
+                lines.append(line)
+        return '\n'.join(lines)
 
     # -- memory allocation ---------------------------------------------------
     def alloc_var(self, name, size=INT_SIZE):
@@ -134,18 +183,55 @@ class Compiler:
     def addr_size(self, addr):
         return self.addr_sizes.get(addr, INT_SIZE)
 
+    def emit_copy(self, src, dest):
+        # Values are stored right-justified (MSB-first) within their own
+        # bit field, so a narrower field's real payload sits at the END of
+        # its allocated bits, not at its base address. When src/dest widths
+        # differ we must align on the low-order bits and zero-extend the
+        # rest, or a direct same-address read/write either grabs the wrong
+        # (zero-padded) bits or overruns into whatever memory follows.
+        src_size = self.addr_size(src)
+        dest_size = self.addr_size(dest)
+        copy_size = min(src_size, dest_size)
+        src_off = src + (src_size - copy_size)
+        dest_off = dest + (dest_size - copy_size)
+        if dest_size > copy_size:
+            self.emit("mem", dest, dest_size - copy_size, 0)  # zero-extend
+        self.emit("add", 0, src_off, copy_size, dest_off)
+
+    def widen_to_int(self, addr):
+        # Returns an INT_SIZE-wide address holding the same value as addr,
+        # regardless of addr's own width. Needed before feeding addr into
+        # ops (mul/addv/etc.) that assume INT_SIZE-wide operands, since
+        # otherwise they'd read INT_SIZE bits starting at addr's base and
+        # overrun into adjacent memory when addr is narrower (e.g. a uint8
+        # coordinate passed to setpixel/getpixel).
+        if self.addr_size(addr) == INT_SIZE:
+            return addr
+        wide = self.alloc_temp(INT_SIZE)
+        self.emit_copy(addr, wide)
+        return wide
+
     @staticmethod
     def type_name(type_node):
         if not isinstance(type_node, c_ast.TypeDecl) or not isinstance(type_node.type, c_ast.IdentifierType):
             raise NotImplementedError("only fixed-width unsigned types are supported")
         names = type_node.type.names
         if len(names) != 1 or names[0] not in TYPE_BITS:
-            raise NotImplementedError("only bool, uint2, uint4, uint8, uint16, and uint32 are supported")
+            raise NotImplementedError("only bool, uint1, uint2, uint4, uint8, uint16, and uint32 are supported")
         return names[0]
 
     @classmethod
     def type_size(cls, type_node):
-        return TYPE_BITS[cls.type_name(type_node)]
+        if isinstance(type_node, c_ast.ArrayDecl):
+            elem_size = cls.type_size(type_node.type)
+            if isinstance(type_node.dim, c_ast.Constant):
+                count = int(type_node.dim.value, 0)
+                return elem_size * count
+            return elem_size
+        if isinstance(type_node, c_ast.TypeDecl):
+            return TYPE_BITS[cls.type_name(type_node)]
+        raise NotImplementedError(f"unsupported type node '{type(type_node).__name__}'")
 
     def function_return_size(self, fn):
         return self.type_size(fn.decl.type.type)
@@ -209,19 +295,47 @@ class Compiler:
         if isinstance(node, c_ast.Constant):
             if node.type not in ("int", "char"):
                 raise NotImplementedError(f"unsupported constant type '{node.type}'")
-            dest = self.alloc_temp()
-            self.emit("mem", dest, INT_SIZE, int(node.value, 0))
+            val = int(node.value, 0)
+            dest = self.alloc_temp(INT_SIZE)
+            self.emit("mem", dest, INT_SIZE, val)
             return dest
 
         if isinstance(node, c_ast.ID):
             return self.var_addr(node.name)
+
+        if isinstance(node, c_ast.ArrayRef):
+            base = self.gen_expr(node.name)
+            index = self.gen_expr(node.subscript)
+            elem_bits = self.type_size(node.name.type.type) if hasattr(node.name, "type") and isinstance(node.name.type, c_ast.ArrayDecl) else INT_SIZE
+            offset = self.alloc_temp(INT_SIZE)
+            self.emit("mul", elem_bits, index, INT_SIZE, offset)
+            result = self.alloc_temp(elem_bits)
+            self.emit("addv", base, INT_SIZE, offset, INT_SIZE, result, elem_bits)
+            return result
+
+        if isinstance(node, c_ast.UnaryOp):
+            if node.op == "&":
+                if isinstance(node.expr, c_ast.ID):
+                    return self.var_addr(node.expr.name)
+                if isinstance(node.expr, c_ast.ArrayRef):
+                    base = self.gen_expr(node.expr.name)
+                    idx = self.gen_expr(node.expr.subscript)
+                    elem_bits = self.type_size(node.expr.name.type.type) if hasattr(node.expr.name, "type") and isinstance(node.expr.name.type, c_ast.ArrayDecl) else INT_SIZE
+                    offset = self.alloc_temp(INT_SIZE)
+                    self.emit("mul", elem_bits, idx, INT_SIZE, offset)
+                    out = self.alloc_temp(INT_SIZE)
+                    self.emit("addv", base, INT_SIZE, offset, INT_SIZE, out, INT_SIZE)
+                    return out
+                raise NotImplementedError("only identifiers and array elements can be addressed")
+            elif node.op in ("p++", "++", "p--", "--"):
+                return self.gen_expr(node.expr)
 
         if isinstance(node, c_ast.Assignment):
             if node.op != "=":
                 raise NotImplementedError(f"unsupported assignment operator '{node.op}'")
             rhs = self.gen_expr(node.rvalue)
             dest = self.var_addr(node.lvalue.name)
-            self.emit("add", 0, rhs, self.addr_size(rhs), dest)
+            self.emit_copy(rhs, dest)
             return dest
 
         if isinstance(node, c_ast.UnaryOp):
@@ -253,8 +367,47 @@ class Compiler:
             name = node.name.name
             if name == "getkey":
                 return self.gen_getkey()
+            if name == "getpixel":
+                return self.gen_getpixel(node)
             if name == "isflagsupported":
                 return self.gen_isflagsupported(node)
+            if name == "input":
+                args = node.args.exprs if node.args else []
+                if len(args) != 1:
+                    raise NotImplementedError("input(&name) takes exactly one pointer argument")
+                arg = args[0]
+                if isinstance(arg, c_ast.UnaryOp) and arg.op == "&":
+                    target = self.gen_expr(arg.expr)
+                elif isinstance(arg, c_ast.ID):
+                    target = self.var_addr(arg.name)
+                else:
+                    raise NotImplementedError("input() requires the address of a variable, e.g. input(&name)")
+                size = self.addr_size(target)
+                chars = max(1, size // 8)
+                self.emit("input", chars, target, size)
+                return target
+            if name == "__mem_load":
+                args = node.args.exprs if node.args else []
+                if len(args) != 2:
+                    raise NotImplementedError("__mem_load(addr, size) takes exactly two arguments")
+                if not isinstance(args[1], c_ast.Constant):
+                    raise NotImplementedError("__mem_load() size must be a compile-time constant")
+                addr = self.gen_expr(args[0])
+                size = int(args[1].value, 0)
+                dest = self.alloc_temp(size)
+                addr_ptr_addr = self.alloc_temp(INT_SIZE)
+                dest_ptr_addr = self.alloc_temp(INT_SIZE)
+                self.emit("mem", addr_ptr_addr, INT_SIZE, addr)
+                self.emit("mem", dest_ptr_addr, INT_SIZE, dest)
+                self.emit("setmem", addr_ptr_addr, size, dest_ptr_addr, size)
+                return dest
+            if name == "__mem_ptr":
+                args = node.args.exprs if node.args else []
+                if len(args) != 2:
+                    raise NotImplementedError("__mem_ptr(addr, size) takes exactly two arguments")
+                if not isinstance(args[1], c_ast.Constant):
+                    raise NotImplementedError("__mem_ptr() size must be a compile-time constant")
+                return self.gen_expr(args[0])
             if name in ("flag", "setpixel"):
                 raise NotImplementedError(f"'{name}' does not return a value")
             return self.gen_call(node)
@@ -266,11 +419,11 @@ class Compiler:
         comparisons = ("==", "!=", "<", ">", "<=", ">=")
         if isinstance(node, c_ast.BinaryOp) and node.op in comparisons:
             op = node.op
-            bool_addr = self.alloc_temp()
+            bool_addr = self.alloc_temp(1)
             if isinstance(node.right, c_ast.Constant):
                 left = self.gen_expr(node.left)
                 rhs_val = int(node.right.value, 0)
-                result = self.alloc_temp()
+                result = self.alloc_temp(2)
                 self.emit("compare", rhs_val, left, self.addr_size(left), result, 2)
                 code_for = {"==": 0, "<": 1, ">": 2}
                 if op in code_for:
@@ -282,24 +435,24 @@ class Compiler:
             else:
                 left = self.gen_expr(node.left)
                 right = self.gen_expr(node.right)
-                result = self.alloc_temp()
-                self.emit("comparev", left, self.addr_size(left), right, self.addr_size(right), result, 32)
+                result = self.alloc_temp(2)
+                self.emit("comparev", left, self.addr_size(left), right, self.addr_size(right), result, 2)
                 code_for = {"==": 0, ">": 1, "<": 2}
                 if op in code_for:
-                    self.emit("isequal", code_for[op], result, INT_SIZE, bool_addr)
+                    self.emit("isequal", code_for[op], result, 2, bool_addr)
                 else:
                     inverse = {"!=": 0, "<=": 1, ">=": 2}[op]
-                    self.emit("isequal", inverse, result, INT_SIZE, bool_addr)
+                    self.emit("isequal", inverse, result, 2, bool_addr)
                     self.emit("not", bool_addr, 1, bool_addr, 1)
             return bool_addr
 
         if isinstance(node, c_ast.Constant):
-            bool_addr = self.alloc_temp()
+            bool_addr = self.alloc_temp(1)
             self.emit("mem", bool_addr, 1, 1 if int(node.value, 0) != 0 else 0)
             return bool_addr
 
         val = self.gen_expr(node)
-        bool_addr = self.alloc_temp()
+        bool_addr = self.alloc_temp(1)
         self.emit("isequal", 0, val, self.addr_size(val), bool_addr)
         self.emit("not", bool_addr, 1, bool_addr, 1)
         return bool_addr
@@ -331,15 +484,8 @@ class Compiler:
 
     # -- graphics / keyboard builtins ------------------------------------------
     def gen_setpixel(self, call):
-        # setpixel(x, y, val) — monochrome 64x64 graphics (flag(0, 1)) only.
-        # Uses the runtime memory size (from gen_prologue's getmemsize call),
-        # not a compile-time constant, so it stays correct if main.py's
-        # `memsize` changes. Scratch addresses are allocated once and reused
-        # across every call site (safe: each call's sequence of instructions
-        # fully completes before the next one runs), instead of a fresh set
-        # per call — since setpixel is usually called from inside an inlined
-        # helper that itself gets inlined at several call sites, this avoids
-        # multiplying scratch memory by every place that helper is used.
+        # setpixel(x, y, val) follows the active graphics mode at runtime,
+        # rather than assuming one fixed framebuffer layout for the whole program.
         self.uses_graphics = True
         args = call.args.exprs if call.args else []
         if len(args) != 3:
@@ -351,19 +497,65 @@ class Compiler:
 
         if self.setpixel_scratch is None:
             self.setpixel_scratch = {
-                "y64": self.alloc_temp(),
+                "mode": self.alloc_temp(4),
+                "width": self.alloc_temp(),
+                "fb_bits": self.alloc_temp(),
+                "kbd_bits": self.alloc_temp(),
+                "reserved": self.alloc_temp(),
+                "y_mul": self.alloc_temp(),
                 "xy": self.alloc_temp(),
                 "base": self.alloc_temp(),
-                "target_val": self.alloc_temp(),
+                "target": self.alloc_temp(),
                 "bool_addr": self.alloc_temp(),
                 "src_ptr": self.alloc_temp(),
+                "tmp": self.alloc_temp(1),
+                "x32": self.alloc_temp(),
+                "y32": self.alloc_temp(),
+                "dest": self.alloc_temp(1),
+                "dest_ptr": self.alloc_temp(),
             }
         s = self.setpixel_scratch
 
-        self.emit("mul", 64, y_addr, INT_SIZE, s["y64"])
-        self.emit("addv", x_addr, INT_SIZE, s["y64"], INT_SIZE, s["xy"], INT_SIZE)
-        self.emit("sub", 1, self.runtime_memsize_addr, INT_SIZE, s["base"])  # base = memsize - 1
-        self.emit("subv", s["base"], INT_SIZE, s["xy"], INT_SIZE, s["target_val"], INT_SIZE)
+        # x_addr/y_addr may be narrower than INT_SIZE (e.g. uint8 coords).
+        # The mul/addv below assume INT_SIZE-wide operands, so normalize
+        # first instead of reading INT_SIZE bits straight off a narrower
+        # field (which would overrun into whatever memory follows it).
+        self.emit_copy(x_addr, s["x32"])
+        self.emit_copy(y_addr, s["y32"])
+        x_addr, y_addr = s["x32"], s["y32"]
+
+        label_64 = Label("setpixel_64")
+        label_128 = Label("setpixel_128")
+        label_done = Label("setpixel_done")
+
+        self.emit("getflag", 0, s["mode"], 4)
+        self.emit("mem", s["width"], INT_SIZE, 64)
+        self.emit("mem", s["fb_bits"], INT_SIZE, 64 * 64)
+        self.emit("mem", s["kbd_bits"], INT_SIZE, 8)
+
+        self.emit("isequal", 4, s["mode"], 4, s["tmp"])
+        self.emit("ifnot", s["tmp"], 1, label_128)
+        self.emit("mem", s["width"], INT_SIZE, 128)
+        self.emit("mem", s["fb_bits"], INT_SIZE, 128 * 64)
+        self.emit("setpc", label_done)
+
+        self.define_label(label_128)
+        self.emit("isequal", 1, s["mode"], 4, s["tmp"])
+        self.emit("ifnot", s["tmp"], 1, label_64)
+        self.emit("mem", s["width"], INT_SIZE, 64)
+        self.emit("mem", s["fb_bits"], INT_SIZE, 64 * 64)
+        self.emit("setpc", label_done)
+
+        self.define_label(label_64)
+        self.emit("mem", s["width"], INT_SIZE, 64)
+        self.emit("mem", s["fb_bits"], INT_SIZE, 64 * 64)
+        self.define_label(label_done)
+
+        self.emit("addv", s["fb_bits"], INT_SIZE, s["kbd_bits"], INT_SIZE, s["reserved"], INT_SIZE)
+        self.emit("mul", 64, y_addr, INT_SIZE, s["y_mul"])
+        self.emit("addv", x_addr, INT_SIZE, s["y_mul"], INT_SIZE, s["xy"], INT_SIZE)
+        self.emit("sub", 1, self.runtime_memsize_addr, INT_SIZE, s["base"])  # memsize - 1
+        self.emit("subv", s["base"], INT_SIZE, s["xy"], INT_SIZE, s["target"], INT_SIZE)
 
         if isinstance(val_node, c_ast.Constant):
             self.emit("mem", s["bool_addr"], 1, 1 if int(val_node.value, 0) != 0 else 0)
@@ -372,33 +564,126 @@ class Compiler:
             self.emit("add", 0, computed_bool, 1, s["bool_addr"])
 
         self.emit("mem", s["src_ptr"], INT_SIZE, s["bool_addr"])
-        self.emit("setmem", s["src_ptr"], 1, s["target_val"], 1)
+        self.emit("setmem", s["src_ptr"], 1, s["target"], 1)
+
+    def gen_getpixel(self, call):
+        self.uses_graphics = True
+        args = call.args.exprs if call.args else []
+        if len(args) != 2:
+            raise NotImplementedError("getpixel(x, y) takes exactly 2 arguments")
+
+        x_addr = self.gen_expr(args[0])
+        y_addr = self.gen_expr(args[1])
+
+        if self.setpixel_scratch is None:
+            self.setpixel_scratch = {
+                "mode": self.alloc_temp(4),
+                "width": self.alloc_temp(),
+                "fb_bits": self.alloc_temp(),
+                "kbd_bits": self.alloc_temp(),
+                "reserved": self.alloc_temp(),
+                "y_mul": self.alloc_temp(),
+                "xy": self.alloc_temp(),
+                "base": self.alloc_temp(),
+                "target": self.alloc_temp(),
+                "tmp": self.alloc_temp(1),
+                "src_ptr": self.alloc_temp(),
+                "dest": self.alloc_temp(1),
+                "dest_ptr": self.alloc_temp(),
+                "bool_addr": self.alloc_temp(),
+                "x32": self.alloc_temp(),
+                "y32": self.alloc_temp(),
+            }
+        s = self.setpixel_scratch
+
+        self.emit_copy(x_addr, s["x32"])
+        self.emit_copy(y_addr, s["y32"])
+        x_addr, y_addr = s["x32"], s["y32"]
+
+        label_64 = Label("getpixel_64")
+        label_128 = Label("getpixel_128")
+        label_done = Label("getpixel_done")
+
+        self.emit("getflag", 0, s["mode"], 4)
+        self.emit("mem", s["width"], INT_SIZE, 64)
+        self.emit("mem", s["fb_bits"], INT_SIZE, 64 * 64)
+        self.emit("mem", s["kbd_bits"], INT_SIZE, 8)
+
+        self.emit("isequal", 4, s["mode"], 4, s["tmp"])
+        self.emit("ifnot", s["tmp"], 1, label_128)
+        self.emit("mem", s["width"], INT_SIZE, 128)
+        self.emit("mem", s["fb_bits"], INT_SIZE, 128 * 64)
+        self.emit("setpc", label_done)
+
+        self.define_label(label_128)
+        self.emit("isequal", 1, s["mode"], 4, s["tmp"])
+        self.emit("ifnot", s["tmp"], 1, label_64)
+        self.emit("mem", s["width"], INT_SIZE, 64)
+        self.emit("mem", s["fb_bits"], INT_SIZE, 64 * 64)
+        self.emit("setpc", label_done)
+
+        self.define_label(label_64)
+        self.emit("mem", s["width"], INT_SIZE, 64)
+        self.emit("mem", s["fb_bits"], INT_SIZE, 64 * 64)
+        self.define_label(label_done)
+
+        self.emit("addv", s["fb_bits"], INT_SIZE, s["kbd_bits"], INT_SIZE, s["reserved"], INT_SIZE)
+        self.emit("mul", s["width"], y_addr, INT_SIZE, s["y_mul"])
+        self.emit("addv", x_addr, INT_SIZE, s["y_mul"], INT_SIZE, s["xy"], INT_SIZE)
+        self.emit("sub", 1, self.runtime_memsize_addr, INT_SIZE, s["base"])
+        self.emit("subv", s["base"], INT_SIZE, s["xy"], INT_SIZE, s["target"], INT_SIZE)
+        self.emit("mem", s["src_ptr"], INT_SIZE, s["target"])
+        self.emit("mem", s["dest_ptr"], INT_SIZE, s["dest"])
+        self.emit("setmem", s["src_ptr"], 1, s["dest_ptr"], 1)
+        return s["dest"]
 
     def gen_getkey(self):
-        # Reads the 8-bit NES-style keyboard state (see main.py's update_keyboard).
-        # ASSUMES flag(0, 1) (mono 64x64 graphics) and flag(1, 1) (NES keyboard)
-        # have already been set and stay set. Uses the runtime memory size
-        # (not a compile-time constant) plus pointer-indirect addressing
-        # (setmem) to find the keyboard byte, since its address depends on
-        # the VM's actual memory size, known only at runtime.
+        # Reads the keyboard byte based on the currently active graphics and
+        # keyboard flags, instead of assuming a single static offset.
         self.uses_graphics = True
         if self.getkey_scratch is None:
             self.getkey_scratch = {
+                "gfx_mode": self.alloc_temp(4),
+                "kbd_mode": self.alloc_temp(4),
+                "fb_bits": self.alloc_temp(),
+                "kbd_bits": self.alloc_temp(),
+                "reserved": self.alloc_temp(),
                 "ptr": self.alloc_temp(),
-                "dest": self.alloc_temp(),
+                "dest": self.alloc_temp(8),
                 "dest_ptr": self.alloc_temp(),
+                "tmp": self.alloc_temp(1),
             }
         s = self.getkey_scratch
 
-        # ptr = runtime_memsize - (framebuffer bits + keyboard bits) = keyboard's bit address
-        self.emit("sub", GFX_64x64_MONO_BITS + KEYBOARD_BITS, self.runtime_memsize_addr, INT_SIZE, s["ptr"])
+        label_64 = Label("getkey_64")
+        label_128 = Label("getkey_128")
+        label_done = Label("getkey_done")
 
-        # The VM's bitfields are MSB-anchored, so an 8-bit value must be stored
-        # at the right edge of a 32-bit temp to preserve its plain integer
-        # value when later read back as a 32-bit int (writing it at offset 0
-        # would make it 256x too large). dest_ptr holds the (compile-time
-        # constant) address of that right edge, so setmem writes there.
-        self.emit("mem", s["dest_ptr"], INT_SIZE, s["dest"] + (INT_SIZE - 8))
+        self.emit("getflag", 0, s["gfx_mode"], 4)
+        self.emit("getflag", 1, s["kbd_mode"], 4)
+        self.emit("mem", s["fb_bits"], INT_SIZE, 0)
+        self.emit("mem", s["kbd_bits"], INT_SIZE, 8)
+        self.emit("mem", s["reserved"], INT_SIZE, 0)
+
+        self.emit("isequal", 4, s["gfx_mode"], 4, s["tmp"])
+        self.emit("ifnot", s["tmp"], 1, label_128)
+        self.emit("mem", s["fb_bits"], INT_SIZE, 128 * 64)
+        self.emit("setpc", label_done)
+
+        self.define_label(label_128)
+        self.emit("isequal", 1, s["gfx_mode"], 4, s["tmp"])
+        self.emit("ifnot", s["tmp"], 1, label_64)
+        self.emit("mem", s["fb_bits"], INT_SIZE, 64 * 64)
+        self.emit("setpc", label_done)
+
+        self.define_label(label_64)
+        self.emit("mem", s["fb_bits"], INT_SIZE, 64 * 64)
+        self.define_label(label_done)
+
+        # Keyboard lives in the reserved tail immediately before the framebuffer.
+        self.emit("addv", s["fb_bits"], INT_SIZE, s["kbd_bits"], INT_SIZE, s["reserved"], INT_SIZE)
+        self.emit("subv", self.runtime_memsize_addr, INT_SIZE, s["reserved"], INT_SIZE, s["ptr"], INT_SIZE)
+        self.emit("mem", s["dest_ptr"], INT_SIZE, s["dest"])
         self.emit("setmem", s["ptr"], 8, s["dest_ptr"], 8)
         return s["dest"]
 
@@ -447,7 +732,7 @@ class Compiler:
         for p, val in zip(params, arg_vals):
             param_size = self.type_size(p.type)
             addr = self.alloc_var(prefix + p.name, param_size)
-            self.emit("add", 0, val, self.addr_size(val), addr)
+            self.emit_copy(val, addr)
             shadowed[p.name] = (
                 self.vars.get(p.name, NO_PREV),
                 self.var_sizes.get(p.name, NO_PREV),
@@ -481,16 +766,29 @@ class Compiler:
             return
 
         if isinstance(node, c_ast.Compound):
+            # Block-scope: variables declared inside this block must not
+            # leak into (or shadow past the end of) the surrounding scope.
+            saved_vars = dict(self.vars)
+            saved_var_sizes = dict(self.var_sizes)
             for item in node.block_items or []:
                 self.gen_stmt(item)
+            self.vars = saved_vars
+            self.var_sizes = saved_var_sizes
             return
 
         if isinstance(node, c_ast.Decl):
-            size = self.type_size(node.type)
+            meta = self.alloc_meta.get(node.name)
+            if meta is not None:
+                if meta["kind"] == "scalar":
+                    size = meta["bits"]
+                else:
+                    size = meta["bits"] * meta["count"]
+            else:
+                size = self.type_size(node.type)
             addr = self.alloc_var(node.name, size)
             if node.init is not None:
                 rhs = self.gen_expr(node.init)
-                self.emit("add", 0, rhs, self.addr_size(rhs), addr)
+                self.emit_copy(rhs, addr)
             return
 
         if isinstance(node, (c_ast.Assignment, c_ast.UnaryOp)):
@@ -514,6 +812,38 @@ class Compiler:
                 self.emit("sleep", int(args[0].value, 0))
             elif name == "refreshscreen":
                 self.emit("refreshscreen")
+            elif name == "input":
+                args = node.args.exprs if node.args else []
+                if len(args) != 1:
+                    raise NotImplementedError("input(&name) takes exactly one pointer argument")
+                arg = args[0]
+                if isinstance(arg, c_ast.UnaryOp) and arg.op == "&":
+                    target = self.gen_expr(arg.expr)
+                elif isinstance(arg, c_ast.ID):
+                    target = self.var_addr(arg.name)
+                else:
+                    raise NotImplementedError("input() requires the address of a variable, e.g. input(&name)")
+                size = self.addr_size(target)
+                chars = max(1, size // 8)
+                self.emit("input", chars, target, size)
+            elif name == "__mem_store":
+                args = node.args.exprs if node.args else []
+                if len(args) != 3:
+                    raise NotImplementedError("__mem_store(addr, size, value) takes exactly three arguments")
+                if not isinstance(args[1], c_ast.Constant):
+                    raise NotImplementedError("__mem_store() size must be a compile-time constant")
+                addr = self.gen_expr(args[0])
+                width = int(args[1].value, 0)
+                value = self.gen_expr(args[2])
+                
+                value_temp = self.alloc_temp(width)
+                addr_ptr_addr = self.alloc_temp(INT_SIZE)
+                value_ptr_addr = self.alloc_temp(INT_SIZE)
+                
+                self.emit("add", 0, value, width, value_temp)
+                self.emit("mem", addr_ptr_addr, INT_SIZE, addr)
+                self.emit("mem", value_ptr_addr, INT_SIZE, value_temp)
+                self.emit("setmem", value_ptr_addr, width, addr_ptr_addr, width)
             else:
                 self.gen_expr(node)  # covers getkey, isflagsupported, user functions; value discarded
             return
@@ -547,7 +877,7 @@ class Compiler:
                 ret_addr, end_label = self.return_stack[-1]
                 if node.expr is not None:
                     rhs = self.gen_expr(node.expr)
-                    self.emit("add", 0, rhs, self.addr_size(rhs), ret_addr)
+                    self.emit_copy(rhs, ret_addr)
                 self.emit("setpc", end_label)
             return  # main()'s return value is ignored; 'exit' is emitted at the end
 
@@ -555,8 +885,10 @@ class Compiler:
 
     # -- entry point ---------------------------------------------------------
     def compile(self, source):
+        clean_source, self.alloc_meta = self.rewrite_alloc_syntax(source)
+        clean_source = self.rewrite_mem_syntax(clean_source)
         clean_source = "\n".join(
-            line for line in source.splitlines() if not line.strip().startswith("#")
+            line for line in clean_source.splitlines() if not line.strip().startswith("#")
         )
         builtin_typedefs = "\n".join(
             f"typedef unsigned char {name};" for name in TYPE_BITS
@@ -594,7 +926,7 @@ class Compiler:
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python compiler.py input.c [-o output.ulc]")
+        print("Usage: python compiler.py input.uc [-o output.ulc]")
         sys.exit(1)
 
     in_path = sys.argv[1]

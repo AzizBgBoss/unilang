@@ -76,6 +76,8 @@ On keyboard: (Up + Down + Left + Right + C + V + Backspace + Enter)
 0x31 (sleep)            ms(4)                                          - sleep for a certain amount of milliseconds
 0x32 (gettime)          addr(4), size(1)                               - get the current time and store it in a memory address
 0x33 (getmemsize)       addr(4), size(1)                               - get the size of memory in bits and store it in a memory address
+0x34 (refreshscreen)    none                                           - redraw the current frame and clear the framebuffer
+0x35 (getflag)          flag(1), addr(4), size(1)                     - read the current value of a flag into memory
 0xFF (exit)             none                                           - exit the program
 '''
 
@@ -134,7 +136,8 @@ op_codes = {
     "sleep":            {"byte": 0x31, "operands": 1, "sizes": [4]},                 # ms
     "gettime":          {"byte": 0x32, "operands": 2, "sizes": [4, 1]},              # addr, size
     "getmemsize":       {"byte": 0x33, "operands": 2, "sizes": [4, 1]},              # addr, size
-    "refreshscreen":   {"byte": 0x34, "operands": 0, "sizes": []},
+    "refreshscreen":    {"byte": 0x34, "operands": 0, "sizes": []},
+    "getflag":          {"byte": 0x35, "operands": 3, "sizes": [1, 4, 1]},           # flag_index, addr, size
     "exit":             {"byte": 0xFF, "operands": 0, "sizes": []},
 }
 
@@ -183,6 +186,29 @@ def get_val(mem, addr, size):
     for i in range(size):
         val |= get_bit(mem, addr + i) << (size - i - 1)
     return val
+
+def get_flag_value(flag_index):
+    return get_val(flags, flag_index * 4, 4)
+
+def get_graphics_bits_for_mode(mode):
+    mode = int(mode)
+    if mode == 0:
+        return 0
+    if mode in (1, 2, 3):
+        depth = {1: 1, 2: 4, 3: 8}[mode]
+        return depth * 64 * 64
+    if mode in (4, 5, 6):
+        depth = {4: 1, 5: 4, 6: 8}[mode]
+        return depth * 128 * 64
+    return 0
+
+def get_keyboard_bits_for_mode(mode):
+    return 8 if int(mode) == 1 else 0
+
+def get_reserved_bits():
+    graphics_bits = get_graphics_bits_for_mode(get_flag_value(0))
+    keyboard_bits = 8 if get_flag_value(1) == 1 else 0
+    return graphics_bits + keyboard_bits
 
 def read_uint(bytecode, pos, nbytes):
     val = 0
@@ -252,12 +278,18 @@ def update_graphics():
             return
 
 def render_screen():
+    global usedram
     if graphics_screen is None:
         return
+    usedram = get_reserved_bits()
     graphics_screen.fill((0, 0, 0))
-    for x in range(64):
+    width = 64 if get_flag_value(0) in (1, 2, 3) else 128 if get_flag_value(0) in (4, 5, 6) else 0
+    if width == 0:
+        pygame.display.flip()
+        return
+    for x in range(width):
         for y in range(64):
-            if get_bit(mem, memsize - x - y * 64 - 1):
+            if get_bit(mem, memsize - x - y * width - 1):
                 pygame.draw.rect(graphics_screen, (255, 255, 255), (x * 10, y * 10, 10, 10))
     pygame.display.flip()
     if usedram > 0:
@@ -265,10 +297,10 @@ def render_screen():
             set_bit(mem, addr, 0)
 
 def update_keyboard():
-    global keyboard_state
+    global keyboard_state, usedram
     if pygame is None or graphics_screen is None:
         return
-
+    usedram = get_reserved_bits()
     pygame.event.pump()
     keys = pygame.key.get_pressed()
     held_state = (
@@ -282,7 +314,14 @@ def update_keyboard():
         keys[pygame.K_RETURN] << 7
     )
     keyboard_state = held_state
-    set_val(mem, memsize - usedram - 8, keyboard_state, 8)
+
+    # Keyboard sits immediately before the framebuffer in the reserved tail of RAM.
+    # If graphics are disabled, that is simply the last 8 bits of memory.
+    if get_flag_value(0):
+        keyboard_addr = memsize - usedram
+    else:
+        keyboard_addr = memsize - 8
+    set_val(mem, keyboard_addr, keyboard_state, 8)
 
 while running and pc < len(bytecode):
     if get_val(flags, 0 * 4, 4) == 1:
@@ -315,6 +354,7 @@ while running and pc < len(bytecode):
                 if pygame is not None and get_val(flags, flag * 4, 4) != 0:
                     shutdown_graphics()
         set_val(flags, flag * 4, val, 4)
+        usedram = get_reserved_bits()
 
     elif cmd == "isflagsupported":
         flag, val, addr, size = operands
@@ -562,6 +602,10 @@ while running and pc < len(bytecode):
     elif cmd == "getmemsize":
         addr, size = operands
         set_val(mem, addr, memsize, size)
+
+    elif cmd == "getflag":
+        flag_index, addr, size = operands
+        set_val(mem, addr, get_flag_value(flag_index), size)
 
     elif cmd == "refreshscreen":
         render_screen()
