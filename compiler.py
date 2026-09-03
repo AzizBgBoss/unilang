@@ -35,6 +35,111 @@ import sys
 import pycparser
 from pycparser import c_ast
 
+
+def strip_comments(source):
+    """Remove // and /* */ comments before handing source to pycparser,
+    which (unlike a real compiler) expects comments to already be gone —
+    normally the C preprocessor (cpp) does this, but this pipeline doesn't
+    run one. Preserves newlines (so line numbers in parse errors stay
+    accurate) and is string/char-literal aware so '//' or '/*' inside a
+    string or char constant isn't mistaken for a comment."""
+    out = []
+    i, n = 0, len(source)
+    in_string = in_char = in_line_comment = in_block_comment = False
+    while i < n:
+        c = source[i]
+        nxt = source[i + 1] if i + 1 < n else ""
+        if in_line_comment:
+            if c == "\n":
+                in_line_comment = False
+                out.append(c)
+            i += 1
+            continue
+        if in_block_comment:
+            if c == "\n":
+                out.append(c)  # keep line numbers aligned
+            elif c == "*" and nxt == "/":
+                in_block_comment = False
+                i += 1
+            i += 1
+            continue
+        if in_string or in_char:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(nxt)
+                i += 2
+                continue
+            if (in_string and c == '"') or (in_char and c == "'"):
+                in_string = in_char = False
+            i += 1
+            continue
+        if c == '"':
+            in_string = True
+            out.append(c)
+        elif c == "'":
+            in_char = True
+            out.append(c)
+        elif c == "/" and nxt == "/":
+            in_line_comment = True
+            i += 1
+        elif c == "/" and nxt == "*":
+            in_block_comment = True
+            i += 1
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+def apply_defines(source):
+    """Minimal #define support: object-like (#define X val) and
+    function-like (#define f(x) expr) macros, textually substituted."""
+    defines = {}  # name -> (params or None, body)
+    obj_re = re.compile(r'^#define\s+(\w+)\s+(.*)$')
+    func_re = re.compile(r'^#define\s+(\w+)\((\s*\w+(?:\s*,\s*\w+)*\s*)?\)\s*(.*)$')
+    out_lines = []
+    for line in source.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#define"):
+            m = func_re.match(stripped)
+            if m and "(" in stripped.split(None, 2)[1]:
+                name, params, body = m.group(1), m.group(2) or "", m.group(3)
+                params = [p.strip() for p in params.split(",")] if params.strip() else []
+                defines[name] = (params, body.strip())
+            else:
+                m = obj_re.match(stripped)
+                if m:
+                    defines[m.group(1)] = (None, m.group(2).strip())
+            continue  # drop the #define line itself
+        out_lines.append(line)
+    source = "\n".join(out_lines)
+
+    # Repeatedly expand macros in the body text (handles nested macro use).
+    for _ in range(8):  # bounded passes instead of tracking a changed-flag per token
+        changed = False
+        for name, (params, body) in defines.items():
+            if params is None:
+                pattern = re.compile(r'\b' + re.escape(name) + r'\b')
+                new_source, n = pattern.subn(body, source)
+                if n:
+                    source = new_source
+                    changed = True
+            else:
+                call_re = re.compile(r'\b' + re.escape(name) + r'\s*\(([^()]*)\)')
+                def _expand(m, params=params, body=body):
+                    args = [a.strip() for a in m.group(1).split(",")] if m.group(1).strip() else []
+                    text = body
+                    for p, a in zip(params, args):
+                        text = re.sub(r'\b' + re.escape(p) + r'\b', a, text)
+                    return "(" + text + ")"
+                new_source, n = call_re.subn(_expand, source)
+                if n:
+                    source = new_source
+                    changed = True
+        if not changed:
+            break
+    return source
+
+
 # ---------------------------------------------------------------------------
 # Opcode table (subset of main.py's ISA needed by this compiler)
 # name: (opcode byte, [operand widths in bytes, 0 = length-prefixed text])
@@ -63,6 +168,14 @@ OPS = {
     "comparev":  (0x20, [4, 1, 4, 1, 4, 1]),
     "isequal":   (0x21, [4, 4, 1, 4]),          # val, addr1, size1, addr2
     "not":       (0x22, [4, 1, 4, 1]),
+    "or":        (0x23, [4, 1, 4, 1, 4, 1]),
+    "and":       (0x24, [4, 1, 4, 1, 4, 1]),
+    "nor":       (0x25, [4, 1, 4, 1, 4, 1]),
+    "nand":      (0x26, [4, 1, 4, 1, 4, 1]),
+    "xor":       (0x27, [4, 1, 4, 1, 4, 1]),
+    "xnor":      (0x28, [4, 1, 4, 1, 4, 1]),
+    "shl":       (0x29, [4, 1, 4, 1, 4, 1]),
+    "shr":       (0x2A, [4, 1, 4, 1, 4, 1]),
     "if":        (0x2D, [4, 1, 4]),             # addr, size, pos
     "ifnot":     (0x2E, [4, 1, 4]),
     "sleep":     (0x31, [4]),                   # ms
@@ -212,6 +325,13 @@ class Compiler:
         self.emit_copy(addr, wide)
         return wide
 
+    def to_bool(self, addr):
+        # Normalizes any value to a 1-bit 0/1 address (true iff addr != 0).
+        dest = self.alloc_temp(1)
+        self.emit("isequal", 0, addr, self.addr_size(addr), dest)
+        self.emit("not", dest, 1, dest, 1)
+        return dest
+
     @staticmethod
     def type_name(type_node):
         if not isinstance(type_node, c_ast.TypeDecl) or not isinstance(type_node.type, c_ast.IdentifierType):
@@ -301,6 +421,10 @@ class Compiler:
             return dest
 
         if isinstance(node, c_ast.ID):
+            if node.name in ("true", "false"):
+                dest = self.alloc_temp(INT_SIZE)
+                self.emit("mem", dest, INT_SIZE, 1 if node.name == "true" else 0)
+                return dest
             return self.var_addr(node.name)
 
         if isinstance(node, c_ast.ArrayRef):
@@ -346,6 +470,32 @@ class Compiler:
             raise NotImplementedError(f"unsupported unary operator '{node.op}'")
 
         if isinstance(node, c_ast.BinaryOp):
+            comparisons = ("==", "!=", "<", ">", "<=", ">=")
+            if node.op in comparisons:
+                # Comparisons now produce a usable 1-bit 0/1 value, not just
+                # a condition for if/while — gen_cond already builds exactly
+                # that, so reuse it here.
+                return self.gen_cond(node)
+
+            if node.op in ("&&", "||"):
+                left_bool = self.to_bool(self.gen_expr(node.left))
+                right_bool = self.to_bool(self.gen_expr(node.right))
+                dest = self.alloc_temp(1)
+                self.emit("and" if node.op == "&&" else "or", left_bool, 1, right_bool, 1, dest, 1)
+                return dest
+
+            bitwise_ops = {"&": "and", "|": "or", "^": "xor", "<<": "shl", ">>": "shr"}
+            if node.op in bitwise_ops:
+                left = self.gen_expr(node.left)
+                left_size = self.addr_size(left)
+                right = self.gen_expr(node.right)
+                right_size = self.addr_size(right)
+                # shl/shr keep the left operand's width; the others take the wider of the two.
+                result_size = left_size if node.op in ("<<", ">>") else max(left_size, right_size)
+                dest = self.alloc_temp(result_size)
+                self.emit(bitwise_ops[node.op], left, left_size, right, right_size, dest, result_size)
+                return dest
+
             immediate_ops = {"+": "add", "-": "sub", "*": "mul", "/": "div", "%": "mod"}
             var_ops = {"+": "addv", "-": "subv", "*": "mulv", "/": "divv", "%": "modv"}
             if node.op not in immediate_ops:
@@ -408,7 +558,7 @@ class Compiler:
                 if not isinstance(args[1], c_ast.Constant):
                     raise NotImplementedError("__mem_ptr() size must be a compile-time constant")
                 return self.gen_expr(args[0])
-            if name in ("flag", "setpixel"):
+            if name in ("flag", "setpixel", "exit"):
                 raise NotImplementedError(f"'{name}' does not return a value")
             return self.gen_call(node)
 
@@ -799,6 +949,8 @@ class Compiler:
             name = node.name.name
             if name == "printf":
                 self.gen_printf(node)
+            elif name == "exit":
+                self.emit("exit")
             elif name == "flag":
                 self.uses_graphics = True
                 args = node.args.exprs
@@ -835,11 +987,11 @@ class Compiler:
                 addr = self.gen_expr(args[0])
                 width = int(args[1].value, 0)
                 value = self.gen_expr(args[2])
-                
+
                 value_temp = self.alloc_temp(width)
                 addr_ptr_addr = self.alloc_temp(INT_SIZE)
                 value_ptr_addr = self.alloc_temp(INT_SIZE)
-                
+
                 self.emit("add", 0, value, width, value_temp)
                 self.emit("mem", addr_ptr_addr, INT_SIZE, addr)
                 self.emit("mem", value_ptr_addr, INT_SIZE, value_temp)
@@ -885,6 +1037,8 @@ class Compiler:
 
     # -- entry point ---------------------------------------------------------
     def compile(self, source):
+        source = strip_comments(source)
+        source = apply_defines(source)
         clean_source, self.alloc_meta = self.rewrite_alloc_syntax(source)
         clean_source = self.rewrite_mem_syntax(clean_source)
         clean_source = "\n".join(
@@ -897,6 +1051,7 @@ class Compiler:
         ast = pycparser.CParser().parse(clean_source)
 
         func_defs = [n for n in ast.ext if isinstance(n, c_ast.FuncDef)]
+        global_decls = [n for n in ast.ext if isinstance(n, c_ast.Decl)]
         main_fn = next((f for f in func_defs if f.decl.name == "main"), None)
         other_fns = [f for f in func_defs if f.decl.name != "main"]
         if main_fn is None:
@@ -908,6 +1063,8 @@ class Compiler:
             self.function_asts[fn.decl.name] = fn
 
         self.gen_prologue()
+        for decl in global_decls:
+            self.gen_stmt(decl)
         self.gen_stmt(main_fn.body)
         self.emit("exit")
 

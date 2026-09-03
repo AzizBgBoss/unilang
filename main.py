@@ -150,8 +150,35 @@ supportedFlags = [[0] * 16 for _ in range(16)]
 supportedFlags[0][0] = 1 # disabling graphics is ofc supported
 supportedFlags[1][0] = 1 # disabling keyboard is ofc supported
 
-try:
-    import pygame
+# pygame is only imported the first time graphics/keyboard (flag 0/1) is
+# actually queried or used, not unconditionally at startup — programs that
+# never touch graphics shouldn't need pygame at all. If pygame IS needed but
+# isn't available, or fails to initialize (no display server, etc.), that's
+# treated as fatal: a program that asked for graphics and silently ran
+# headless anyway is worse than one that stops with a clear error.
+pygame = None
+_pygame_checked = False
+
+def convert_size(n):
+    if n < 8 * 1024:
+        return f"{n // 8} KB"
+    if n < 8 * 1024 * 1024:
+        return f"{n // (8 * 1024)} MB"
+    if n < 8 * 1024 * 1024 * 1024:
+        return f"{n // (8 * 1024 * 1024)} GB"
+    return f"{n} bits"
+
+def ensure_pygame():
+    global pygame, _pygame_checked
+    if _pygame_checked:
+        return
+    _pygame_checked = True
+    try:
+        import pygame as _pygame_module
+    except Exception as e:
+        print(f"Fatal: this program requires pygame for graphics/keyboard support, but it could not be imported ({e}).")
+        sys.exit(1)
+    pygame = _pygame_module
     if memsize >= 64 * 64:
         supportedFlags[0][1] = 1 # 64x64@1
         if memsize == 64 * 64:
@@ -159,11 +186,8 @@ try:
     else:
         supportedFlags[0][1] = 0
         print(f"Graphics not supported because the memory size is too small ({memsize} bits, 64x64@1 requires at least {64 * 64} bits).")
-except:
-    pygame = None
-    print("Pygame not installed. Graphics and keyboard (flag 0-1) will not be supported.")
 
-print(f"Starting unilang bytecode VM with {memsize} bits of memory ({memsize // 8} bytes)...\n")
+print(f"Starting unilang bytecode VM with {memsize} bits of memory ({convert_size(memsize)})...\n")
 
 def get_bit(mem, addr):
     addr %= memsize  # wrap out-of-range addresses instead of crashing
@@ -252,9 +276,14 @@ keyboard_state = 0
 
 def initialize_graphics():
     global graphics_screen, usedram
-    if pygame is not None and graphics_screen is None:
-        pygame.init()
-        graphics_screen = pygame.display.set_mode((64 * 10, 64 * 10))
+    ensure_pygame()  # fatal if unavailable
+    if graphics_screen is None:
+        try:
+            pygame.init()
+            graphics_screen = pygame.display.set_mode((64 * 10, 64 * 10))
+        except Exception as e:
+            print(f"Fatal: pygame failed to initialize graphics ({e}). Stopping.")
+            sys.exit(1)
         supportedFlags[1][1] = 1 # NES is now supported
         usedram += 64 * 64
 
@@ -358,6 +387,8 @@ while running and pc < len(bytecode):
 
     elif cmd == "isflagsupported":
         flag, val, addr, size = operands
+        if flag in (0, 1) and val == 1:
+            ensure_pygame()  # need to actually check pygame availability to answer this
         set_val(mem, addr, supportedFlags[flag][val], size)
 
     elif cmd == "mem":

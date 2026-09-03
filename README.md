@@ -33,6 +33,13 @@ emits bytecode for it.
     are ordered Up=`1` (bit 0), Down=`2` (bit 1), Left=`4`, Right=`8`, C=`16`,
     V=`32`, Backspace=`64`, and Enter=`128`. Only usable once graphics are
     enabled.
+- **pygame is loaded lazily, and failures are fatal.** `main.py` doesn't
+  import `pygame` at startup - only the first time a program actually queries
+  or uses flag 0/1 (graphics/keyboard). Programs that never touch graphics
+  don't need pygame installed at all. But if a program *does* need it and
+  either pygame can't be imported or fails to initialize a display (e.g. no
+  display server available), the VM prints a clear error and exits with
+  status 1 instead of silently continuing headless.
 - **Screen redraw is explicit and clears the framebuffer.** The VM only pumps
   window/input events every instruction; the actual pixel redraw + display flip
   happens *only* when the bytecode executes `refreshscreen`. After the flip,
@@ -155,19 +162,31 @@ silently corrupt each other. If you see this, increase `memsize` in
 - `printf("literal text\n");`
 - `printf("...%d...\n", expr);` - one or more `%d`, matched left-to-right
   against extra arguments; other format specifiers aren't supported
+- `exit();` - halts the program immediately (emits the raw `exit` opcode).
+  Like `flag`/`setpixel`, it's a statement only and can't be used as an
+  expression/value.
+- Comments: `// line comments` and `/* block comments */` are stripped
+  before parsing (string/char literals containing `//` or `/*` are left
+  alone).
+- `#define` macros, expanded textually before parsing:
+  - Object-like: `#define WIDTH 64`
+  - Function-like: `#define addfour(x) (x + 4)`
+  - Other preprocessor directives (`#include`, etc.) are still just
+    stripped/ignored - there's no real preprocessor, just `#define`.
 - **Builtins** for hardware access:
   - `flag(index, value);` - raw `flag` opcode (see flag table in Section 1). Does
     not return a value - used as a statement only.
   - `setpixel(x, y, val);` - plots a pixel, assuming mono 64x64 graphics
-    (`flag(0, 1)`). `x`/`y` may be variables (uses pointer-indirect
-    addressing under the hood); `val` is treated as a boolean (0/1). Does
-    not return a value. Keep `x`/`y` within `0..63` - the VM wraps
-    out-of-range addresses instead of crashing, but a wrapped write still
-    lands somewhere you didn't intend (e.g. corrupting the keyboard byte or
-    another variable), so clamp your coordinates in C. Internally reuses a
-    small set of scratch addresses across every call site instead of
-    allocating fresh ones each time, since `setpixel` is often called from
-    inside a helper function that itself gets inlined at several places.
+    (`flag(0, 1)`). `x`/`y` may be variables of any supported width (they're
+    normalized to full width internally, so a `uint8` coordinate is safe);
+    `val` is treated as a boolean (0/1). Does not return a value. Keep
+    `x`/`y` within `0..63` - the VM wraps out-of-range addresses instead of
+    crashing, but a wrapped write still lands somewhere you didn't intend
+    (e.g. corrupting the keyboard byte or another variable), so clamp your
+    coordinates in C. Internally reuses a small set of scratch addresses
+    across every call site instead of allocating fresh ones each time, since
+    `setpixel` is often called from inside a helper function that itself
+    gets inlined at several places.
   - `getkey()` - reads the 8-bit NES-style keyboard state. **Assumes**
     `flag(0, 1)` and `flag(1, 1)` were already called and remain set.
     Returns a value, so it can be used in expressions, e.g.
@@ -203,28 +222,37 @@ copy". This sidesteps unilang's lack of a real call stack entirely, so:
   per frame can add up fast.
 - Function parameters shadow same-named variables only for the duration of
   that inlined call; the caller's own variables of the same name are
-  restored afterward. Nested functions with clashing local variable names
-  (not parameters) are **not** auto-renamed - give locals distinct names if
-  you're unsure.
+  restored afterward.
+- **Blocks are properly scoped.** A variable declared inside an `if`/`while`
+  body (or a function body) is only visible until the closing `}` - using it
+  afterward is a compile-time error, and a same-named variable in a sibling
+  block doesn't collide with it. Note this is scoping of *visibility* only:
+  the underlying bit address a variable was allocated is never freed/reused
+  (see "Other limitations" below), so heavy use of short-lived block-local
+  variables still costs memory for the whole program's run.
 
 ### Other limitations
 
 - Only fixed-width unsigned types are supported: `bool` / `uint1` (1 bit),
-  `uint2`, `uint4`, `uint8`, `uint16`, and `uint32`. There are no arrays,
-  pointers,
+  `uint2`, `uint4`, `uint8`, `uint16`, and `uint32`. There are no pointers,
   structs, or floats.
 - No `for` loops (use `while`), no `&&`/`||` (split into nested `if`s).
-- No `#include` processing - preprocessor lines are simply stripped before
-  parsing, since this subset doesn't need real headers.
+- Comparison operators (`< > == ...`) can only be used directly in `if`/
+  `while` conditions - there's no way yet to store a comparison's result
+  into a variable (e.g. `uint8 x = a < b;` isn't supported).
 - **Variables are never freed.** Every declaration (globals, function-call
   locals, compiler-generated temporaries) permanently owns its bit address
-  for the whole program's lifetime - there's no scoping/stack, so memory
-  only grows. Keep this in mind on memory-constrained targets (the startup
+  for the whole program's lifetime - there's no address reuse, so memory
+  only grows, even though block scoping (above) does limit *where a name is
+  visible*. Keep this in mind on memory-constrained targets (the startup
   warning above will tell you if you've overrun what's available).
 
 ### Example
 
 ```c
+#define MAX_ITERS 5
+#define addfour(x) (x + 4)
+
 uint32 add(uint32 a, uint32 b) {
     return a + b;
 }
@@ -238,11 +266,13 @@ uint32 main() {
     uint32 i = 0;
     uint32 sum = 0;
 
-    while (i < 5) {
+    while (i < MAX_ITERS) {
         i = i + 1;
         sum = add(sum, i);
         printf("i = %d, sum = %d\n", i, sum);
     }
+
+    printf("addfour(sum) = %d\n", addfour(sum));
 
     if (sum > 10) {
         printf("Big sum!\n");
@@ -256,6 +286,10 @@ uint32 main() {
     uint8 key = getkey();
     if (key != 0) {
         printf("key: %d\n", key);
+    }
+
+    if (true) {
+        exit();   // stops here; nothing after this runs
     }
 
     return 0;
