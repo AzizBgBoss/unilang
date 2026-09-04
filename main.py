@@ -79,6 +79,7 @@ On keyboard: (Up + Down + Left + Right + C + V + Backspace + Enter)
 0x34 (refreshscreen)    none                                           - redraw the current frame and clear the framebuffer
 0x35 (getflag)          flag(1), addr(4), size(1)                     - read the current value of a flag into memory
 0x36 (romread)          pos(4), addr(4), size(1)                       - treat the value stored at pos as a BIT OFFSET into the program's own bytecode (the ".ulc" file), read `size` bits starting there (MSB-first, same convention as mem), and store the result at addr. This is the only way to read data embedded in the compiled program without paying for it in "mem" (RAM) -- e.g. font/sprite tables. pos is a level of indirection (like setmem's pointer args): the address `pos` itself is fixed at compile time, but the *value stored there* is the runtime-computed bit offset to read from. Reading past the end of the bytecode returns 0 bits rather than erroring.
+0x37 (setpixel)         addrx(4), sizex(1), addry(4), sizey(1), addrc(4), sizec(1) - draw one pixel using x/y/color values read from RAM
 0xFF (exit)             none                                           - exit the program
 '''
 
@@ -140,6 +141,7 @@ op_codes = {
     "refreshscreen":    {"byte": 0x34, "operands": 0, "sizes": []},
     "getflag":          {"byte": 0x35, "operands": 3, "sizes": [1, 4, 1]},           # flag_index, addr, size
     "romread":          {"byte": 0x36, "operands": 3, "sizes": [4, 4, 1]},           # pos, addr, size
+    "setpixel":         {"byte": 0x37, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},  # addrx,sizex,addry,sizey,addrc,sizec
     "exit":             {"byte": 0xFF, "operands": 0, "sizes": []},
 }
 
@@ -191,6 +193,8 @@ def ensure_pygame():
 
 print(f"Starting unilang bytecode VM with {memsize} bits of memory ({convert_size(memsize)})...\n")
 
+BIT_REVERSE = bytes(int(f"{i:08b}"[::-1], 2) for i in range(256))
+
 def get_bit(mem, addr):
     addr %= memsize  # wrap out-of-range addresses instead of crashing
     return (mem[addr // 8] >> (addr % 8)) & 1
@@ -203,11 +207,26 @@ def set_bit(mem, addr, val):
         mem[addr // 8] &= ~(1 << (addr % 8))
 
 def set_val(mem, addr, val, size):
+    if size > 0 and addr % 8 == 0 and size % 8 == 0:
+        val %= 2 ** size
+        byte_addr = (addr % memsize) // 8
+        byte_count = size // 8
+        for i in range(byte_count):
+            shift = (byte_count - i - 1) * 8
+            mem[(byte_addr + i) % len(mem)] = BIT_REVERSE[(val >> shift) & 0xFF]
+        return
     val %= 2 ** size
     for i in range(size):
         set_bit(mem, addr + i, val & (1 << (size - 1 - i)))
 
 def get_val(mem, addr, size):
+    if size > 0 and addr % 8 == 0 and size % 8 == 0:
+        byte_addr = (addr % memsize) // 8
+        byte_count = size // 8
+        val = 0
+        for i in range(byte_count):
+            val = (val << 8) | BIT_REVERSE[mem[(byte_addr + i) % len(mem)]]
+        return val
     val = 0
     for i in range(size):
         val |= get_bit(mem, addr + i) << (size - i - 1)
@@ -661,6 +680,16 @@ while running and pc < len(bytecode):
         bit_pos = get_val(mem, pos_field, 32)
         val = get_val_from_bytecode(bytecode, bit_pos, size)
         set_val(mem, addr, val, size)
+
+    elif cmd == "setpixel":
+        addrx, sizex, addry, sizey, addrc, sizec = operands
+        x = get_val(mem, addrx, sizex)
+        y = get_val(mem, addry, sizey)
+        color = get_val(mem, addrc, sizec)
+        mode = get_flag_value(0)
+        width = 128 if mode in (4, 5, 6) else 64
+        target = memsize - 1 - x - y * width
+        set_bit(mem, target, 1 if color else 0)
 
     elif cmd == "refreshscreen":
         render_screen()

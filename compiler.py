@@ -183,6 +183,7 @@ OPS = {
     "refreshscreen": (0x34, []),
     "getflag":   (0x35, [1, 4, 1]),             # flag_index, addr, size
     "romread":   (0x36, [4, 4, 1]),             # pos, addr, size
+    "setpixel":  (0x37, [4, 1, 4, 1, 4, 1]),    # addrx, sizex, addry, sizey, addrc, sizec
     "exit":      (0xFF, []),
 }
 
@@ -727,8 +728,10 @@ class Compiler:
 
     # -- graphics / keyboard builtins ------------------------------------------
     def gen_setpixel(self, call):
-        # setpixel(x, y, val) follows the active graphics mode at runtime,
-        # rather than assuming one fixed framebuffer layout for the whole program.
+        # setpixel(x, y, val) now compiles to a single native VM opcode
+        # (0x37) -- the mode/width/framebuffer-offset math that used to be
+        # ~20 interpreted instructions per call now happens once, in the
+        # VM's own dispatch, per pixel.
         self.uses_graphics = True
         args = call.args.exprs if call.args else []
         if len(args) != 3:
@@ -738,76 +741,14 @@ class Compiler:
         x_addr = self.gen_expr(x_node)
         y_addr = self.gen_expr(y_node)
 
-        if self.setpixel_scratch is None:
-            self.setpixel_scratch = {
-                "mode": self.alloc_temp(4),
-                "width": self.alloc_temp(),
-                "fb_bits": self.alloc_temp(),
-                "kbd_bits": self.alloc_temp(),
-                "reserved": self.alloc_temp(),
-                "y_mul": self.alloc_temp(),
-                "xy": self.alloc_temp(),
-                "base": self.alloc_temp(),
-                "target": self.alloc_temp(),
-                "bool_addr": self.alloc_temp(),
-                "src_ptr": self.alloc_temp(),
-                "tmp": self.alloc_temp(1),
-                "x32": self.alloc_temp(),
-                "y32": self.alloc_temp(),
-                "dest": self.alloc_temp(1),
-                "dest_ptr": self.alloc_temp(),
-            }
-        s = self.setpixel_scratch
-
-        # x_addr/y_addr may be narrower than INT_SIZE (e.g. uint8 coords).
-        # The mul/addv below assume INT_SIZE-wide operands, so normalize
-        # first instead of reading INT_SIZE bits straight off a narrower
-        # field (which would overrun into whatever memory follows it).
-        self.emit_copy(x_addr, s["x32"])
-        self.emit_copy(y_addr, s["y32"])
-        x_addr, y_addr = s["x32"], s["y32"]
-
-        label_64 = Label("setpixel_64")
-        label_128 = Label("setpixel_128")
-        label_done = Label("setpixel_done")
-
-        self.emit("getflag", 0, s["mode"], 4)
-        self.emit("mem", s["width"], INT_SIZE, 64)
-        self.emit("mem", s["fb_bits"], INT_SIZE, 64 * 64)
-        self.emit("mem", s["kbd_bits"], INT_SIZE, 8)
-
-        self.emit("isequal", 4, s["mode"], 4, s["tmp"])
-        self.emit("ifnot", s["tmp"], 1, label_128)
-        self.emit("mem", s["width"], INT_SIZE, 128)
-        self.emit("mem", s["fb_bits"], INT_SIZE, 128 * 64)
-        self.emit("setpc", label_done)
-
-        self.define_label(label_128)
-        self.emit("isequal", 1, s["mode"], 4, s["tmp"])
-        self.emit("ifnot", s["tmp"], 1, label_64)
-        self.emit("mem", s["width"], INT_SIZE, 64)
-        self.emit("mem", s["fb_bits"], INT_SIZE, 64 * 64)
-        self.emit("setpc", label_done)
-
-        self.define_label(label_64)
-        self.emit("mem", s["width"], INT_SIZE, 64)
-        self.emit("mem", s["fb_bits"], INT_SIZE, 64 * 64)
-        self.define_label(label_done)
-
-        self.emit("addv", s["fb_bits"], INT_SIZE, s["kbd_bits"], INT_SIZE, s["reserved"], INT_SIZE)
-        self.emit("mul", 64, y_addr, INT_SIZE, s["y_mul"])
-        self.emit("addv", x_addr, INT_SIZE, s["y_mul"], INT_SIZE, s["xy"], INT_SIZE)
-        self.emit("sub", 1, self.runtime_memsize_addr, INT_SIZE, s["base"])  # memsize - 1
-        self.emit("subv", s["base"], INT_SIZE, s["xy"], INT_SIZE, s["target"], INT_SIZE)
-
         if isinstance(val_node, c_ast.Constant):
-            self.emit("mem", s["bool_addr"], 1, 1 if self.const_value(val_node) != 0 else 0)
+            val_addr = self.alloc_temp(1)
+            self.emit("mem", val_addr, 1, 1 if self.const_value(val_node) != 0 else 0)
         else:
-            computed_bool = self.gen_cond(val_node)
-            self.emit("add", 0, computed_bool, 1, s["bool_addr"])
+            val_addr = self.gen_cond(val_node)
 
-        self.emit("mem", s["src_ptr"], INT_SIZE, s["bool_addr"])
-        self.emit("setmem", s["src_ptr"], 1, s["target"], 1)
+        self.emit("setpixel", x_addr, self.addr_size(x_addr), y_addr, self.addr_size(y_addr),
+                   val_addr, self.addr_size(val_addr))
 
     def gen_getpixel(self, call):
         self.uses_graphics = True
