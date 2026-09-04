@@ -105,6 +105,8 @@ raw UTF-8 bytes.
 | 0x32 | `gettime` | addr, size | current time (ms) into memory |
 | 0x33 | `getmemsize` | addr, size | total memory size (bits) into memory |
 | 0x34 | `refreshscreen` | - | redraw the screen from the current framebuffer and flip the display (see note above - call once per frame, not automatic) |
+| 0x35 | `getflag` | flag, addr, size | read a flag's current value into memory |
+| 0x36 | `romread` | pos, addr, size | read `size` bits from the program bytecode/ROM into RAM. `pos` is indirect: the operand points to a 32-bit memory field holding the ROM bit offset. |
 | 0xFF | `exit` | - | halt |
 
 Run bytecode with: `python main.py -f program.ulc`
@@ -150,10 +152,15 @@ silently corrupt each other. If you see this, increase `memsize` in
 
 - `uint32 main() { ... }` - the entry point; its body is compiled last, after
   `exit` is appended.
-- Fixed-width unsigned types: `bool`, `uint1`, `uint2`, `uint4`, `uint8`,
-  `uint16`, and `uint32`. `bool` is an alias of `uint1`, and `true` / `false`
-  are exactly `1` / `0`.
+- Fixed-width unsigned types: `bool`, `char`, `uint1`, `uint2`, `uint4`,
+  `uint8`, `uint16`, and `uint32`. `bool` is an alias of `uint1`, `char`
+  is 8 bits, and `true` / `false` are exactly `1` / `0`.
 - Declarations may have an initializer: `uint8 x;` or `uint16 x = 5;`
+- `const` arrays with literal initializers are stored in ROM, not RAM:
+  `const uint4 rows[6] = { 6, 9, 15, 9, 9, 9 };`
+- Const strings are null-terminated ROM arrays:
+  `const char msg[] = "Hello!";`
+- Character constants such as `'a'`, `'0'`, and `'\n'` work as 8-bit values.
 - Assignment: `x = expr;`
 - Arithmetic: `+ - * / %` (binary), `x++` / `x--`
 - Comparisons: `== != < > <= >=` (used in `if`/`while` conditions)
@@ -201,6 +208,9 @@ silently corrupt each other. If you see this, increase `memsize` in
     flips the display, and clears the framebuffer for the next frame. **Call
     this once per frame**, after your `setpixel` calls, if you're doing
     graphics - see the note in Section 1.
+  - `romread(pos, size)` - expression form of opcode `0x36`. `pos` is an
+    expression holding a ROM bit offset; `size` must be a constant. This is
+    useful for ROM strings/pointers, e.g. `char ch = romread(text + i * 8, 8);`.
 
 ### How functions work (and their limits)
 

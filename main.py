@@ -78,6 +78,7 @@ On keyboard: (Up + Down + Left + Right + C + V + Backspace + Enter)
 0x33 (getmemsize)       addr(4), size(1)                               - get the size of memory in bits and store it in a memory address
 0x34 (refreshscreen)    none                                           - redraw the current frame and clear the framebuffer
 0x35 (getflag)          flag(1), addr(4), size(1)                     - read the current value of a flag into memory
+0x36 (romread)          pos(4), addr(4), size(1)                       - treat the value stored at pos as a BIT OFFSET into the program's own bytecode (the ".ulc" file), read `size` bits starting there (MSB-first, same convention as mem), and store the result at addr. This is the only way to read data embedded in the compiled program without paying for it in "mem" (RAM) -- e.g. font/sprite tables. pos is a level of indirection (like setmem's pointer args): the address `pos` itself is fixed at compile time, but the *value stored there* is the runtime-computed bit offset to read from. Reading past the end of the bytecode returns 0 bits rather than erroring.
 0xFF (exit)             none                                           - exit the program
 '''
 
@@ -138,6 +139,7 @@ op_codes = {
     "getmemsize":       {"byte": 0x33, "operands": 2, "sizes": [4, 1]},              # addr, size
     "refreshscreen":    {"byte": 0x34, "operands": 0, "sizes": []},
     "getflag":          {"byte": 0x35, "operands": 3, "sizes": [1, 4, 1]},           # flag_index, addr, size
+    "romread":          {"byte": 0x36, "operands": 3, "sizes": [4, 4, 1]},           # pos, addr, size
     "exit":             {"byte": 0xFF, "operands": 0, "sizes": []},
 }
 
@@ -253,6 +255,22 @@ def read_operands(bytecode, pos, sizes):
             val, pos = read_uint(bytecode, pos, width)
             vals.append(val)
     return vals, pos
+
+def get_bit_from_bytecode(bytecode, bit_addr):
+    # Same bit-numbering convention as get_bit: MSB-first within each byte.
+    # Reading past the end of the bytecode returns 0 instead of raising, so
+    # a program that miscalculates a ROM offset degrades to blank data
+    # rather than crashing the VM.
+    byte_i, bit_i = divmod(bit_addr, 8)
+    if byte_i < 0 or byte_i >= len(bytecode):
+        return 0
+    return (bytecode[byte_i] >> (7 - bit_i)) & 1
+
+def get_val_from_bytecode(bytecode, pos, size):
+    val = 0
+    for i in range(size):
+        val = (val << 1) | get_bit_from_bytecode(bytecode, pos + i)
+    return val
 
 # check for -f flag in command line arguments (now expects a compiled bytecode file)
 if len(sys.argv) > 1 and sys.argv[1] == "-f":
@@ -637,6 +655,12 @@ while running and pc < len(bytecode):
     elif cmd == "getflag":
         flag_index, addr, size = operands
         set_val(mem, addr, get_flag_value(flag_index), size)
+
+    elif cmd == "romread":
+        pos_field, addr, size = operands
+        bit_pos = get_val(mem, pos_field, 32)
+        val = get_val_from_bytecode(bytecode, bit_pos, size)
+        set_val(mem, addr, val, size)
 
     elif cmd == "refreshscreen":
         render_screen()

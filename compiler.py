@@ -182,11 +182,13 @@ OPS = {
     "getmemsize": (0x33, [4, 1]),               # addr, size
     "refreshscreen": (0x34, []),
     "getflag":   (0x35, [1, 4, 1]),             # flag_index, addr, size
+    "romread":   (0x36, [4, 4, 1]),             # pos, addr, size
     "exit":      (0xFF, []),
 }
 
 TYPE_BITS = {
     "bool": 1,
+    "char": 8,
     "uint1": 1,
     "uint2": 2,
     "uint4": 4,
@@ -229,6 +231,10 @@ class Compiler:
         self.required_bits_patch_pos = None  # byte offset to patch once we know final memory usage
         self.setpixel_scratch = None       # shared scratch addresses, allocated once, reused per call
         self.getkey_scratch = None
+        self.array_elem_bits = {}   # array variable name -> element width in bits
+
+        self.const_arrays = {}       # name -> {base, elem_bits, count}
+        self.rom_data = []           # {"name", "patch_pos", "data"}
 
     @staticmethod
     def rewrite_alloc_syntax(source):
@@ -338,7 +344,7 @@ class Compiler:
             raise NotImplementedError("only fixed-width unsigned types are supported")
         names = type_node.type.names
         if len(names) != 1 or names[0] not in TYPE_BITS:
-            raise NotImplementedError("only bool, uint1, uint2, uint4, uint8, uint16, and uint32 are supported")
+            raise NotImplementedError("only bool, char, uint1, uint2, uint4, uint8, uint16, and uint32 are supported")
         return names[0]
 
     @classmethod
@@ -355,6 +361,61 @@ class Compiler:
 
     def function_return_size(self, fn):
         return self.type_size(fn.decl.type.type)
+
+    def param_size(self, param):
+        if isinstance(param.type, c_ast.ArrayDecl):
+            return INT_SIZE
+        return self.type_size(param.type)
+
+    @staticmethod
+    def is_const_decl(node):
+        return "const" in getattr(node, "quals", []) or "const" in getattr(node.type, "quals", [])
+
+    @staticmethod
+    def const_value(node):
+        if not isinstance(node, c_ast.Constant):
+            raise NotImplementedError("const array values must be compile-time constants")
+        if node.type == "char":
+            return ord(bytes(node.value[1:-1], "utf-8").decode("unicode_escape"))
+        return int(node.value, 0)
+
+    @staticmethod
+    def string_bytes(node):
+        if not isinstance(node, c_ast.Constant) or node.type != "string":
+            raise NotImplementedError("expected a string literal")
+        return list(bytes(node.value[1:-1], "utf-8").decode("unicode_escape").encode("utf-8"))
+
+    @staticmethod
+    def pack_values(values, elem_bits):
+        packed = bytearray()
+        current_byte = 0
+        bits_in_current_byte = 0
+        for value in values:
+            if value < 0 or value >= (1 << elem_bits):
+                raise ValueError(f"constant value {value} does not fit in {elem_bits} bits")
+            for bit_idx in range(elem_bits - 1, -1, -1):
+                current_byte = (current_byte << 1) | ((value >> bit_idx) & 1)
+                bits_in_current_byte += 1
+                if bits_in_current_byte == 8:
+                    packed.append(current_byte)
+                    current_byte = 0
+                    bits_in_current_byte = 0
+        if bits_in_current_byte:
+            packed.append(current_byte << (8 - bits_in_current_byte))
+        return bytes(packed)
+
+    def add_const_array(self, name, elem_bits, values):
+        base = self.alloc_temp(INT_SIZE)
+        instr_start = len(self.buf)
+        self.emit("mem", base, INT_SIZE, 0)
+        self.const_arrays[name] = {"base": base, "elem_bits": elem_bits, "count": len(values)}
+        self.array_elem_bits[name] = elem_bits
+        self.rom_data.append({
+            "name": name,
+            "patch_pos": instr_start + 1 + 4 + 1,
+            "data": self.pack_values(values, elem_bits),
+        })
+        return base
 
     # -- low level emission ---------------------------------------------------
     def emit(self, op, *operands):
@@ -381,6 +442,12 @@ class Compiler:
             if label.addr is None:
                 raise RuntimeError(f"label '{label.name}' used but never defined")
             self.buf[pos:pos + width] = label.addr.to_bytes(width, "big")
+        bit_offset = len(self.buf) * 8
+        for item in self.rom_data:
+            self.buf[item["patch_pos"]:item["patch_pos"] + 4] = bit_offset.to_bytes(4, "big")
+            bit_offset += len(item["data"]) * 8
+        for item in self.rom_data:
+            self.buf.extend(item["data"])
         return bytes(self.buf)
 
     # -- startup prologue: query real memory size, warn if too small ------------
@@ -413,9 +480,12 @@ class Compiler:
     # -- expressions: returns the bit-address holding the result --------------
     def gen_expr(self, node):
         if isinstance(node, c_ast.Constant):
+            if node.type == "string":
+                name = f"__str{len(self.rom_data)}"
+                return self.add_const_array(name, TYPE_BITS["char"], self.string_bytes(node) + [0])
             if node.type not in ("int", "char"):
                 raise NotImplementedError(f"unsupported constant type '{node.type}'")
-            val = int(node.value, 0)
+            val = self.const_value(node)
             dest = self.alloc_temp(INT_SIZE)
             self.emit("mem", dest, INT_SIZE, val)
             return dest
@@ -425,16 +495,32 @@ class Compiler:
                 dest = self.alloc_temp(INT_SIZE)
                 self.emit("mem", dest, INT_SIZE, 1 if node.name == "true" else 0)
                 return dest
+            if node.name in self.const_arrays:
+                return self.const_arrays[node.name]["base"]
             return self.var_addr(node.name)
 
         if isinstance(node, c_ast.ArrayRef):
+            if isinstance(node.name, c_ast.ID) and node.name.name in self.const_arrays:
+                const_array = self.const_arrays[node.name.name]
+                index = self.widen_to_int(self.gen_expr(node.subscript))
+                offset = self.alloc_temp(INT_SIZE)
+                self.emit("mul", const_array["elem_bits"], index, INT_SIZE, offset)
+                pos_addr = self.alloc_temp(INT_SIZE)
+                self.emit("addv", const_array["base"], INT_SIZE, offset, INT_SIZE, pos_addr, INT_SIZE)
+                result = self.alloc_temp(const_array["elem_bits"])
+                self.emit("romread", pos_addr, result, const_array["elem_bits"])
+                return result
             base = self.gen_expr(node.name)
-            index = self.gen_expr(node.subscript)
-            elem_bits = self.type_size(node.name.type.type) if hasattr(node.name, "type") and isinstance(node.name.type, c_ast.ArrayDecl) else INT_SIZE
+            index = self.widen_to_int(self.gen_expr(node.subscript))
+            elem_bits = self.array_elem_bits.get(node.name.name, INT_SIZE) if isinstance(node.name, c_ast.ID) else INT_SIZE
             offset = self.alloc_temp(INT_SIZE)
             self.emit("mul", elem_bits, index, INT_SIZE, offset)
+            addr_val = self.alloc_temp(INT_SIZE)
+            self.emit("add", base, offset, INT_SIZE, addr_val)
             result = self.alloc_temp(elem_bits)
-            self.emit("addv", base, INT_SIZE, offset, INT_SIZE, result, elem_bits)
+            dest_ptr_addr = self.alloc_temp(INT_SIZE)
+            self.emit("mem", dest_ptr_addr, INT_SIZE, result)
+            self.emit("setmem", addr_val, elem_bits, dest_ptr_addr, elem_bits)
             return result
 
         if isinstance(node, c_ast.UnaryOp):
@@ -444,15 +530,13 @@ class Compiler:
                 if isinstance(node.expr, c_ast.ArrayRef):
                     base = self.gen_expr(node.expr.name)
                     idx = self.gen_expr(node.expr.subscript)
-                    elem_bits = self.type_size(node.expr.name.type.type) if hasattr(node.expr.name, "type") and isinstance(node.expr.name.type, c_ast.ArrayDecl) else INT_SIZE
+                    elem_bits = self.array_elem_bits.get(node.expr.name.name, INT_SIZE) if isinstance(node.expr.name, c_ast.ID) else INT_SIZE
                     offset = self.alloc_temp(INT_SIZE)
                     self.emit("mul", elem_bits, idx, INT_SIZE, offset)
                     out = self.alloc_temp(INT_SIZE)
                     self.emit("addv", base, INT_SIZE, offset, INT_SIZE, out, INT_SIZE)
                     return out
                 raise NotImplementedError("only identifiers and array elements can be addressed")
-            elif node.op in ("p++", "++", "p--", "--"):
-                return self.gen_expr(node.expr)
 
         if isinstance(node, c_ast.Assignment):
             if node.op != "=":
@@ -505,7 +589,7 @@ class Compiler:
             if isinstance(node.right, c_ast.Constant):
                 result_size = left_size
                 dest = self.alloc_temp(result_size)
-                self.emit(immediate_ops[node.op], int(node.right.value, 0), left, left_size, dest)
+                self.emit(immediate_ops[node.op], self.const_value(node.right), left, left_size, dest)
             else:
                 right = self.gen_expr(node.right)
                 result_size = max(left_size, self.addr_size(right))
@@ -515,6 +599,15 @@ class Compiler:
 
         if isinstance(node, c_ast.FuncCall):
             name = node.name.name
+            if name == "romread":
+                args = node.args.exprs if node.args else []
+                if len(args) != 2 or not isinstance(args[1], c_ast.Constant):
+                    raise NotImplementedError("romread(pos, size) takes a ROM bit-position expression and a constant size")
+                pos = self.widen_to_int(self.gen_expr(args[0]))
+                size = int(args[1].value, 0)
+                dest = self.alloc_temp(size)
+                self.emit("romread", pos, dest, size)
+                return dest
             if name == "getkey":
                 return self.gen_getkey()
             if name == "getpixel":
@@ -572,7 +665,7 @@ class Compiler:
             bool_addr = self.alloc_temp(1)
             if isinstance(node.right, c_ast.Constant):
                 left = self.gen_expr(node.left)
-                rhs_val = int(node.right.value, 0)
+                rhs_val = self.const_value(node.right)
                 result = self.alloc_temp(2)
                 self.emit("compare", rhs_val, left, self.addr_size(left), result, 2)
                 code_for = {"==": 0, "<": 1, ">": 2}
@@ -598,7 +691,7 @@ class Compiler:
 
         if isinstance(node, c_ast.Constant):
             bool_addr = self.alloc_temp(1)
-            self.emit("mem", bool_addr, 1, 1 if int(node.value, 0) != 0 else 0)
+            self.emit("mem", bool_addr, 1, 1 if self.const_value(node) != 0 else 0)
             return bool_addr
 
         val = self.gen_expr(node)
@@ -708,7 +801,7 @@ class Compiler:
         self.emit("subv", s["base"], INT_SIZE, s["xy"], INT_SIZE, s["target"], INT_SIZE)
 
         if isinstance(val_node, c_ast.Constant):
-            self.emit("mem", s["bool_addr"], 1, 1 if int(val_node.value, 0) != 0 else 0)
+            self.emit("mem", s["bool_addr"], 1, 1 if self.const_value(val_node) != 0 else 0)
         else:
             computed_bool = self.gen_cond(val_node)
             self.emit("add", 0, computed_bool, 1, s["bool_addr"])
@@ -880,7 +973,7 @@ class Compiler:
         shadowed = {}  # name -> previous address (or NO_PREV sentinel) to restore after inlining
         NO_PREV = object()
         for p, val in zip(params, arg_vals):
-            param_size = self.type_size(p.type)
+            param_size = self.param_size(p)
             addr = self.alloc_var(prefix + p.name, param_size)
             self.emit_copy(val, addr)
             shadowed[p.name] = (
@@ -927,18 +1020,79 @@ class Compiler:
             return
 
         if isinstance(node, c_ast.Decl):
+            if self.is_const_decl(node):
+                if not isinstance(node.type, c_ast.ArrayDecl):
+                    raise NotImplementedError("const currently supports initialized arrays only")
+                elem_bits = self.type_size(node.type.type)
+                if isinstance(node.init, c_ast.Constant) and node.init.type == "string":
+                    if elem_bits != TYPE_BITS["char"]:
+                        raise NotImplementedError("string initializers require const char arrays")
+                    values = self.string_bytes(node.init) + [0]
+                elif isinstance(node.init, c_ast.InitList):
+                    values = [self.const_value(item) for item in node.init.exprs]
+                else:
+                    raise NotImplementedError("const currently supports initialized arrays only")
+
+                if node.type.dim is None:
+                    count = len(values)
+                elif isinstance(node.type.dim, c_ast.Constant):
+                    count = int(node.type.dim.value, 0)
+                else:
+                    raise NotImplementedError("const array size must be a compile-time constant")
+                if len(values) > count:
+                    raise NotImplementedError(f"const array '{node.name}' has too many initializers")
+                values.extend([0] * (count - len(values)))
+
+                self.add_const_array(node.name, elem_bits, values)
+                return
+
             meta = self.alloc_meta.get(node.name)
             if meta is not None:
                 if meta["kind"] == "scalar":
                     size = meta["bits"]
                 else:
                     size = meta["bits"] * meta["count"]
+                    self.array_elem_bits[node.name] = meta["bits"]
             else:
                 size = self.type_size(node.type)
+                if isinstance(node.type, c_ast.ArrayDecl):
+                    self.array_elem_bits[node.name] = self.type_size(node.type.type)
             addr = self.alloc_var(node.name, size)
             if node.init is not None:
-                rhs = self.gen_expr(node.init)
-                self.emit_copy(rhs, addr)
+                if isinstance(node.init, c_ast.InitList):
+                    if not isinstance(node.type, c_ast.ArrayDecl):
+                        raise NotImplementedError("initializer lists are only supported for 1D arrays")
+                    elem_bits = self.type_size(node.type.type)
+                    for i, item in enumerate(node.init.exprs):
+                        if not isinstance(item, c_ast.Constant):
+                            raise NotImplementedError("array initializer values must be compile-time constants")
+                        elem_addr = addr + i * elem_bits
+                        self.addr_sizes[elem_addr] = elem_bits
+                        self.emit("mem", elem_addr, elem_bits, self.const_value(item))
+                else:
+                    rhs = self.gen_expr(node.init)
+                    self.emit_copy(rhs, addr)
+            return
+
+        if isinstance(node, c_ast.DeclList):
+            for d in node.decls:
+                self.gen_stmt(d)
+            return
+
+        if isinstance(node, c_ast.For):
+            if node.init:
+                self.gen_stmt(node.init)
+            label_start = Label("forloop")
+            label_end = Label("endforloop")
+            self.define_label(label_start)
+            if node.cond is not None:
+                bool_addr = self.gen_cond(node.cond)
+                self.emit("ifnot", bool_addr, 1, label_end)
+            self.gen_stmt(node.stmt)
+            if node.next:
+                self.gen_stmt(node.next)
+            self.emit("setpc", label_start)
+            self.define_label(label_end)
             return
 
         if isinstance(node, (c_ast.Assignment, c_ast.UnaryOp)):
@@ -1045,7 +1199,7 @@ class Compiler:
             line for line in clean_source.splitlines() if not line.strip().startswith("#")
         )
         builtin_typedefs = "\n".join(
-            f"typedef unsigned char {name};" for name in TYPE_BITS
+            f"typedef unsigned char {name};" for name in TYPE_BITS if name != "char"
         )
         clean_source = builtin_typedefs + "\n" + clean_source
         ast = pycparser.CParser().parse(clean_source)
