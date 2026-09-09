@@ -102,8 +102,7 @@ uint32 main()
     }
     else
     {
-        printf("NES keyboard not supported, exiting.");
-        exit();
+        printf("NES keyboard not supported!");
     }
 
     printf("Video game 1");

@@ -35,18 +35,18 @@ Operand encoding conventions (all big-endian):
 1 - NES style keyboard (Up + Down + Left + Right + A + B + select + start) (1 x 8 = 8 bits)
 On keyboard: (Up + Down + Left + Right + C + V + Backspace + Enter)
 
-0x00 (nop)              none                                - do nothing (padding/alignment)
-0x01 (flag)              flag(1), val(1)                     - set the value of a flag with a certain index to a 4-bit value
+0x00 (nop)               none                                 - do nothing (padding/alignment)
+0x01 (flag)              flag(1), val(1)                      - set the value of a flag with a certain index to a 4-bit value
 0x02 (isflagsupported)   flag(1), val(1), reg(1)              - check if a flag with a certain index is supported, result into reg
-0x03 (setbyte)           addr(4), byte(1)                    - set a single memory byte
-0x04 (write)             addr(4), text(0)                    - write text as raw bytes starting at addr
+0x03 (setbyte)           addr(4), byte(1)                     - set a single memory byte
+0x04 (write)             addr(4), text(0)                     - write text as raw bytes starting at addr
 0x05 (outc)              addr(4)                              - output the byte at addr as a character
 0x06 (out)               addr(4)                              - output the byte at addr as a number
-0x07 (input)             chars(4), addr(4)                   - read chars and store them as bytes starting at addr
+0x07 (input)             chars(4), addr(4)                    - read chars and store them as bytes starting at addr
 0x08 (print)             text(0)                              - print text
 0x09 (printn)            text(0)                              - print text without a newline
-0x0A (printv)            chars(4), addr(4)                   - print chars bytes from memory as characters
-0x0B (printvn)           chars(4), addr(4)                   - same as printv without a newline
+0x0A (printv)            chars(4), addr(4)                    - print chars bytes from memory as characters
+0x0B (printvn)           chars(4), addr(4)                    - same as printv without a newline
 0x0C (cur)               none                                 - print the current position in the bytecode
 0x0D (memory)            none                                 - print the current state of memory (hex dump)
 0x0E (flags)             none                                 - print the current state of flags
