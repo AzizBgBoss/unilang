@@ -36,8 +36,6 @@ const uint4 glyph_rows[570] = {
     2, 2, 2, 2, 2, 0, 3, 2, 4, 2, 3, 0, 0, 3, 6, 0, 0, 0
 };
 
-const char hud_label[] = "Sussy bus:";
-
 uint8 draw_char(uint8 ch, uint8 ox, uint8 oy)
 {
     if (ch < 32)
@@ -76,24 +74,14 @@ uint8 draw_string(const char text[], uint8 ox, uint8 oy)
 
 uint8 player_x = 0;
 uint8 player_y = 0;
-uint8 player_w = 2;
-uint8 player_h = 3;
+uint8 player_w = 3;
+uint8 player_h = 5;
 uint8 jumpTimer = 0;
 
 uint8 draw_player()
 {
     // Draw the player as a white square
-    uint8 x = player_x;
-    while (x < player_x + player_w)
-    {
-        uint8 y = player_y;
-        while (y < player_y + player_h)
-        {
-            setpixel(x, y, 1); // Set pixel to white
-            y++;
-        }
-        x++;
-    }
+    draw_char('I', player_x, player_y);
 }
 
 uint32 main()
@@ -169,7 +157,6 @@ uint32 main()
         }
         
         draw_player();
-        draw_string(hud_label, 0, 0);
         draw_char((player_x % 10) + '0', 10, 0);
         refreshscreen();
     }

@@ -11,9 +11,9 @@ Function calls are implemented by INLINING the callee's body at the call site
 (with fresh, uniquely-named parameter/local/return addresses per call) rather
 than using the VM's 'subroutine'/'return' opcodes. This means:
   - functions can freely call other functions, including from inside other
-    functions (not just from main) — inlining just flattens it all out.
+    functions (not just from main) -- inlining just flattens it all out.
   - `return` inside a function is compiled as "write result, then setpc to
-    the end of this inlined copy" — so early returns work fine.
+    the end of this inlined copy" -- so early returns work fine.
   - RECURSION IS NOT SUPPORTED (direct or mutual) and is rejected at compile
     time with a clear error, since inlining a recursive call would mean
     infinite code.
@@ -25,9 +25,31 @@ Memory sizing: the compiler no longer assumes a fixed VM memory size. At the
 very start of the compiled program it emits a `getmemsize` call to ask the
 VM for its actual memory size at runtime, and uses that value (not a Python
 constant) for setpixel()/getkey()'s address math. It also compares that
-runtime size against how many bits the program actually needed at compile
-time and prints a warning (it still runs — it just may misbehave, e.g. by
+runtime size against how many bytes the program actually needed at compile
+time and prints a warning (it still runs -- it just may misbehave, e.g. by
 colliding with the graphics framebuffer) if there isn't enough room.
+
+REGISTER/BYTE-ONLY REWRITE (matches main.py's clean ISA):
+  - Memory is byte-addressable; every scalar type (bool, char, uint1..uint8,
+    uint16, uint32) now occupies a whole number of bytes: 1 byte for anything
+    uint8-or-narrower (bool/char/uint1-8), 2 bytes for uint16, 4 for uint32.
+    The old sub-byte bit-packing (e.g. eight uint1's sharing one byte) is
+    GONE -- uint1..uint4 are now identical to uint8 in storage (1 byte each).
+    This trades some memory density for a much simpler, faster codegen.
+  - All arithmetic/logic/comparison happens by loading operands into two
+    scratch registers (r14, r15), doing the op, and storing the result back
+    to memory -- registers are never allocated to persist across statements,
+    since this compiler's model (inline everything, no real stack) doesn't
+    need that yet. r0-r13 are unused by the compiler and free for hand-written
+    inline register-asm blocks in the future if that's ever added.
+  - Pointer dereferencing and array-element access with a runtime index now
+    compile to `loadregi*/storeregi*` (address held in a register), replacing
+    the old `setmem` double-indirection opcode.
+  - `romread(pos, size)`'s `size` argument is now a BYTE count (1, 2, or 4),
+    not a bit count -- same for __mem_load/__mem_store's size argument.
+  - `alloc <N> name;` still takes N in bits for source-compatibility, but now
+    rounds up to ceil(N/8) bytes -- `alloc 4 x;` and `alloc 8 x;` both now
+    allocate a single byte.
 '''
 
 import re
@@ -140,69 +162,103 @@ def apply_defines(source):
     return source
 
 
+
+
 # ---------------------------------------------------------------------------
 # Opcode table (subset of main.py's ISA needed by this compiler)
 # name: (opcode byte, [operand widths in bytes, 0 = length-prefixed text])
 # ---------------------------------------------------------------------------
 OPS = {
-    "flag":      (0x01, [1, 1]),                # flag, val
-    "isflagsupported": (0x02, [1, 1, 4, 1]),   # flag, val, addr, size
-    "mem":       (0x03, [4, 1, 4]),             # addr, size, val
-    "setmem":    (0x04, [4, 1, 4, 1]),          # addr1(ptr), size1, addr2(ptr), size2
-    "write":     (0x05, [0, 4, 1]),             # text, addr, size
-    "out":       (0x07, [4, 1]),                # addr, size
-    "print":     (0x09, [0]),                   # text
-    "printn":    (0x0A, [0]),                   # text
-    "add":       (0x0E, [4, 4, 1, 4]),          # val, addr1, size1, addr2
-    "addv":      (0x0F, [4, 1, 4, 1, 4, 1]),
-    "sub":       (0x10, [4, 4, 1, 4]),
-    "subv":      (0x11, [4, 1, 4, 1, 4, 1]),
-    "mul":       (0x12, [4, 4, 1, 4]),
-    "mulv":      (0x13, [4, 1, 4, 1, 4, 1]),
-    "div":       (0x14, [4, 4, 1, 4]),
-    "divv":      (0x15, [4, 1, 4, 1, 4, 1]),
-    "mod":       (0x16, [4, 4, 1, 4]),
-    "modv":      (0x17, [4, 1, 4, 1, 4, 1]),
-    "setpc":     (0x1B, [4]),                   # pos
-    "compare":   (0x1F, [4, 4, 1, 4, 1]),       # val, addr1, size1, addr2, size2
-    "comparev":  (0x20, [4, 1, 4, 1, 4, 1]),
-    "isequal":   (0x21, [4, 4, 1, 4]),          # val, addr1, size1, addr2
-    "not":       (0x22, [4, 1, 4, 1]),
-    "or":        (0x23, [4, 1, 4, 1, 4, 1]),
-    "and":       (0x24, [4, 1, 4, 1, 4, 1]),
-    "nor":       (0x25, [4, 1, 4, 1, 4, 1]),
-    "nand":      (0x26, [4, 1, 4, 1, 4, 1]),
-    "xor":       (0x27, [4, 1, 4, 1, 4, 1]),
-    "xnor":      (0x28, [4, 1, 4, 1, 4, 1]),
-    "shl":       (0x29, [4, 1, 4, 1, 4, 1]),
-    "shr":       (0x2A, [4, 1, 4, 1, 4, 1]),
-    "if":        (0x2D, [4, 1, 4]),             # addr, size, pos
-    "ifnot":     (0x2E, [4, 1, 4]),
-    "sleep":     (0x31, [4]),                   # ms
-    "getmemsize": (0x33, [4, 1]),               # addr, size
-    "refreshscreen": (0x34, []),
-    "getflag":   (0x35, [1, 4, 1]),             # flag_index, addr, size
-    "romread":   (0x36, [4, 4, 1]),             # pos, addr, size
-    "setpixel":  (0x37, [4, 1, 4, 1, 4, 1]),    # addrx, sizex, addry, sizey, addrc, sizec
-    "exit":      (0xFF, []),
+    "flag":            (0x01, [1, 1]),               # flag, val
+    "isflagsupported": (0x02, [1, 1, 1]),            # flag, val, reg
+    "setbyte":         (0x03, [4, 1]),               # addr, byte
+    "write":           (0x04, [4, 0]),               # addr, text
+    "outc":            (0x05, [4]),                  # addr
+    "out":             (0x06, [4]),                  # addr (single byte, 0-255)
+    "input":           (0x07, [4, 4]),                # chars, addr
+    "print":           (0x08, [0]),                  # text
+    "printn":          (0x09, [0]),                  # text
+    "printv":          (0x0A, [4, 4]),                # chars, addr
+    "printvn":         (0x0B, [4, 4]),                # chars, addr
+    "setpc":           (0x0F, [4]),                  # pos
+    "sleep":           (0x12, [4]),                  # ms
+    "refreshscreen":   (0x13, []),
+    "romread8":        (0x14, [1, 1]),                # reg_addr, reg_dst
+    "romread16":       (0x15, [1, 1]),
+    "romread32":       (0x16, [1, 1]),
+    "setpixel":        (0x17, [1, 1, 1]),             # regx, regy, regc
+    "getpixel":        (0x18, [1, 1, 1]),             # regx, regy, regdst
+    "getkeyboard":     (0x19, [1]),                   # reg
+    "gettime":         (0x1A, [1]),                   # reg
+    "getmemsize":      (0x1B, [1]),                   # reg
+    "getflag":         (0x1C, [1, 1]),                # flag, reg
+
+    "setreg":          (0x40, [1, 4]),                # reg, val
+    "movreg":          (0x41, [1, 1]),                # dst, src
+    "loadreg8":        (0x42, [1, 4]),                # reg, addr
+    "loadreg16":       (0x43, [1, 4]),
+    "loadreg32":       (0x44, [1, 4]),
+    "storereg8":       (0x45, [1, 4]),                # reg, addr
+    "storereg16":      (0x46, [1, 4]),
+    "storereg32":      (0x47, [1, 4]),
+    "addreg":          (0x48, [1, 1, 1]),             # r1, r2, dst
+    "subreg":          (0x49, [1, 1, 1]),
+    "mulreg":          (0x4A, [1, 1, 1]),
+    "divreg":          (0x4B, [1, 1, 1]),
+    "modreg":          (0x4C, [1, 1, 1]),
+    "addregv":         (0x4D, [1, 4, 1]),             # r1, const, dst
+    "subregv":         (0x4E, [1, 4, 1]),
+    "mulregv":         (0x4F, [1, 4, 1]),
+    "compreg":         (0x50, [1, 1, 1]),
+    "ifreg":           (0x51, [1, 4]),                # reg, pos
+    "ifnotreg":        (0x52, [1, 4]),
+    "notreg":          (0x55, [1, 1]),                # r1, dst
+    "orreg":           (0x56, [1, 1, 1]),
+    "andreg":          (0x57, [1, 1, 1]),
+    "norreg":          (0x58, [1, 1, 1]),
+    "nandreg":         (0x59, [1, 1, 1]),
+    "xorreg":          (0x5A, [1, 1, 1]),
+    "xnorreg":         (0x5B, [1, 1, 1]),
+    "shlreg":          (0x5C, [1, 1, 1]),
+    "shrreg":          (0x5D, [1, 1, 1]),
+
+    "loadregi8":       (0x60, [1, 1]),                # reg_addr, reg_dst
+    "loadregi16":      (0x61, [1, 1]),
+    "loadregi32":      (0x62, [1, 1]),
+    "storeregi8":      (0x63, [1, 1]),                # reg_addr, reg_val
+    "storeregi16":     (0x64, [1, 1]),
+    "storeregi32":     (0x65, [1, 1]),
+
+    "eqreg":           (0x66, [1, 1, 1]),
+    "neqreg":          (0x67, [1, 1, 1]),
+    "ltreg":           (0x68, [1, 1, 1]),
+    "gtreg":           (0x69, [1, 1, 1]),
+    "lereg":           (0x6A, [1, 1, 1]),
+    "gereg":           (0x6B, [1, 1, 1]),
+    "outreg":          (0x6C, [1]),                   # reg -- print full numeric value
+
+    "exit":            (0xFF, []),
 }
 
-TYPE_BITS = {
+# Two scratch registers used for every arithmetic/logic/comparison emission.
+# They're never left "live" across other emit() calls -- each helper below
+# does load(s) -> op -> store as one atomic sequence, so reusing the same
+# two registers everywhere is safe.
+RA, RB = 14, 15
+
+TYPE_BYTES = {
     "bool": 1,
-    "char": 8,
+    "char": 1,
     "uint1": 1,
-    "uint2": 2,
-    "uint4": 4,
-    "uint8": 8,
-    "uint16": 16,
-    "uint32": 32,
+    "uint2": 1,
+    "uint4": 1,
+    "uint8": 1,
+    "uint16": 2,
+    "uint32": 4,
 }
 DEFAULT_TYPE = "uint32"
-INT_SIZE = TYPE_BITS[DEFAULT_TYPE]  # width used by VM pointers and compiler scratch
-VARS_START = 0          # bit address where user variables start
-
-GFX_64x64_MONO_BITS = 64 * 64   # bits reserved off the end of memory when flag(0, 1) is set
-KEYBOARD_BITS = 8               # bits reserved just before the framebuffer when flag(1, 1) is set
+INT_SIZE = TYPE_BYTES[DEFAULT_TYPE]  # width used by VM pointers and compiler scratch (4 bytes)
+VARS_START = 0          # byte address where user variables start
 
 
 class Label:
@@ -216,9 +272,9 @@ class Compiler:
     def __init__(self):
         self.buf = bytearray()
         self.patches = []          # (byte_offset_in_buf, Label, width)
-        self.vars = {}              # name -> bit address (current scope view)
-        self.var_sizes = {}         # name -> bit width (current scope view)
-        self.addr_sizes = {}        # allocated address -> bit width
+        self.vars = {}              # name -> byte address (current scope view)
+        self.var_sizes = {}         # name -> byte width (current scope view)
+        self.addr_sizes = {}        # allocated address -> byte width
         self.alloc_meta = {}        # name -> {"kind": "scalar"|"array", "bits":..., "count":...}
         self.next_addr = VARS_START
         self.next_temp = 0
@@ -229,13 +285,11 @@ class Compiler:
 
         self.runtime_memsize_addr = None   # set by gen_prologue(); holds getmemsize()'s result
         self.uses_graphics = False         # set True by flag()/setpixel()/getkey()
-        self.required_bits_patch_pos = None  # byte offset to patch once we know final memory usage
-        self.setpixel_scratch = None       # shared scratch addresses, allocated once, reused per call
-        self.getkey_scratch = None
-        self.array_elem_bits = {}   # array variable name -> element width in bits
+        self.required_bytes_patch_pos = None  # byte offset to patch once we know final memory usage
+        self.array_elem_bytes = {}   # array variable name -> element width in bytes
 
-        self.const_arrays = {}       # name -> {base, elem_bits, count}
-        self.rom_data = []           # {"name", "patch_pos", "data"}
+        self.const_arrays = {}       # name -> {base_addr, elem_bytes, count}
+        self.rom_data = []           # {"patch_pos", "data"}
 
     @staticmethod
     def rewrite_alloc_syntax(source):
@@ -303,48 +357,89 @@ class Compiler:
     def addr_size(self, addr):
         return self.addr_sizes.get(addr, INT_SIZE)
 
-    def emit_copy(self, src, dest):
-        # Values are stored right-justified (MSB-first) within their own
-        # bit field, so a narrower field's real payload sits at the END of
-        # its allocated bits, not at its base address. When src/dest widths
-        # differ we must align on the low-order bits and zero-extend the
-        # rest, or a direct same-address read/write either grabs the wrong
-        # (zero-padded) bits or overruns into whatever memory follows.
-        src_size = self.addr_size(src)
-        dest_size = self.addr_size(dest)
-        copy_size = min(src_size, dest_size)
-        src_off = src + (src_size - copy_size)
-        dest_off = dest + (dest_size - copy_size)
-        if dest_size > copy_size:
-            self.emit("mem", dest, dest_size - copy_size, 0)  # zero-extend
-        self.emit("add", 0, src_off, copy_size, dest_off)
+    @staticmethod
+    def _reg_width(size_bytes):
+        if size_bytes not in (1, 2, 4):
+            raise NotImplementedError(f"unsupported operand width ({size_bytes} bytes) -- only 1, 2, or 4 byte values are supported")
+        return size_bytes * 8
 
-    def widen_to_int(self, addr):
-        # Returns an INT_SIZE-wide address holding the same value as addr,
-        # regardless of addr's own width. Needed before feeding addr into
-        # ops (mul/addv/etc.) that assume INT_SIZE-wide operands, since
-        # otherwise they'd read INT_SIZE bits starting at addr's base and
-        # overrun into adjacent memory when addr is narrower (e.g. a uint8
-        # coordinate passed to setpixel/getpixel).
-        if self.addr_size(addr) == INT_SIZE:
-            return addr
-        wide = self.alloc_temp(INT_SIZE)
-        self.emit_copy(addr, wide)
-        return wide
+    # -- register-level emission helpers --------------------------------------
+    def emit_load(self, addr, size, reg):
+        self.emit(f"loadreg{self._reg_width(size)}", reg, addr)
+
+    def emit_store(self, reg, addr, size):
+        self.emit(f"storereg{self._reg_width(size)}", reg, addr)
+
+    def emit_set_const(self, reg, val):
+        self.emit("setreg", reg, val)
+
+    def emit_store_const(self, addr, size, val):
+        # Sets a memory location to a compile-time-known constant.
+        self.emit_set_const(RA, val)
+        self.emit_store(RA, addr, size)
+
+    def emit_copy(self, src, dest):
+        # loadreg zero-extends into a full 32-bit register and storereg
+        # truncates back down, so narrowing/widening between different-sized
+        # variables just falls out of an ordinary load+store -- no special
+        # casing needed (unlike the old bit-field right-justification model).
+        self.emit_load(src, self.addr_size(src), RA)
+        self.emit_store(RA, dest, self.addr_size(dest))
 
     def to_bool(self, addr):
-        # Normalizes any value to a 1-bit 0/1 address (true iff addr != 0).
+        # Normalizes any value to a 1-byte 0/1 address (true iff addr != 0).
         dest = self.alloc_temp(1)
-        self.emit("isequal", 0, addr, self.addr_size(addr), dest)
-        self.emit("not", dest, 1, dest, 1)
+        self.emit_load(addr, self.addr_size(addr), RA)
+        self.emit_set_const(RB, 0)
+        self.emit("neqreg", RA, RB, RA)
+        self.emit_store(RA, dest, 1)
         return dest
+
+    def resolve_operand(self, node):
+        # Fully evaluates an operand to either a compile-time constant or a
+        # stable memory address, WITHOUT touching RA/RB as a side effect that
+        # could be observed later. This must happen before loading any other
+        # operand into a register -- if we loaded operand A into RA and then
+        # resolved a compound operand B, evaluating B could itself use RA/RB
+        # as scratch and clobber A before the caller ever uses it. Resolving
+        # both operands first (each landing in its own temp/constant) and
+        # only THEN loading them into registers, back to back, avoids that.
+        if isinstance(node, c_ast.Constant) and node.type in ("int", "char"):
+            return ("const", self.const_value(node))
+        addr = self.gen_expr(node)
+        return ("addr", addr, self.addr_size(addr))
+
+    def load_resolved(self, resolved, reg):
+        if resolved[0] == "const":
+            self.emit_set_const(reg, resolved[1])
+            return INT_SIZE
+        _, addr, size = resolved
+        self.emit_load(addr, size, reg)
+        return size
+
+    def load_operand(self, node, reg):
+        # Only safe to use when nothing else is depending on a register's
+        # contents surviving this call -- i.e. when this is the ONLY operand
+        # being loaded right now (see resolve_operand/load_resolved for the
+        # two-operand case, which must not interleave evaluation and loading).
+        return self.load_resolved(self.resolve_operand(node), reg)
+
+    def gen_bool_operand(self, node):
+        # Like to_bool(gen_expr(node)), but skips the redundant
+        # load+compare-to-zero+store normalization when node is already
+        # guaranteed to be a 0/1 value (a comparison or another &&/||),
+        # since gen_cond already produces exactly that.
+        comparisons = ("==", "!=", "<", ">", "<=", ">=")
+        if isinstance(node, c_ast.BinaryOp) and (node.op in comparisons or node.op in ("&&", "||")):
+            return self.gen_expr(node)
+        return self.to_bool(self.gen_expr(node))
 
     @staticmethod
     def type_name(type_node):
         if not isinstance(type_node, c_ast.TypeDecl) or not isinstance(type_node.type, c_ast.IdentifierType):
             raise NotImplementedError("only fixed-width unsigned types are supported")
         names = type_node.type.names
-        if len(names) != 1 or names[0] not in TYPE_BITS:
+        if len(names) != 1 or names[0] not in TYPE_BYTES:
             raise NotImplementedError("only bool, char, uint1, uint2, uint4, uint8, uint16, and uint32 are supported")
         return names[0]
 
@@ -357,7 +452,7 @@ class Compiler:
                 return elem_size * count
             return elem_size
         if isinstance(type_node, c_ast.TypeDecl):
-            return TYPE_BITS[cls.type_name(type_node)]
+            return TYPE_BYTES[cls.type_name(type_node)]
         raise NotImplementedError(f"unsupported type node '{type(type_node).__name__}'")
 
     def function_return_size(self, fn):
@@ -387,35 +482,24 @@ class Compiler:
         return list(bytes(node.value[1:-1], "utf-8").decode("unicode_escape").encode("utf-8"))
 
     @staticmethod
-    def pack_values(values, elem_bits):
+    def pack_values(values, elem_bytes):
         packed = bytearray()
-        current_byte = 0
-        bits_in_current_byte = 0
         for value in values:
-            if value < 0 or value >= (1 << elem_bits):
-                raise ValueError(f"constant value {value} does not fit in {elem_bits} bits")
-            for bit_idx in range(elem_bits - 1, -1, -1):
-                current_byte = (current_byte << 1) | ((value >> bit_idx) & 1)
-                bits_in_current_byte += 1
-                if bits_in_current_byte == 8:
-                    packed.append(current_byte)
-                    current_byte = 0
-                    bits_in_current_byte = 0
-        if bits_in_current_byte:
-            packed.append(current_byte << (8 - bits_in_current_byte))
+            if value < 0 or value >= (1 << (elem_bytes * 8)):
+                raise ValueError(f"constant value {value} does not fit in {elem_bytes} byte(s)")
+            packed += value.to_bytes(elem_bytes, "big")
         return bytes(packed)
 
-    def add_const_array(self, name, elem_bits, values):
+    def add_const_array(self, name, elem_bytes, values):
         base = self.alloc_temp(INT_SIZE)
         instr_start = len(self.buf)
-        self.emit("mem", base, INT_SIZE, 0)
-        self.const_arrays[name] = {"base": base, "elem_bits": elem_bits, "count": len(values)}
-        self.array_elem_bits[name] = elem_bits
-        self.rom_data.append({
-            "name": name,
-            "patch_pos": instr_start + 1 + 4 + 1,
-            "data": self.pack_values(values, elem_bits),
-        })
+        # placeholder ROM offset, patched in finalize() once we know it
+        self.emit("setreg", RA, 0)
+        patch_pos = instr_start + 1 + 1  # opcode(1) + reg(1), then the 4-byte val
+        self.emit_store(RA, base, INT_SIZE)
+        self.const_arrays[name] = {"base": base, "elem_bytes": elem_bytes, "count": len(values)}
+        self.array_elem_bytes[name] = elem_bytes
+        self.rom_data.append({"patch_pos": patch_pos, "data": self.pack_values(values, elem_bytes)})
         return base
 
     # -- low level emission ---------------------------------------------------
@@ -443,10 +527,10 @@ class Compiler:
             if label.addr is None:
                 raise RuntimeError(f"label '{label.name}' used but never defined")
             self.buf[pos:pos + width] = label.addr.to_bytes(width, "big")
-        bit_offset = len(self.buf) * 8
+        byte_offset = len(self.buf)
         for item in self.rom_data:
-            self.buf[item["patch_pos"]:item["patch_pos"] + 4] = bit_offset.to_bytes(4, "big")
-            bit_offset += len(item["data"]) * 8
+            self.buf[item["patch_pos"]:item["patch_pos"] + 4] = byte_offset.to_bytes(4, "big")
+            byte_offset += len(item["data"])
         for item in self.rom_data:
             self.buf.extend(item["data"])
         return bytes(self.buf)
@@ -454,47 +538,50 @@ class Compiler:
     # -- startup prologue: query real memory size, warn if too small ------------
     def gen_prologue(self):
         self.runtime_memsize_addr = self.alloc_temp()
-        self.emit("getmemsize", self.runtime_memsize_addr, INT_SIZE)
+        self.emit("getmemsize", RA)
+        self.emit_store(RA, self.runtime_memsize_addr, INT_SIZE)
 
         required_addr = self.alloc_temp()
         instr_start = len(self.buf)
-        self.emit("mem", required_addr, INT_SIZE, 0)  # placeholder; patched once compilation finishes
-        # 'mem' operand layout is (addr[4], size[1], val[4]); val starts after
-        # opcode(1) + addr(4) + size(1) = 6 bytes into this instruction.
-        self.required_bits_patch_pos = instr_start + 1 + 4 + 1
+        self.emit("setreg", RA, 0)  # placeholder; patched once compilation finishes
+        self.required_bytes_patch_pos = instr_start + 1 + 1
+        self.emit_store(RA, required_addr, INT_SIZE)
 
-        cmp_result = self.alloc_temp()
-        self.emit("comparev", self.runtime_memsize_addr, INT_SIZE, required_addr, INT_SIZE, cmp_result, INT_SIZE)
-        # comparev: 0=equal, 1=runtime>required, 2=runtime<required
-        too_small = self.alloc_temp()
-        self.emit("isequal", 2, cmp_result, INT_SIZE, too_small)
+        too_small = self.alloc_temp(1)
+        self.emit_load(self.runtime_memsize_addr, INT_SIZE, RA)
+        self.emit_load(required_addr, INT_SIZE, RB)
+        self.emit("ltreg", RA, RB, RA)  # RA = 1 if runtime memsize < required
+        self.emit_store(RA, too_small, 1)
 
         label_ok = Label("memsize_ok")
-        self.emit("ifnot", too_small, 1, label_ok)
+        self.emit_load(too_small, 1, RA)
+        self.emit("ifnotreg", RA, label_ok)
         self.emit("printn", "WARNING: this program needs at least ")
-        self.emit("out", required_addr, INT_SIZE)
-        self.emit("printn", " bits of memory, but only ")
-        self.emit("out", self.runtime_memsize_addr, INT_SIZE)
+        self.emit_load(required_addr, INT_SIZE, RA)
+        self.emit("outreg", RA)
+        self.emit("printn", " bytes of memory, but only ")
+        self.emit_load(self.runtime_memsize_addr, INT_SIZE, RA)
+        self.emit("outreg", RA)
         self.emit("print", " are available. Increase 'memsize' in main.py.")
         self.define_label(label_ok)
 
-    # -- expressions: returns the bit-address holding the result --------------
+    # -- expressions: returns the byte-address holding the result --------------
     def gen_expr(self, node):
         if isinstance(node, c_ast.Constant):
             if node.type == "string":
                 name = f"__str{len(self.rom_data)}"
-                return self.add_const_array(name, TYPE_BITS["char"], self.string_bytes(node) + [0])
+                return self.add_const_array(name, TYPE_BYTES["char"], self.string_bytes(node) + [0])
             if node.type not in ("int", "char"):
                 raise NotImplementedError(f"unsupported constant type '{node.type}'")
             val = self.const_value(node)
             dest = self.alloc_temp(INT_SIZE)
-            self.emit("mem", dest, INT_SIZE, val)
+            self.emit_store_const(dest, INT_SIZE, val)
             return dest
 
         if isinstance(node, c_ast.ID):
             if node.name in ("true", "false"):
                 dest = self.alloc_temp(INT_SIZE)
-                self.emit("mem", dest, INT_SIZE, 1 if node.name == "true" else 0)
+                self.emit_store_const(dest, INT_SIZE, 1 if node.name == "true" else 0)
                 return dest
             if node.name in self.const_arrays:
                 return self.const_arrays[node.name]["base"]
@@ -503,39 +590,53 @@ class Compiler:
         if isinstance(node, c_ast.ArrayRef):
             if isinstance(node.name, c_ast.ID) and node.name.name in self.const_arrays:
                 const_array = self.const_arrays[node.name.name]
-                index = self.widen_to_int(self.gen_expr(node.subscript))
-                offset = self.alloc_temp(INT_SIZE)
-                self.emit("mul", const_array["elem_bits"], index, INT_SIZE, offset)
-                pos_addr = self.alloc_temp(INT_SIZE)
-                self.emit("addv", const_array["base"], INT_SIZE, offset, INT_SIZE, pos_addr, INT_SIZE)
-                result = self.alloc_temp(const_array["elem_bits"])
-                self.emit("romread", pos_addr, result, const_array["elem_bits"])
+                elem_bytes = const_array["elem_bytes"]
+                index_addr = self.gen_expr(node.subscript)
+                self.emit_load(index_addr, self.addr_size(index_addr), RA)
+                self.emit("mulregv", RA, elem_bytes, RA)          # RA = index * elem_bytes
+                self.emit_load(const_array["base"], INT_SIZE, RB)  # RB = ROM base offset
+                self.emit("addreg", RA, RB, RA)                    # RA = absolute ROM offset
+                self.emit(f"romread{elem_bytes * 8}", RA, RB)      # RB = value read from ROM
+                result = self.alloc_temp(elem_bytes)
+                self.emit_store(RB, result, elem_bytes)
                 return result
-            base = self.gen_expr(node.name)
-            index = self.widen_to_int(self.gen_expr(node.subscript))
-            elem_bits = self.array_elem_bits.get(node.name.name, INT_SIZE) if isinstance(node.name, c_ast.ID) else INT_SIZE
-            offset = self.alloc_temp(INT_SIZE)
-            self.emit("mul", elem_bits, index, INT_SIZE, offset)
-            addr_val = self.alloc_temp(INT_SIZE)
-            self.emit("add", base, offset, INT_SIZE, addr_val)
-            result = self.alloc_temp(elem_bits)
-            dest_ptr_addr = self.alloc_temp(INT_SIZE)
-            self.emit("mem", dest_ptr_addr, INT_SIZE, result)
-            self.emit("setmem", addr_val, elem_bits, dest_ptr_addr, elem_bits)
+
+            if not isinstance(node.name, c_ast.ID):
+                raise NotImplementedError("only simple array names can be indexed")
+            base_addr = self.var_addr(node.name.name)
+            elem_bytes = self.array_elem_bytes.get(node.name.name, INT_SIZE)
+            index_addr = self.gen_expr(node.subscript)
+            self.emit_load(index_addr, self.addr_size(index_addr), RA)
+            self.emit("mulregv", RA, elem_bytes, RA)      # RA = index * elem_bytes
+            self.emit("addregv", RA, base_addr, RA)       # RA = absolute runtime address
+            self.emit(f"loadregi{elem_bytes * 8}", RA, RB)
+            result = self.alloc_temp(elem_bytes)
+            self.emit_store(RB, result, elem_bytes)
             return result
 
         if isinstance(node, c_ast.UnaryOp):
             if node.op == "&":
                 if isinstance(node.expr, c_ast.ID):
-                    return self.var_addr(node.expr.name)
-                if isinstance(node.expr, c_ast.ArrayRef):
-                    base = self.gen_expr(node.expr.name)
-                    idx = self.gen_expr(node.expr.subscript)
-                    elem_bits = self.array_elem_bits.get(node.expr.name.name, INT_SIZE) if isinstance(node.expr.name, c_ast.ID) else INT_SIZE
-                    offset = self.alloc_temp(INT_SIZE)
-                    self.emit("mul", elem_bits, idx, INT_SIZE, offset)
+                    # Must produce a temp whose VALUE is the address (so
+                    # emit_copy/gen_expr consumers -- which always treat a
+                    # gen_expr result as "a location to load from" -- see a
+                    # location holding the address, not the address itself
+                    # misread as a location).
+                    addr_val = self.var_addr(node.expr.name)
                     out = self.alloc_temp(INT_SIZE)
-                    self.emit("addv", base, INT_SIZE, offset, INT_SIZE, out, INT_SIZE)
+                    self.emit_store_const(out, INT_SIZE, addr_val)
+                    return out
+                if isinstance(node.expr, c_ast.ArrayRef):
+                    if not isinstance(node.expr.name, c_ast.ID):
+                        raise NotImplementedError("only simple array names can be indexed")
+                    base_addr = self.var_addr(node.expr.name.name)
+                    elem_bytes = self.array_elem_bytes.get(node.expr.name.name, INT_SIZE)
+                    index_addr = self.gen_expr(node.expr.subscript)
+                    self.emit_load(index_addr, self.addr_size(index_addr), RA)
+                    self.emit("mulregv", RA, elem_bytes, RA)
+                    self.emit("addregv", RA, base_addr, RA)
+                    out = self.alloc_temp(INT_SIZE)
+                    self.emit_store(RA, out, INT_SIZE)
                     return out
                 raise NotImplementedError("only identifiers and array elements can be addressed")
 
@@ -550,52 +651,68 @@ class Compiler:
         if isinstance(node, c_ast.UnaryOp):
             if node.op in ("p++", "++", "p--", "--"):
                 addr = self.var_addr(node.expr.name)
-                self.emit("add" if "+" in node.op else "sub", 1, addr, self.addr_size(addr), addr)
+                size = self.addr_size(addr)
+                self.emit_load(addr, size, RA)
+                self.emit("addregv" if "+" in node.op else "subregv", RA, 1, RA)
+                self.emit_store(RA, addr, size)
                 return addr
             raise NotImplementedError(f"unsupported unary operator '{node.op}'")
 
         if isinstance(node, c_ast.BinaryOp):
             comparisons = ("==", "!=", "<", ">", "<=", ">=")
             if node.op in comparisons:
-                # Comparisons now produce a usable 1-bit 0/1 value, not just
-                # a condition for if/while — gen_cond already builds exactly
+                # Comparisons now produce a usable 0/1 value, not just a
+                # condition for if/while -- gen_cond already builds exactly
                 # that, so reuse it here.
                 return self.gen_cond(node)
 
             if node.op in ("&&", "||"):
-                left_bool = self.to_bool(self.gen_expr(node.left))
-                right_bool = self.to_bool(self.gen_expr(node.right))
+                left_bool = self.gen_bool_operand(node.left)
+                right_bool = self.gen_bool_operand(node.right)
+                self.emit_load(left_bool, 1, RA)
+                self.emit_load(right_bool, 1, RB)
+                self.emit("andreg" if node.op == "&&" else "orreg", RA, RB, RA)
                 dest = self.alloc_temp(1)
-                self.emit("and" if node.op == "&&" else "or", left_bool, 1, right_bool, 1, dest, 1)
+                self.emit_store(RA, dest, 1)
                 return dest
 
-            bitwise_ops = {"&": "and", "|": "or", "^": "xor", "<<": "shl", ">>": "shr"}
+            bitwise_ops = {"&": "andreg", "|": "orreg", "^": "xorreg", "<<": "shlreg", ">>": "shrreg"}
             if node.op in bitwise_ops:
-                left = self.gen_expr(node.left)
-                left_size = self.addr_size(left)
-                right = self.gen_expr(node.right)
-                right_size = self.addr_size(right)
+                left_r = self.resolve_operand(node.left)
+                right_r = self.resolve_operand(node.right)
+                left_size = self.load_resolved(left_r, RA)
+                right_size = self.load_resolved(right_r, RB)
                 # shl/shr keep the left operand's width; the others take the wider of the two.
                 result_size = left_size if node.op in ("<<", ">>") else max(left_size, right_size)
+                self.emit(bitwise_ops[node.op], RA, RB, RA)
                 dest = self.alloc_temp(result_size)
-                self.emit(bitwise_ops[node.op], left, left_size, right, right_size, dest, result_size)
+                self.emit_store(RA, dest, result_size)
                 return dest
 
-            immediate_ops = {"+": "add", "-": "sub", "*": "mul", "/": "div", "%": "mod"}
-            var_ops = {"+": "addv", "-": "subv", "*": "mulv", "/": "divv", "%": "modv"}
-            if node.op not in immediate_ops:
+            const_ops = {"+": "addregv", "-": "subregv", "*": "mulregv"}
+            reg_ops = {"+": "addreg", "-": "subreg", "*": "mulreg", "/": "divreg", "%": "modreg"}
+            if node.op not in reg_ops:
                 raise NotImplementedError(f"unsupported operator '{node.op}' in expression")
-            left = self.gen_expr(node.left)
-            left_size = self.addr_size(left)
-            if isinstance(node.right, c_ast.Constant):
+            right_is_const = isinstance(node.right, c_ast.Constant)
+            left_is_const = isinstance(node.left, c_ast.Constant)
+            if right_is_const and node.op in const_ops:
+                left_size = self.load_operand(node.left, RA)
+                self.emit(const_ops[node.op], RA, self.const_value(node.right), RA)
                 result_size = left_size
-                dest = self.alloc_temp(result_size)
-                self.emit(immediate_ops[node.op], self.const_value(node.right), left, left_size, dest)
+            elif left_is_const and node.op in ("+", "*"):
+                # commutative -- swap so the constant still uses the cheaper *v opcode
+                right_size = self.load_operand(node.right, RA)
+                self.emit(const_ops[node.op], RA, self.const_value(node.left), RA)
+                result_size = right_size
             else:
-                right = self.gen_expr(node.right)
-                result_size = max(left_size, self.addr_size(right))
-                dest = self.alloc_temp(result_size)
-                self.emit(var_ops[node.op], left, left_size, right, self.addr_size(right), dest, result_size)
+                left_r = self.resolve_operand(node.left)
+                right_r = self.resolve_operand(node.right)
+                left_size = self.load_resolved(left_r, RA)
+                right_size = self.load_resolved(right_r, RB)
+                self.emit(reg_ops[node.op], RA, RB, RA)
+                result_size = max(left_size, right_size)
+            dest = self.alloc_temp(result_size)
+            self.emit_store(RA, dest, result_size)
             return dest
 
         if isinstance(node, c_ast.FuncCall):
@@ -603,11 +720,13 @@ class Compiler:
             if name == "romread":
                 args = node.args.exprs if node.args else []
                 if len(args) != 2 or not isinstance(args[1], c_ast.Constant):
-                    raise NotImplementedError("romread(pos, size) takes a ROM bit-position expression and a constant size")
-                pos = self.widen_to_int(self.gen_expr(args[0]))
+                    raise NotImplementedError("romread(pos, size) takes a ROM byte-position expression and a constant size (1, 2, or 4 bytes)")
+                pos = self.gen_expr(args[0])
                 size = int(args[1].value, 0)
+                self.emit_load(pos, self.addr_size(pos), RA)
+                self.emit(f"romread{self._reg_width(size)}", RA, RB)
                 dest = self.alloc_temp(size)
-                self.emit("romread", pos, dest, size)
+                self.emit_store(RB, dest, size)
                 return dest
             if name == "getkey":
                 return self.gen_getkey()
@@ -627,23 +746,20 @@ class Compiler:
                 else:
                     raise NotImplementedError("input() requires the address of a variable, e.g. input(&name)")
                 size = self.addr_size(target)
-                chars = max(1, size // 8)
-                self.emit("input", chars, target, size)
+                self.emit("input", size, target)
                 return target
             if name == "__mem_load":
                 args = node.args.exprs if node.args else []
                 if len(args) != 2:
                     raise NotImplementedError("__mem_load(addr, size) takes exactly two arguments")
                 if not isinstance(args[1], c_ast.Constant):
-                    raise NotImplementedError("__mem_load() size must be a compile-time constant")
+                    raise NotImplementedError("__mem_load() size must be a compile-time constant (1, 2, or 4 bytes)")
                 addr = self.gen_expr(args[0])
                 size = int(args[1].value, 0)
+                self.emit_load(addr, INT_SIZE, RA)  # RA = the runtime pointer value stored at addr
+                self.emit(f"loadregi{self._reg_width(size)}", RA, RB)
                 dest = self.alloc_temp(size)
-                addr_ptr_addr = self.alloc_temp(INT_SIZE)
-                dest_ptr_addr = self.alloc_temp(INT_SIZE)
-                self.emit("mem", addr_ptr_addr, INT_SIZE, addr)
-                self.emit("mem", dest_ptr_addr, INT_SIZE, dest)
-                self.emit("setmem", addr_ptr_addr, size, dest_ptr_addr, size)
+                self.emit_store(RB, dest, size)
                 return dest
             if name == "__mem_ptr":
                 args = node.args.exprs if node.args else []
@@ -658,48 +774,27 @@ class Compiler:
 
         raise NotImplementedError(f"unsupported expression node '{type(node).__name__}'")
 
-    # -- conditions: returns a 1-bit boolean address ---------------------------
+    # -- conditions: returns a 1-byte boolean address ---------------------------
     def gen_cond(self, node):
         comparisons = ("==", "!=", "<", ">", "<=", ">=")
+        opmap = {"==": "eqreg", "!=": "neqreg", "<": "ltreg", ">": "gtreg", "<=": "lereg", ">=": "gereg"}
         if isinstance(node, c_ast.BinaryOp) and node.op in comparisons:
-            op = node.op
+            left_r = self.resolve_operand(node.left)
+            right_r = self.resolve_operand(node.right)
+            self.load_resolved(left_r, RA)
+            self.load_resolved(right_r, RB)
+            self.emit(opmap[node.op], RA, RB, RA)
             bool_addr = self.alloc_temp(1)
-            if isinstance(node.right, c_ast.Constant):
-                left = self.gen_expr(node.left)
-                rhs_val = self.const_value(node.right)
-                result = self.alloc_temp(2)
-                self.emit("compare", rhs_val, left, self.addr_size(left), result, 2)
-                code_for = {"==": 0, "<": 1, ">": 2}
-                if op in code_for:
-                    self.emit("isequal", code_for[op], result, 2, bool_addr)
-                else:
-                    inverse = {"!=": 0, "<=": 2, ">=": 1}[op]
-                    self.emit("isequal", inverse, result, 2, bool_addr)
-                    self.emit("not", bool_addr, 1, bool_addr, 1)
-            else:
-                left = self.gen_expr(node.left)
-                right = self.gen_expr(node.right)
-                result = self.alloc_temp(2)
-                self.emit("comparev", left, self.addr_size(left), right, self.addr_size(right), result, 2)
-                code_for = {"==": 0, ">": 1, "<": 2}
-                if op in code_for:
-                    self.emit("isequal", code_for[op], result, 2, bool_addr)
-                else:
-                    inverse = {"!=": 0, "<=": 1, ">=": 2}[op]
-                    self.emit("isequal", inverse, result, 2, bool_addr)
-                    self.emit("not", bool_addr, 1, bool_addr, 1)
+            self.emit_store(RA, bool_addr, 1)
             return bool_addr
 
         if isinstance(node, c_ast.Constant):
             bool_addr = self.alloc_temp(1)
-            self.emit("mem", bool_addr, 1, 1 if self.const_value(node) != 0 else 0)
+            self.emit_store_const(bool_addr, 1, 1 if self.const_value(node) != 0 else 0)
             return bool_addr
 
         val = self.gen_expr(node)
-        bool_addr = self.alloc_temp(1)
-        self.emit("isequal", 0, val, self.addr_size(val), bool_addr)
-        self.emit("not", bool_addr, 1, bool_addr, 1)
-        return bool_addr
+        return self.to_bool(val)
 
     # -- printf ----------------------------------------------------------------
     def gen_printf(self, call):
@@ -722,16 +817,16 @@ class Compiler:
                 self.emit("printn", literal)
             if i < len(rest):
                 addr = self.gen_expr(rest[i])
-                self.emit("out", addr, self.addr_size(addr))
+                self.emit_load(addr, self.addr_size(addr), RA)
+                self.emit("outreg", RA)  # prints the register's full numeric value, any width
         if trailing_newline:
             self.emit("print", "")
 
     # -- graphics / keyboard builtins ------------------------------------------
     def gen_setpixel(self, call):
-        # setpixel(x, y, val) now compiles to a single native VM opcode
-        # (0x37) -- the mode/width/framebuffer-offset math that used to be
-        # ~20 interpreted instructions per call now happens once, in the
-        # VM's own dispatch, per pixel.
+        # setpixel(x, y, val) compiles to a single native VM opcode (0x17)
+        # operating on registers -- the mode/width/framebuffer-offset math
+        # happens once, in the VM's own dispatch, per pixel.
         self.uses_graphics = True
         args = call.args.exprs if call.args else []
         if len(args) != 3:
@@ -740,139 +835,39 @@ class Compiler:
 
         x_addr = self.gen_expr(x_node)
         y_addr = self.gen_expr(y_node)
-
         if isinstance(val_node, c_ast.Constant):
             val_addr = self.alloc_temp(1)
-            self.emit("mem", val_addr, 1, 1 if self.const_value(val_node) != 0 else 0)
+            self.emit_store_const(val_addr, 1, 1 if self.const_value(val_node) != 0 else 0)
         else:
             val_addr = self.gen_cond(val_node)
 
-        self.emit("setpixel", x_addr, self.addr_size(x_addr), y_addr, self.addr_size(y_addr),
-                   val_addr, self.addr_size(val_addr))
+        self.emit_load(x_addr, self.addr_size(x_addr), 10)
+        self.emit_load(y_addr, self.addr_size(y_addr), 11)
+        self.emit_load(val_addr, self.addr_size(val_addr), 12)
+        self.emit("setpixel", 10, 11, 12)
 
     def gen_getpixel(self, call):
         self.uses_graphics = True
         args = call.args.exprs if call.args else []
         if len(args) != 2:
             raise NotImplementedError("getpixel(x, y) takes exactly 2 arguments")
-
         x_addr = self.gen_expr(args[0])
         y_addr = self.gen_expr(args[1])
-
-        if self.setpixel_scratch is None:
-            self.setpixel_scratch = {
-                "mode": self.alloc_temp(4),
-                "width": self.alloc_temp(),
-                "fb_bits": self.alloc_temp(),
-                "kbd_bits": self.alloc_temp(),
-                "reserved": self.alloc_temp(),
-                "y_mul": self.alloc_temp(),
-                "xy": self.alloc_temp(),
-                "base": self.alloc_temp(),
-                "target": self.alloc_temp(),
-                "tmp": self.alloc_temp(1),
-                "src_ptr": self.alloc_temp(),
-                "dest": self.alloc_temp(1),
-                "dest_ptr": self.alloc_temp(),
-                "bool_addr": self.alloc_temp(),
-                "x32": self.alloc_temp(),
-                "y32": self.alloc_temp(),
-            }
-        s = self.setpixel_scratch
-
-        self.emit_copy(x_addr, s["x32"])
-        self.emit_copy(y_addr, s["y32"])
-        x_addr, y_addr = s["x32"], s["y32"]
-
-        label_64 = Label("getpixel_64")
-        label_128 = Label("getpixel_128")
-        label_done = Label("getpixel_done")
-
-        self.emit("getflag", 0, s["mode"], 4)
-        self.emit("mem", s["width"], INT_SIZE, 64)
-        self.emit("mem", s["fb_bits"], INT_SIZE, 64 * 64)
-        self.emit("mem", s["kbd_bits"], INT_SIZE, 8)
-
-        self.emit("isequal", 4, s["mode"], 4, s["tmp"])
-        self.emit("ifnot", s["tmp"], 1, label_128)
-        self.emit("mem", s["width"], INT_SIZE, 128)
-        self.emit("mem", s["fb_bits"], INT_SIZE, 128 * 64)
-        self.emit("setpc", label_done)
-
-        self.define_label(label_128)
-        self.emit("isequal", 1, s["mode"], 4, s["tmp"])
-        self.emit("ifnot", s["tmp"], 1, label_64)
-        self.emit("mem", s["width"], INT_SIZE, 64)
-        self.emit("mem", s["fb_bits"], INT_SIZE, 64 * 64)
-        self.emit("setpc", label_done)
-
-        self.define_label(label_64)
-        self.emit("mem", s["width"], INT_SIZE, 64)
-        self.emit("mem", s["fb_bits"], INT_SIZE, 64 * 64)
-        self.define_label(label_done)
-
-        self.emit("addv", s["fb_bits"], INT_SIZE, s["kbd_bits"], INT_SIZE, s["reserved"], INT_SIZE)
-        self.emit("mul", s["width"], y_addr, INT_SIZE, s["y_mul"])
-        self.emit("addv", x_addr, INT_SIZE, s["y_mul"], INT_SIZE, s["xy"], INT_SIZE)
-        self.emit("sub", 1, self.runtime_memsize_addr, INT_SIZE, s["base"])
-        self.emit("subv", s["base"], INT_SIZE, s["xy"], INT_SIZE, s["target"], INT_SIZE)
-        self.emit("mem", s["src_ptr"], INT_SIZE, s["target"])
-        self.emit("mem", s["dest_ptr"], INT_SIZE, s["dest"])
-        self.emit("setmem", s["src_ptr"], 1, s["dest_ptr"], 1)
-        return s["dest"]
+        self.emit_load(x_addr, self.addr_size(x_addr), 10)
+        self.emit_load(y_addr, self.addr_size(y_addr), 11)
+        self.emit("getpixel", 10, 11, 12)
+        dest = self.alloc_temp(1)
+        self.emit_store(12, dest, 1)
+        return dest
 
     def gen_getkey(self):
-        # Reads the keyboard byte based on the currently active graphics and
-        # keyboard flags, instead of assuming a single static offset.
         self.uses_graphics = True
-        if self.getkey_scratch is None:
-            self.getkey_scratch = {
-                "gfx_mode": self.alloc_temp(4),
-                "kbd_mode": self.alloc_temp(4),
-                "fb_bits": self.alloc_temp(),
-                "kbd_bits": self.alloc_temp(),
-                "reserved": self.alloc_temp(),
-                "ptr": self.alloc_temp(),
-                "dest": self.alloc_temp(8),
-                "dest_ptr": self.alloc_temp(),
-                "tmp": self.alloc_temp(1),
-            }
-        s = self.getkey_scratch
-
-        label_64 = Label("getkey_64")
-        label_128 = Label("getkey_128")
-        label_done = Label("getkey_done")
-
-        self.emit("getflag", 0, s["gfx_mode"], 4)
-        self.emit("getflag", 1, s["kbd_mode"], 4)
-        self.emit("mem", s["fb_bits"], INT_SIZE, 0)
-        self.emit("mem", s["kbd_bits"], INT_SIZE, 8)
-        self.emit("mem", s["reserved"], INT_SIZE, 0)
-
-        self.emit("isequal", 4, s["gfx_mode"], 4, s["tmp"])
-        self.emit("ifnot", s["tmp"], 1, label_128)
-        self.emit("mem", s["fb_bits"], INT_SIZE, 128 * 64)
-        self.emit("setpc", label_done)
-
-        self.define_label(label_128)
-        self.emit("isequal", 1, s["gfx_mode"], 4, s["tmp"])
-        self.emit("ifnot", s["tmp"], 1, label_64)
-        self.emit("mem", s["fb_bits"], INT_SIZE, 64 * 64)
-        self.emit("setpc", label_done)
-
-        self.define_label(label_64)
-        self.emit("mem", s["fb_bits"], INT_SIZE, 64 * 64)
-        self.define_label(label_done)
-
-        # Keyboard lives in the reserved tail immediately before the framebuffer.
-        self.emit("addv", s["fb_bits"], INT_SIZE, s["kbd_bits"], INT_SIZE, s["reserved"], INT_SIZE)
-        self.emit("subv", self.runtime_memsize_addr, INT_SIZE, s["reserved"], INT_SIZE, s["ptr"], INT_SIZE)
-        self.emit("mem", s["dest_ptr"], INT_SIZE, s["dest"])
-        self.emit("setmem", s["ptr"], 8, s["dest_ptr"], 8)
-        return s["dest"]
+        self.emit("getkeyboard", 12)
+        dest = self.alloc_temp(1)
+        self.emit_store(12, dest, 1)
+        return dest
 
     def gen_isflagsupported(self, call):
-        # isflagsupported(flag, val) -> 1 if that flag/val combo is supported.
         args = call.args.exprs if call.args else []
         if len(args) != 2:
             raise NotImplementedError("isflagsupported(flag, val) takes exactly 2 arguments")
@@ -880,8 +875,9 @@ class Compiler:
             raise NotImplementedError("isflagsupported(flag, val) requires constant arguments")
         flag = int(args[0].value, 0)
         val = int(args[1].value, 0)
-        dest = self.alloc_temp()
-        self.emit("isflagsupported", flag, val, dest + (INT_SIZE - 1), 1)
+        self.emit("isflagsupported", flag, val, 12)
+        dest = self.alloc_temp(1)
+        self.emit_store(12, dest, 1)
         return dest
 
     # -- functions (compiled by inlining at each call site) -----------------------
@@ -894,7 +890,7 @@ class Compiler:
         if name in self.inlining_stack:
             chain = " -> ".join(self.inlining_stack + [name])
             raise NotImplementedError(
-                f"recursion is not supported ({chain}) — the compiler inlines function "
+                f"recursion is not supported ({chain}) -- the compiler inlines function "
                 "calls, so a recursive call would mean infinite code."
             )
 
@@ -964,9 +960,9 @@ class Compiler:
             if self.is_const_decl(node):
                 if not isinstance(node.type, c_ast.ArrayDecl):
                     raise NotImplementedError("const currently supports initialized arrays only")
-                elem_bits = self.type_size(node.type.type)
+                elem_bytes = self.type_size(node.type.type)
                 if isinstance(node.init, c_ast.Constant) and node.init.type == "string":
-                    if elem_bits != TYPE_BITS["char"]:
+                    if elem_bytes != TYPE_BYTES["char"]:
                         raise NotImplementedError("string initializers require const char arrays")
                     values = self.string_bytes(node.init) + [0]
                 elif isinstance(node.init, c_ast.InitList):
@@ -984,32 +980,35 @@ class Compiler:
                     raise NotImplementedError(f"const array '{node.name}' has too many initializers")
                 values.extend([0] * (count - len(values)))
 
-                self.add_const_array(node.name, elem_bits, values)
+                self.add_const_array(node.name, elem_bytes, values)
                 return
 
             meta = self.alloc_meta.get(node.name)
             if meta is not None:
+                # alloc<N> still specifies N in BITS for source compatibility;
+                # round up to whole bytes since sub-byte packing is gone.
+                elem_size = max(1, (meta["bits"] + 7) // 8)
                 if meta["kind"] == "scalar":
-                    size = meta["bits"]
+                    size = elem_size
                 else:
-                    size = meta["bits"] * meta["count"]
-                    self.array_elem_bits[node.name] = meta["bits"]
+                    size = elem_size * meta["count"]
+                    self.array_elem_bytes[node.name] = elem_size
             else:
                 size = self.type_size(node.type)
                 if isinstance(node.type, c_ast.ArrayDecl):
-                    self.array_elem_bits[node.name] = self.type_size(node.type.type)
+                    self.array_elem_bytes[node.name] = self.type_size(node.type.type)
             addr = self.alloc_var(node.name, size)
             if node.init is not None:
                 if isinstance(node.init, c_ast.InitList):
                     if not isinstance(node.type, c_ast.ArrayDecl):
                         raise NotImplementedError("initializer lists are only supported for 1D arrays")
-                    elem_bits = self.type_size(node.type.type)
+                    elem_bytes = self.type_size(node.type.type)
                     for i, item in enumerate(node.init.exprs):
                         if not isinstance(item, c_ast.Constant):
                             raise NotImplementedError("array initializer values must be compile-time constants")
-                        elem_addr = addr + i * elem_bits
-                        self.addr_sizes[elem_addr] = elem_bits
-                        self.emit("mem", elem_addr, elem_bits, self.const_value(item))
+                        elem_addr = addr + i * elem_bytes
+                        self.addr_sizes[elem_addr] = elem_bytes
+                        self.emit_store_const(elem_addr, elem_bytes, self.const_value(item))
                 else:
                     rhs = self.gen_expr(node.init)
                     self.emit_copy(rhs, addr)
@@ -1028,7 +1027,8 @@ class Compiler:
             self.define_label(label_start)
             if node.cond is not None:
                 bool_addr = self.gen_cond(node.cond)
-                self.emit("ifnot", bool_addr, 1, label_end)
+                self.emit_load(bool_addr, 1, RA)
+                self.emit("ifnotreg", RA, label_end)
             self.gen_stmt(node.stmt)
             if node.next:
                 self.gen_stmt(node.next)
@@ -1071,26 +1071,19 @@ class Compiler:
                 else:
                     raise NotImplementedError("input() requires the address of a variable, e.g. input(&name)")
                 size = self.addr_size(target)
-                chars = max(1, size // 8)
-                self.emit("input", chars, target, size)
+                self.emit("input", size, target)
             elif name == "__mem_store":
                 args = node.args.exprs if node.args else []
                 if len(args) != 3:
                     raise NotImplementedError("__mem_store(addr, size, value) takes exactly three arguments")
                 if not isinstance(args[1], c_ast.Constant):
-                    raise NotImplementedError("__mem_store() size must be a compile-time constant")
+                    raise NotImplementedError("__mem_store() size must be a compile-time constant (1, 2, or 4 bytes)")
                 addr = self.gen_expr(args[0])
                 width = int(args[1].value, 0)
                 value = self.gen_expr(args[2])
-
-                value_temp = self.alloc_temp(width)
-                addr_ptr_addr = self.alloc_temp(INT_SIZE)
-                value_ptr_addr = self.alloc_temp(INT_SIZE)
-
-                self.emit("add", 0, value, width, value_temp)
-                self.emit("mem", addr_ptr_addr, INT_SIZE, addr)
-                self.emit("mem", value_ptr_addr, INT_SIZE, value_temp)
-                self.emit("setmem", value_ptr_addr, width, addr_ptr_addr, width)
+                self.emit_load(value, self.addr_size(value), RB)  # RB = value to store
+                self.emit_load(addr, INT_SIZE, RA)                # RA = target runtime address
+                self.emit(f"storeregi{self._reg_width(width)}", RA, RB)
             else:
                 self.gen_expr(node)  # covers getkey, isflagsupported, user functions; value discarded
             return
@@ -1099,7 +1092,8 @@ class Compiler:
             bool_addr = self.gen_cond(node.cond)
             label_else = Label("else")
             label_end = Label("endif")
-            self.emit("ifnot", bool_addr, 1, label_else if node.iffalse else label_end)
+            self.emit_load(bool_addr, 1, RA)
+            self.emit("ifnotreg", RA, label_else if node.iffalse else label_end)
             self.gen_stmt(node.iftrue)
             if node.iffalse:
                 self.emit("setpc", label_end)
@@ -1113,7 +1107,8 @@ class Compiler:
             label_end = Label("endloop")
             self.define_label(label_start)
             bool_addr = self.gen_cond(node.cond)
-            self.emit("ifnot", bool_addr, 1, label_end)
+            self.emit_load(bool_addr, 1, RA)
+            self.emit("ifnotreg", RA, label_end)
             self.gen_stmt(node.stmt)
             self.emit("setpc", label_start)
             self.define_label(label_end)
@@ -1140,7 +1135,7 @@ class Compiler:
             line for line in clean_source.splitlines() if not line.strip().startswith("#")
         )
         builtin_typedefs = "\n".join(
-            f"typedef unsigned char {name};" for name in TYPE_BITS if name != "char"
+            f"typedef unsigned char {name};" for name in TYPE_BYTES if name != "char"
         )
         clean_source = builtin_typedefs + "\n" + clean_source
         ast = pycparser.CParser().parse(clean_source)
@@ -1164,14 +1159,12 @@ class Compiler:
         self.emit("exit")
 
         # Now that we know the program's total memory usage, patch the
-        # prologue's placeholder "required bits" value. If the program uses
-        # graphics, the framebuffer/keyboard also has to fit alongside the
-        # program's own variables, so include that in the requirement.
-        required_bits = self.next_addr
-        if self.uses_graphics:
-            required_bits += GFX_64x64_MONO_BITS + KEYBOARD_BITS
-        pos = self.required_bits_patch_pos
-        self.buf[pos:pos + 4] = required_bits.to_bytes(4, "big")
+        # prologue's placeholder "required bytes" value. Graphics/keyboard no
+        # longer share the addressable memory space (they have their own
+        # dedicated VM-side buffers), so only the program's own variables count.
+        required_bytes = self.next_addr
+        pos = self.required_bytes_patch_pos
+        self.buf[pos:pos + 4] = required_bytes.to_bytes(4, "big")
 
         return self.finalize()
 

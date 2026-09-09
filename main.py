@@ -4,10 +4,18 @@ https://github.com/AzizBgBoss/unilang
 
 This VM executes compiled unilang bytecode (produced by a separate converter/assembler or written by hand if you hate yourself enough).
 
+Register/byte-only ISA: memory is plain byte-addressable RAM (no bit shifting,
+no per-instruction "size" operand). All arithmetic/logic/comparison happens in
+16 general-purpose 32-bit registers (r0-r15). Memory is only touched to move a
+single byte (setbyte/out/outc/write/input/printv) or to load/store a register
+as 8/16/32 bits (loadreg8/16/32, storereg8/16/32). There is no generic
+variable-width "mem" op anymore -- pick the loadreg/storereg width you need.
+
 Operand encoding conventions (all big-endian):
-  addr  -> 4 bytes (unsigned int)
-  size  -> 1 byte  (bits, 0-255)
+  addr  -> 4 bytes (unsigned int, byte offset into RAM)
+  reg   -> 1 byte  (register index, 0-15)
   val   -> 4 bytes (unsigned int)
+  byte  -> 1 byte
   flag  -> 1 byte
   count -> 4 bytes
   pos   -> 4 bytes (bytecode offset, used for jumps/subroutines)
@@ -27,60 +35,89 @@ Operand encoding conventions (all big-endian):
 1 - NES style keyboard (Up + Down + Left + Right + A + B + select + start) (1 x 8 = 8 bits)
 On keyboard: (Up + Down + Left + Right + C + V + Backspace + Enter)
 
-0x00 (nop)              none                                           - do nothing (padding/alignment)
-0x01 (flag)             flag(1), val(1)                                - set the value of a flag with a certain index to a 4-bit value
-0x02 (isflagsupported)  flag(1), val(1), addr(4), size(1)              - check if a flag with a certain index is supported (changes based on platforms)
-0x03 (mem)              addr(4), size(1), val(4)                       - set the value of a memory address with a certain size
-0x04 (setmem)           addr1(4), size1(1), addr2(4), size2(1)         - copy the value of the variable at the address stored in addr1 to the variable at the address stored in addr2. the size of the addresses stored in addr1 and addr2 must be 32, the size of the target variables can change
-0x05 (write)            text(0), addr(4), size(1)                      - write text to a memory address with a certain size
-0x06 (outc)             addr(4), size(1)                               - output the character of a memory address with a certain size
-0x07 (out)              addr(4), size(1)                               - output the value of a memory address with a certain size
-0x08 (input)            chars(4), addr(4), size(1)                     - read a certain amount of characters and store them in memory
-0x09 (print)            text(0)                                        - print text
-0x0A (printn)           text(0)                                        - print text without a newline
-0x0B (printv)           chars(4), addr(4), size(1)                     - print a certain amount of characters from memory
-0x0C (printvn)          chars(4), addr(4), size(1)                     - print a certain amount of characters from memory without a newline
-0x0D (rand)             min(4), max(4), addr(4), size(1)              - set a memory address with a certain size to a random value between min and max (exclusive)
-0x0E (add)              val(4), addr1(4), size1(1), addr2(4)           - add a value to a memory address with a certain size and store it in another memory address
-0x0F (addv)             addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - add two memory addresses with certain sizes and store it in another memory address
-0x10 (sub)              val(4), addr1(4), size1(1), addr2(4)           - subtract a value from a memory address with a certain size and store it in another memory address
-0x11 (subv)             addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - subtract two memory addresses with certain sizes and store it in another memory address
-0x12 (mul)              val(4), addr1(4), size1(1), addr2(4)           - multiply a value with a memory address with a certain size and store it in another memory address
-0x13 (mulv)             addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - multiply two memory addresses with certain sizes and store it in another memory address
-0x14 (div)              val(4), addr1(4), size1(1), addr2(4)           - divide a memory address with a certain size by a value and store it in another memory address
-0x15 (divv)             addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - divide two memory addresses with certain sizes and store it in another memory address
-0x16 (mod)              val(4), addr1(4), size1(1), addr2(4)           - get the modulus of a memory address with a certain size by a value and store it in another memory address
-0x17 (modv)             addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - get the modulus of two memory addresses with certain sizes and store it in another memory address
-0x18 (cur)              none                                           - print the current position in the bytecode
-0x19 (memory)           none                                           - print the current state of memory
-0x1A (flags)            none                                           - print the current state of flags
-0x1B (setpc)            pos(4)                                         - set the program counter to a fixed bytecode position
-0x1F (compare)          val(4), addr1(4), size1(1), addr2(4), size2(1) - compare a value to a memory address with a certain size and store the result in a special memory address (0 = equal, 1 = val > addr1, 2 = val < addr1)
-0x20 (comparev)         addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - compare two memory addresses with certain sizes and store the result in a memory address (0 = equal, 1 = addr1 > addr2, 2 = addr1 < addr2)
-0x21 (isequal)          val(4), addr1(4), size1(1), addr2(4)           - check if a value is equal to a memory address with a certain size and store the result (0 or 1) in another memory address (size 1)
-0x22 (not)              addr1(4), size1(1), addr2(4), size2(1)         - flip the bits of a memory address with a certain size and store it in another memory address
-0x23 (or)               addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - perform a bitwise OR on two memory addresses and store it in another memory address
-0x24 (and)              addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - perform a bitwise AND on two memory addresses and store it in another memory address
-0x25 (nor)              addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - perform a bitwise NOR on two memory addresses and store it in another memory address
-0x26 (nand)             addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - perform a bitwise NAND on two memory addresses and store it in another memory address
-0x27 (xor)              addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - perform a bitwise XOR on two memory addresses and store it in another memory address
-0x28 (xnor)             addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - perform a bitwise XNOR on two memory addresses and store it in another memory address
-0x29 (shl)              addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - perform a bitwise shift left on a memory address and store it in another memory address
-0x2A (shr)              addr1(4), size1(1), addr2(4), size2(1), addr3(4), size3(1) - perform a bitwise shift right on a memory address and store it in another memory address
-0x2B (subroutine)       pos(4)                                         - call a subroutine at a fixed bytecode position
-0x2C (return)           none                                           - return from a subroutine
-0x2D (if)               addr(4), size(1), pos(4)                       - if the value of a memory address is not 0, jump to a fixed bytecode position
-0x2E (ifnot)            addr(4), size(1), pos(4)                       - if the value of a memory address is 0, jump to a fixed bytecode position
-0x2F (ifsubroutine)     addr(4), size(1), pos(4)                       - if the value of a memory address is not 0, call a subroutine at a fixed bytecode position
-0x30 (ifnotsubroutine)  addr(4), size(1), pos(4)                       - if the value of a memory address is 0, call a subroutine at a fixed bytecode position
-0x31 (sleep)            ms(4)                                          - sleep for a certain amount of milliseconds
-0x32 (gettime)          addr(4), size(1)                               - get the current time and store it in a memory address
-0x33 (getmemsize)       addr(4), size(1)                               - get the size of memory in bits and store it in a memory address
-0x34 (refreshscreen)    none                                           - redraw the current frame and clear the framebuffer
-0x35 (getflag)          flag(1), addr(4), size(1)                     - read the current value of a flag into memory
-0x36 (romread)          pos(4), addr(4), size(1)                       - treat the value stored at pos as a BIT OFFSET into the program's own bytecode (the ".ulc" file), read `size` bits starting there (MSB-first, same convention as mem), and store the result at addr. This is the only way to read data embedded in the compiled program without paying for it in "mem" (RAM) -- e.g. font/sprite tables. pos is a level of indirection (like setmem's pointer args): the address `pos` itself is fixed at compile time, but the *value stored there* is the runtime-computed bit offset to read from. Reading past the end of the bytecode returns 0 bits rather than erroring.
-0x37 (setpixel)         addrx(4), sizex(1), addry(4), sizey(1), addrc(4), sizec(1) - draw one pixel using x/y/color values read from RAM
-0xFF (exit)             none                                           - exit the program
+0x00 (nop)              none                                - do nothing (padding/alignment)
+0x01 (flag)              flag(1), val(1)                     - set the value of a flag with a certain index to a 4-bit value
+0x02 (isflagsupported)   flag(1), val(1), reg(1)              - check if a flag with a certain index is supported, result into reg
+0x03 (setbyte)           addr(4), byte(1)                    - set a single memory byte
+0x04 (write)             addr(4), text(0)                    - write text as raw bytes starting at addr
+0x05 (outc)              addr(4)                              - output the byte at addr as a character
+0x06 (out)               addr(4)                              - output the byte at addr as a number
+0x07 (input)             chars(4), addr(4)                   - read chars and store them as bytes starting at addr
+0x08 (print)             text(0)                              - print text
+0x09 (printn)            text(0)                              - print text without a newline
+0x0A (printv)            chars(4), addr(4)                   - print chars bytes from memory as characters
+0x0B (printvn)           chars(4), addr(4)                   - same as printv without a newline
+0x0C (cur)               none                                 - print the current position in the bytecode
+0x0D (memory)            none                                 - print the current state of memory (hex dump)
+0x0E (flags)             none                                 - print the current state of flags
+0x0F (setpc)             pos(4)                               - set the program counter to a fixed bytecode position
+0x10 (subroutine)        pos(4)                               - call a subroutine at a fixed bytecode position
+0x11 (return)            none                                 - return from a subroutine
+0x12 (sleep)             ms(4)                                - sleep for a certain amount of milliseconds
+0x13 (refreshscreen)     none                                 - redraw the current frame and clear the framebuffer
+0x14 (romread8)          reg_addr(1), reg_dst(1)              - read 1 byte from the bytecode's own ROM at the byte offset held in reg[reg_addr], into reg_dst
+0x15 (romread16)         reg_addr(1), reg_dst(1)              - read 2 bytes from ROM into reg_dst
+0x16 (romread32)         reg_addr(1), reg_dst(1)              - read 4 bytes from ROM into reg_dst
+0x17 (setpixel)          regx(1), regy(1), regc(1)            - draw one pixel using x/y/color values from registers
+0x18 (getpixel)          regx(1), regy(1), regdst(1)          - read one pixel's value into a register
+0x19 (getkeyboard)       reg(1)                               - read keyboard state into a register
+0x1A (gettime)           reg(1)                               - get the current time (ms) into a register
+0x1B (getmemsize)        reg(1)                               - get the size of memory in bytes into a register
+0x1C (getflag)           flag(1), reg(1)                      - read the current value of a flag into a register
+0x1D (randreg)           min(4), max(4), reg(1)               - set a register to a random value between min and max (exclusive)
+
+Registers: 16 general-purpose 32-bit registers, r0-r15 (index 0-15 as a single byte).
+0x40 (setreg)      reg(1), val(4)              - reg = val
+0x41 (movreg)      dst(1), src(1)              - dst = src
+0x42 (loadreg8)    reg(1), addr(4)             - reg = mem byte at addr (zero-extended)
+0x43 (loadreg16)   reg(1), addr(4)             - reg = mem 2 bytes at addr
+0x44 (loadreg32)   reg(1), addr(4)             - reg = mem 4 bytes at addr
+0x45 (storereg8)   reg(1), addr(4)             - mem byte at addr = reg & 0xFF
+0x46 (storereg16)  reg(1), addr(4)             - mem 2 bytes at addr = reg & 0xFFFF
+0x47 (storereg32)  reg(1), addr(4)             - mem 4 bytes at addr = reg
+0x48 (addreg)      r1(1), r2(1), dst(1)        - dst = r1 + r2
+0x49 (subreg)      r1(1), r2(1), dst(1)        - dst = r1 - r2
+0x4A (mulreg)      r1(1), r2(1), dst(1)        - dst = r1 * r2
+0x4B (divreg)      r1(1), r2(1), dst(1)        - dst = r1 // r2 (no-op if r2 == 0)
+0x4C (modreg)      r1(1), r2(1), dst(1)        - dst = r1 % r2 (no-op if r2 == 0)
+0x4D (addregv)     r1(1), val(4), dst(1)       - dst = r1 + val
+0x4E (subregv)     r1(1), val(4), dst(1)       - dst = r1 - val
+0x4F (mulregv)     r1(1), val(4), dst(1)       - dst = r1 * val
+0x50 (compreg)     r1(1), r2(1), dst(1)        - dst = 0 if equal, 1 if r1 > r2, 2 if r1 < r2
+0x51 (ifreg)       reg(1), pos(4)              - if reg != 0, jump to pos
+0x52 (ifnotreg)    reg(1), pos(4)              - if reg == 0, jump to pos
+0x53 (ifsubreg)    reg(1), pos(4)              - if reg != 0, call subroutine at pos
+0x54 (ifnotsubreg) reg(1), pos(4)              - if reg == 0, call subroutine at pos
+0x55 (notreg)      r1(1), dst(1)               - dst = ~r1 (32-bit)
+0x56 (orreg)       r1(1), r2(1), dst(1)        - dst = r1 | r2
+0x57 (andreg)      r1(1), r2(1), dst(1)        - dst = r1 & r2
+0x58 (norreg)      r1(1), r2(1), dst(1)        - dst = ~(r1 | r2) (32-bit)
+0x59 (nandreg)     r1(1), r2(1), dst(1)        - dst = ~(r1 & r2) (32-bit)
+0x5A (xorreg)      r1(1), r2(1), dst(1)        - dst = r1 ^ r2
+0x5B (xnorreg)     r1(1), r2(1), dst(1)        - dst = ~(r1 ^ r2) (32-bit)
+0x5C (shlreg)      r1(1), r2(1), dst(1)        - dst = (r1 << r2) & 0xFFFFFFFF
+0x5D (shrreg)      r1(1), r2(1), dst(1)        - dst = r1 >> r2
+
+Indirect memory access: the address comes from a register at runtime, not a
+bytecode literal. This is what pointer dereferencing and array-element access
+(where the index is a variable, not a constant) compile down to.
+0x60 (loadregi8)   reg_addr(1), reg_dst(1)     - reg_dst = mem byte at address reg[reg_addr]
+0x61 (loadregi16)  reg_addr(1), reg_dst(1)     - reg_dst = mem 2 bytes at address reg[reg_addr]
+0x62 (loadregi32)  reg_addr(1), reg_dst(1)     - reg_dst = mem 4 bytes at address reg[reg_addr]
+0x63 (storeregi8)  reg_addr(1), reg_val(1)     - mem byte at address reg[reg_addr] = reg[reg_val] & 0xFF
+0x64 (storeregi16) reg_addr(1), reg_val(1)     - mem 2 bytes at address reg[reg_addr] = reg[reg_val] & 0xFFFF
+0x65 (storeregi32) reg_addr(1), reg_val(1)     - mem 4 bytes at address reg[reg_addr] = reg[reg_val]
+
+Direct boolean comparisons: dst = 1 if the comparison holds, 0 otherwise.
+0x66 (eqreg)       r1(1), r2(1), dst(1)        - dst = r1 == r2
+0x67 (neqreg)      r1(1), r2(1), dst(1)        - dst = r1 != r2
+0x68 (ltreg)       r1(1), r2(1), dst(1)        - dst = r1 < r2
+0x69 (gtreg)       r1(1), r2(1), dst(1)        - dst = r1 > r2
+0x6A (lereg)       r1(1), r2(1), dst(1)        - dst = r1 <= r2
+0x6B (gereg)       r1(1), r2(1), dst(1)        - dst = r1 >= r2
+0x6C (outreg)      reg(1)                      - print a register's full numeric value (not limited to a byte, unlike `out`)
+
+0xFF (exit)              none                                 - exit the program
 '''
 
 import random
@@ -91,57 +128,85 @@ import time
 op_codes = {
     "nop":              {"byte": 0x00, "operands": 0, "sizes": []},
     "flag":             {"byte": 0x01, "operands": 2, "sizes": [1, 1]},              # flag, val
-    "isflagsupported":  {"byte": 0x02, "operands": 4, "sizes": [1, 1, 4, 1]},        # flag, val, addr, size
-    "mem":              {"byte": 0x03, "operands": 3, "sizes": [4, 1, 4]},           # addr, size, val
-    "setmem":           {"byte": 0x04, "operands": 4, "sizes": [4, 1, 4, 1]},        # addr1, size1, addr2, size2
-    "write":            {"byte": 0x05, "operands": 3, "sizes": [0, 4, 1]},           # text, addr, size
-    "outc":             {"byte": 0x06, "operands": 2, "sizes": [4, 1]},              # addr, size
-    "out":              {"byte": 0x07, "operands": 2, "sizes": [4, 1]},              # addr, size
-    "input":            {"byte": 0x08, "operands": 3, "sizes": [4, 4, 1]},           # chars, addr, size
-    "print":            {"byte": 0x09, "operands": 1, "sizes": [0]},                 # text
-    "printn":           {"byte": 0x0A, "operands": 1, "sizes": [0]},                 # text
-    "printv":           {"byte": 0x0B, "operands": 3, "sizes": [4, 4, 1]},           # chars, addr, size
-    "printvn":          {"byte": 0x0C, "operands": 3, "sizes": [4, 4, 1]},           # chars, addr, size
-    "rand":             {"byte": 0x0D, "operands": 4, "sizes": [4, 4, 4, 1]},        # min, max, addr, size
-    "add":              {"byte": 0x0E, "operands": 4, "sizes": [4, 4, 1, 4]},        # val, addr1, size1, addr2
-    "addv":             {"byte": 0x0F, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},  # addr1,size1,addr2,size2,addr3,size3
-    "sub":              {"byte": 0x10, "operands": 4, "sizes": [4, 4, 1, 4]},
-    "subv":             {"byte": 0x11, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
-    "mul":              {"byte": 0x12, "operands": 4, "sizes": [4, 4, 1, 4]},
-    "mulv":             {"byte": 0x13, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
-    "div":              {"byte": 0x14, "operands": 4, "sizes": [4, 4, 1, 4]},
-    "divv":             {"byte": 0x15, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
-    "mod":              {"byte": 0x16, "operands": 4, "sizes": [4, 4, 1, 4]},
-    "modv":             {"byte": 0x17, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
-    "cur":              {"byte": 0x18, "operands": 0, "sizes": []},
-    "memory":           {"byte": 0x19, "operands": 0, "sizes": []},
-    "flags":            {"byte": 0x1A, "operands": 0, "sizes": []},
-    "setpc":            {"byte": 0x1B, "operands": 1, "sizes": [4]},                 # pos (fixed)
-    "compare":          {"byte": 0x1F, "operands": 5, "sizes": [4, 4, 1, 4, 1]},
-    "comparev":         {"byte": 0x20, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
-    "isequal":          {"byte": 0x21, "operands": 4, "sizes": [4, 4, 1, 4]},
-    "not":              {"byte": 0x22, "operands": 4, "sizes": [4, 1, 4, 1]},
-    "or":               {"byte": 0x23, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
-    "and":              {"byte": 0x24, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
-    "nor":              {"byte": 0x25, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
-    "nand":             {"byte": 0x26, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
-    "xor":              {"byte": 0x27, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
-    "xnor":             {"byte": 0x28, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
-    "shl":              {"byte": 0x29, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
-    "shr":              {"byte": 0x2A, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},
-    "subroutine":       {"byte": 0x2B, "operands": 1, "sizes": [4]},                 # pos (fixed)
-    "return":           {"byte": 0x2C, "operands": 0, "sizes": []},
-    "if":               {"byte": 0x2D, "operands": 3, "sizes": [4, 1, 4]},           # addr, size, pos (fixed)
-    "ifnot":            {"byte": 0x2E, "operands": 3, "sizes": [4, 1, 4]},
-    "ifsubroutine":     {"byte": 0x2F, "operands": 3, "sizes": [4, 1, 4]},
-    "ifnotsubroutine":  {"byte": 0x30, "operands": 3, "sizes": [4, 1, 4]},
-    "sleep":            {"byte": 0x31, "operands": 1, "sizes": [4]},                 # ms
-    "gettime":          {"byte": 0x32, "operands": 2, "sizes": [4, 1]},              # addr, size
-    "getmemsize":       {"byte": 0x33, "operands": 2, "sizes": [4, 1]},              # addr, size
-    "refreshscreen":    {"byte": 0x34, "operands": 0, "sizes": []},
-    "getflag":          {"byte": 0x35, "operands": 3, "sizes": [1, 4, 1]},           # flag_index, addr, size
-    "romread":          {"byte": 0x36, "operands": 3, "sizes": [4, 4, 1]},           # pos, addr, size
-    "setpixel":         {"byte": 0x37, "operands": 6, "sizes": [4, 1, 4, 1, 4, 1]},  # addrx,sizex,addry,sizey,addrc,sizec
+    "isflagsupported":  {"byte": 0x02, "operands": 3, "sizes": [1, 1, 1]},           # flag, val, reg
+    "setbyte":          {"byte": 0x03, "operands": 2, "sizes": [4, 1]},              # addr, byte
+    "write":            {"byte": 0x04, "operands": 2, "sizes": [4, 0]},              # addr, text
+    "outc":             {"byte": 0x05, "operands": 1, "sizes": [4]},                 # addr
+    "out":              {"byte": 0x06, "operands": 1, "sizes": [4]},                 # addr
+    "input":            {"byte": 0x07, "operands": 2, "sizes": [4, 4]},              # chars, addr
+    "print":            {"byte": 0x08, "operands": 1, "sizes": [0]},                 # text
+    "printn":           {"byte": 0x09, "operands": 1, "sizes": [0]},                 # text
+    "printv":           {"byte": 0x0A, "operands": 2, "sizes": [4, 4]},              # chars, addr
+    "printvn":          {"byte": 0x0B, "operands": 2, "sizes": [4, 4]},              # chars, addr
+    "cur":              {"byte": 0x0C, "operands": 0, "sizes": []},
+    "memory":           {"byte": 0x0D, "operands": 0, "sizes": []},
+    "flags":            {"byte": 0x0E, "operands": 0, "sizes": []},
+    "setpc":            {"byte": 0x0F, "operands": 1, "sizes": [4]},                 # pos
+    "subroutine":       {"byte": 0x10, "operands": 1, "sizes": [4]},                 # pos
+    "return":           {"byte": 0x11, "operands": 0, "sizes": []},
+    "sleep":            {"byte": 0x12, "operands": 1, "sizes": [4]},                 # ms
+    "refreshscreen":    {"byte": 0x13, "operands": 0, "sizes": []},
+    "romread8":         {"byte": 0x14, "operands": 2, "sizes": [1, 1]},              # reg_addr, reg_dst
+    "romread16":        {"byte": 0x15, "operands": 2, "sizes": [1, 1]},              # reg_addr, reg_dst
+    "romread32":        {"byte": 0x16, "operands": 2, "sizes": [1, 1]},              # reg_addr, reg_dst
+    "setpixel":         {"byte": 0x17, "operands": 3, "sizes": [1, 1, 1]},           # regx, regy, regc
+    "getpixel":         {"byte": 0x18, "operands": 3, "sizes": [1, 1, 1]},           # regx, regy, regdst
+    "getkeyboard":      {"byte": 0x19, "operands": 1, "sizes": [1]},                 # reg
+    "gettime":          {"byte": 0x1A, "operands": 1, "sizes": [1]},                 # reg
+    "getmemsize":       {"byte": 0x1B, "operands": 1, "sizes": [1]},                 # reg
+    "getflag":          {"byte": 0x1C, "operands": 2, "sizes": [1, 1]},              # flag, reg
+    "randreg":          {"byte": 0x1D, "operands": 3, "sizes": [4, 4, 1]},           # min, max, reg
+
+    # --- registers: 16 x 32-bit general-purpose registers (reg index is 1 byte, 0-15).
+    "setreg":           {"byte": 0x40, "operands": 2, "sizes": [1, 4]},              # reg, val
+    "movreg":           {"byte": 0x41, "operands": 2, "sizes": [1, 1]},              # dst_reg, src_reg
+    "loadreg8":         {"byte": 0x42, "operands": 2, "sizes": [1, 4]},              # reg, addr
+    "loadreg16":        {"byte": 0x43, "operands": 2, "sizes": [1, 4]},              # reg, addr
+    "loadreg32":        {"byte": 0x44, "operands": 2, "sizes": [1, 4]},              # reg, addr
+    "storereg8":        {"byte": 0x45, "operands": 2, "sizes": [1, 4]},              # reg, addr
+    "storereg16":       {"byte": 0x46, "operands": 2, "sizes": [1, 4]},              # reg, addr
+    "storereg32":       {"byte": 0x47, "operands": 2, "sizes": [1, 4]},              # reg, addr
+    "addreg":           {"byte": 0x48, "operands": 3, "sizes": [1, 1, 1]},           # reg1, reg2, dst
+    "subreg":           {"byte": 0x49, "operands": 3, "sizes": [1, 1, 1]},
+    "mulreg":           {"byte": 0x4A, "operands": 3, "sizes": [1, 1, 1]},
+    "divreg":           {"byte": 0x4B, "operands": 3, "sizes": [1, 1, 1]},
+    "modreg":           {"byte": 0x4C, "operands": 3, "sizes": [1, 1, 1]},
+    "addregv":          {"byte": 0x4D, "operands": 3, "sizes": [1, 4, 1]},           # reg1, const, dst
+    "subregv":          {"byte": 0x4E, "operands": 3, "sizes": [1, 4, 1]},
+    "mulregv":          {"byte": 0x4F, "operands": 3, "sizes": [1, 4, 1]},
+    "compreg":          {"byte": 0x50, "operands": 3, "sizes": [1, 1, 1]},           # reg1, reg2, dst
+    "ifreg":            {"byte": 0x51, "operands": 2, "sizes": [1, 4]},              # reg, pos
+    "ifnotreg":         {"byte": 0x52, "operands": 2, "sizes": [1, 4]},              # reg, pos
+    "ifsubreg":         {"byte": 0x53, "operands": 2, "sizes": [1, 4]},              # reg, pos
+    "ifnotsubreg":      {"byte": 0x54, "operands": 2, "sizes": [1, 4]},              # reg, pos
+    "notreg":           {"byte": 0x55, "operands": 2, "sizes": [1, 1]},              # r1, dst
+    "orreg":            {"byte": 0x56, "operands": 3, "sizes": [1, 1, 1]},
+    "andreg":           {"byte": 0x57, "operands": 3, "sizes": [1, 1, 1]},
+    "norreg":           {"byte": 0x58, "operands": 3, "sizes": [1, 1, 1]},
+    "nandreg":          {"byte": 0x59, "operands": 3, "sizes": [1, 1, 1]},
+    "xorreg":           {"byte": 0x5A, "operands": 3, "sizes": [1, 1, 1]},
+    "xnorreg":          {"byte": 0x5B, "operands": 3, "sizes": [1, 1, 1]},
+    "shlreg":           {"byte": 0x5C, "operands": 3, "sizes": [1, 1, 1]},
+    "shrreg":           {"byte": 0x5D, "operands": 3, "sizes": [1, 1, 1]},
+
+    # --- indirect: address comes from a register at runtime (not a bytecode
+    # literal) -- this is what pointers/array-element access compile down to.
+    "loadregi8":        {"byte": 0x60, "operands": 2, "sizes": [1, 1]},              # reg_addr, reg_dst
+    "loadregi16":       {"byte": 0x61, "operands": 2, "sizes": [1, 1]},
+    "loadregi32":       {"byte": 0x62, "operands": 2, "sizes": [1, 1]},
+    "storeregi8":       {"byte": 0x63, "operands": 2, "sizes": [1, 1]},              # reg_addr, reg_val
+    "storeregi16":      {"byte": 0x64, "operands": 2, "sizes": [1, 1]},
+    "storeregi32":      {"byte": 0x65, "operands": 2, "sizes": [1, 1]},
+
+    # --- direct boolean comparisons: dst = 1 if true, 0 if false.
+    "eqreg":            {"byte": 0x66, "operands": 3, "sizes": [1, 1, 1]},
+    "neqreg":           {"byte": 0x67, "operands": 3, "sizes": [1, 1, 1]},
+    "ltreg":            {"byte": 0x68, "operands": 3, "sizes": [1, 1, 1]},
+    "gtreg":            {"byte": 0x69, "operands": 3, "sizes": [1, 1, 1]},
+    "lereg":            {"byte": 0x6A, "operands": 3, "sizes": [1, 1, 1]},
+    "gereg":            {"byte": 0x6B, "operands": 3, "sizes": [1, 1, 1]},
+    "outreg":           {"byte": 0x6C, "operands": 1, "sizes": [1]},                 # reg -- print its full numeric value
+
     "exit":             {"byte": 0xFF, "operands": 0, "sizes": []},
 }
 
@@ -183,77 +248,48 @@ def ensure_pygame():
         print(f"Fatal: this program requires pygame for graphics/keyboard support, but it could not be imported ({e}).")
         sys.exit(1)
     pygame = _pygame_module
-    if memsize >= 64 * 64:
-        supportedFlags[0][1] = 1 # 64x64@1
-        if memsize == 64 * 64:
-            print("Warning: The memory size fits perfectly for 64x64@1 graphics. But will not allow for more variables without graphical issues.")
-    else:
-        supportedFlags[0][1] = 0
-        print(f"Graphics not supported because the memory size is too small ({memsize} bits, 64x64@1 requires at least {64 * 64} bits).")
+    supportedFlags[0][1] = 1 # 64x64@1 -- graphics has its own dedicated framebuffer now, doesn't touch mem
 
 print(f"Starting unilang bytecode VM with {memsize} bits of memory ({convert_size(memsize)})...\n")
 
-BIT_REVERSE = bytes(int(f"{i:08b}"[::-1], 2) for i in range(256))
-
+# --- bit-level helpers: only used for `flags` (4-bit fields) and `framebuffer`
+# (genuinely 1-bit-per-pixel). Main RAM (`mem`) is byte-addressable, see below.
 def get_bit(mem, addr):
-    addr %= memsize  # wrap out-of-range addresses instead of crashing
     return (mem[addr // 8] >> (addr % 8)) & 1
 
 def set_bit(mem, addr, val):
-    addr %= memsize
     if val:
         mem[addr // 8] |= (1 << (addr % 8))
     else:
         mem[addr // 8] &= ~(1 << (addr % 8))
 
-def set_val(mem, addr, val, size):
-    if size > 0 and addr % 8 == 0 and size % 8 == 0:
-        val %= 2 ** size
-        byte_addr = (addr % memsize) // 8
-        byte_count = size // 8
-        for i in range(byte_count):
-            shift = (byte_count - i - 1) * 8
-            mem[(byte_addr + i) % len(mem)] = BIT_REVERSE[(val >> shift) & 0xFF]
-        return
+def set_bits(mem, addr, val, size):
     val %= 2 ** size
     for i in range(size):
         set_bit(mem, addr + i, val & (1 << (size - 1 - i)))
 
-def get_val(mem, addr, size):
-    if size > 0 and addr % 8 == 0 and size % 8 == 0:
-        byte_addr = (addr % memsize) // 8
-        byte_count = size // 8
-        val = 0
-        for i in range(byte_count):
-            val = (val << 8) | BIT_REVERSE[mem[(byte_addr + i) % len(mem)]]
-        return val
+def get_bits(mem, addr, size):
     val = 0
     for i in range(size):
         val |= get_bit(mem, addr + i) << (size - i - 1)
     return val
 
+# --- main RAM: byte-addressable, no bit shifting, no size operand. `size` is
+# only ever 1/2/4 bytes and only used internally by load/storereg8/16/32.
+def set_val(mem, addr, val, size):
+    val %= 1 << (size * 8)
+    for i in range(size):
+        shift = (size - i - 1) * 8
+        mem[(addr + i)] = (val >> shift) & 0xFF
+
+def get_val(mem, addr, size):
+    val = 0
+    for i in range(size):
+        val = (val << 8) | mem[(addr + i)]
+    return val
+
 def get_flag_value(flag_index):
-    return get_val(flags, flag_index * 4, 4)
-
-def get_graphics_bits_for_mode(mode):
-    mode = int(mode)
-    if mode == 0:
-        return 0
-    if mode in (1, 2, 3):
-        depth = {1: 1, 2: 4, 3: 8}[mode]
-        return depth * 64 * 64
-    if mode in (4, 5, 6):
-        depth = {4: 1, 5: 4, 6: 8}[mode]
-        return depth * 128 * 64
-    return 0
-
-def get_keyboard_bits_for_mode(mode):
-    return 8 if int(mode) == 1 else 0
-
-def get_reserved_bits():
-    graphics_bits = get_graphics_bits_for_mode(get_flag_value(0))
-    keyboard_bits = 8 if get_flag_value(1) == 1 else 0
-    return graphics_bits + keyboard_bits
+    return get_bits(flags, flag_index * 4, 4)
 
 def read_uint(bytecode, pos, nbytes):
     val = 0
@@ -275,20 +311,16 @@ def read_operands(bytecode, pos, sizes):
             vals.append(val)
     return vals, pos
 
-def get_bit_from_bytecode(bytecode, bit_addr):
-    # Same bit-numbering convention as get_bit: MSB-first within each byte.
-    # Reading past the end of the bytecode returns 0 instead of raising, so
-    # a program that miscalculates a ROM offset degrades to blank data
-    # rather than crashing the VM.
-    byte_i, bit_i = divmod(bit_addr, 8)
-    if byte_i < 0 or byte_i >= len(bytecode):
-        return 0
-    return (bytecode[byte_i] >> (7 - bit_i)) & 1
-
-def get_val_from_bytecode(bytecode, pos, size):
+def rom_read(bytecode, addr, size):
+    # Reads `size` bytes starting at byte offset `addr` in the program's own
+    # bytecode (the ".ulc" file). Reading past the end returns 0 rather than
+    # erroring, so a program that miscalculates a ROM offset degrades to
+    # blank data rather than crashing the VM.
     val = 0
     for i in range(size):
-        val = (val << 1) | get_bit_from_bytecode(bytecode, pos + i)
+        pos = addr + i
+        b = bytecode[pos] if 0 <= pos < len(bytecode) else 0
+        val = (val << 8) | b
     return val
 
 # check for -f flag in command line arguments (now expects a compiled bytecode file)
@@ -305,14 +337,19 @@ running = True
 pc = 0
 mem = bytearray(memsize // 8)
 flags = bytearray(16 * 16 // 8)
+reg = [0] * 16  # 16 general-purpose 32-bit registers
 
 nextreturn = 0
 graphics_screen = None
-usedram = 0 # the amount of bits used by special flags from the right
 keyboard_state = 0
+graphics_mode = 0  # cached copy of flag 0's value, kept in sync by the "flag" opcode
+keyboard_mode = 0  # cached copy of flag 1's value, kept in sync by the "flag" opcode
+# Dedicated framebuffer, sized for the largest supported mode (128x64@8bpp = 65536 bits).
+# Graphics/keyboard no longer live in addressable RAM at all -- use setpixel/getpixel/getkeyboard.
+framebuffer = bytearray(65536 // 8)
 
 def initialize_graphics():
-    global graphics_screen, usedram
+    global graphics_screen
     ensure_pygame()  # fatal if unavailable
     if graphics_screen is None:
         try:
@@ -322,17 +359,16 @@ def initialize_graphics():
             print(f"Fatal: pygame failed to initialize graphics ({e}). Stopping.")
             sys.exit(1)
         supportedFlags[1][1] = 1 # NES is now supported
-        usedram += 64 * 64
 
 def shutdown_graphics():
-    global graphics_screen, usedram, keyboard_state
+    global graphics_screen, keyboard_state, keyboard_mode
     if pygame is not None and graphics_screen is not None:
         pygame.display.quit()
         graphics_screen = None
         keyboard_state = 0
+        keyboard_mode = 0
         supportedFlags[1][1] = 0
-        set_val(flags, 1 * 4, 0, 4)
-        usedram -= 64 * 64
+        set_bits(flags, 1 * 4, 0, 4)
 
 def update_graphics():
     global running
@@ -344,10 +380,8 @@ def update_graphics():
             return
 
 def render_screen():
-    global usedram
     if graphics_screen is None:
         return
-    usedram = get_reserved_bits()
     graphics_screen.fill((0, 0, 0))
     width = 64 if get_flag_value(0) in (1, 2, 3) else 128 if get_flag_value(0) in (4, 5, 6) else 0
     if width == 0:
@@ -355,21 +389,19 @@ def render_screen():
         return
     for x in range(width):
         for y in range(64):
-            if get_bit(mem, memsize - x - y * width - 1):
+            if get_bit(framebuffer, x + y * width):
                 pygame.draw.rect(graphics_screen, (255, 255, 255), (x * 10, y * 10, 10, 10))
     pygame.display.flip()
-    if usedram > 0:
-        for addr in range(memsize - usedram, memsize):
-            set_bit(mem, addr, 0)
+    for addr in range(len(framebuffer) * 8):
+        set_bit(framebuffer, addr, 0)
 
 def update_keyboard():
-    global keyboard_state, usedram
+    global keyboard_state
     if pygame is None or graphics_screen is None:
         return
-    usedram = get_reserved_bits()
     pygame.event.pump()
     keys = pygame.key.get_pressed()
-    held_state = (
+    keyboard_state = (
         keys[pygame.K_UP] |
         keys[pygame.K_DOWN] << 1 |
         keys[pygame.K_LEFT] << 2 |
@@ -379,24 +411,8 @@ def update_keyboard():
         keys[pygame.K_BACKSPACE] << 6 |
         keys[pygame.K_RETURN] << 7
     )
-    keyboard_state = held_state
-
-    # Keyboard sits immediately before the framebuffer in the reserved tail of RAM.
-    # If graphics are disabled, that is simply the last 8 bits of memory.
-    if get_flag_value(0):
-        keyboard_addr = memsize - usedram
-    else:
-        keyboard_addr = memsize - 8
-    set_val(mem, keyboard_addr, keyboard_state, 8)
 
 while running and pc < len(bytecode):
-    if get_val(flags, 0 * 4, 4) == 1:
-        update_graphics()
-        if not running:
-            break
-    if get_val(flags, 1 * 4, 4) == 1:
-        update_keyboard()
-
     opbyte = bytecode[pc]
     pc += 1
     cmd = opcode_by_byte.get(opbyte)
@@ -407,295 +423,346 @@ while running and pc < len(bytecode):
     sizes = op_codes[cmd]["sizes"]
     operands, pc = read_operands(bytecode, pc, sizes)
 
-    if cmd == "nop":
-        pass
+    match cmd:
+        case "nop":
+            pass
 
-    elif cmd == "flag":
-        flag, val = operands
-        if flag == 0:
-            if val == 1:
-                if get_val(flags, flag * 4, 4) == 0:
-                    initialize_graphics()
-            if val == 0:
-                if pygame is not None and get_val(flags, flag * 4, 4) != 0:
-                    shutdown_graphics()
-        set_val(flags, flag * 4, val, 4)
-        usedram = get_reserved_bits()
+        case "flag":
+            flag, val = operands
+            if flag == 0:
+                if val == 1:
+                    if graphics_mode == 0:
+                        initialize_graphics()
+                if val == 0:
+                    if pygame is not None and graphics_mode != 0:
+                        shutdown_graphics()
+                graphics_mode = val
+            elif flag == 1:
+                keyboard_mode = val
+            set_bits(flags, flag * 4, val, 4)
 
-    elif cmd == "isflagsupported":
-        flag, val, addr, size = operands
-        if flag in (0, 1) and val == 1:
-            ensure_pygame()  # need to actually check pygame availability to answer this
-        set_val(mem, addr, supportedFlags[flag][val], size)
+        case "isflagsupported":
+            flag, val, r = operands
+            if flag in (0, 1) and val == 1:
+                ensure_pygame()  # need to actually check pygame availability to answer this
+            reg[r] = supportedFlags[flag][val]
 
-    elif cmd == "mem":
-        addr, size, val = operands
-        set_val(mem, addr, val, size)
+        case "setbyte":
+            addr, byte = operands
+            mem[addr] = byte & 0xFF
 
-    elif cmd == "setmem":
-        addr1, size1, addr2, size2 = operands
-        set_val(mem, get_val(mem, addr2, 32), get_val(mem, get_val(mem, addr1, 32), size1), size2)
+        case "write":
+            addr, text = operands
+            for i, ch in enumerate(text):
+                mem[(addr + i)] = ord(ch) & 0xFF
 
-    elif cmd == "write":
-        text, addr, size = operands
-        for i in range(len(text)):
-            set_val(mem, addr + i * size, ord(text[i]), size)
+        case "outc":
+            addr, = operands
+            print(chr(mem[addr]), end="")
 
-    elif cmd == "outc":
-        addr, size = operands
-        print(chr(get_val(mem, addr, size)), end="")
+        case "out":
+            addr, = operands
+            print(mem[addr], end="")
 
-    elif cmd == "out":
-        addr, size = operands
-        print(get_val(mem, addr, size), end="")
+        case "input":
+            chars, addr = operands
+            data = input("")
+            for i in range(min(chars, len(data))):
+                mem[(addr + i)] = ord(data[i]) & 0xFF
 
-    elif cmd == "input":
-        chars, addr, size = operands
-        data = input("")
-        for i in range(min(chars, len(data))):
-            set_val(mem, addr + i * size, ord(data[i]), size)
+        case "print":
+            text, = operands
+            print(text)
 
-    elif cmd == "print":
-        text, = operands
-        print(text)
+        case "printn":
+            text, = operands
+            print(text, end="")
 
-    elif cmd == "printn":
-        text, = operands
-        print(text, end="")
+        case "printv":
+            chars, addr = operands
+            for i in range(chars):
+                print(chr(mem[(addr + i)]), end="")
+            print()
 
-    elif cmd == "printv":
-        chars, addr, size = operands
-        for i in range(chars):
-            print(chr(get_val(mem, addr + i * size, size)), end="")
-        print()
+        case "printvn":
+            chars, addr = operands
+            for i in range(chars):
+                print(chr(mem[(addr + i)]), end="")
 
-    elif cmd == "printvn":
-        chars, addr, size = operands
-        for i in range(chars):
-            print(chr(get_val(mem, addr + i * size, size)), end="")
+        case "cur":
+            print(pc)
 
-    elif cmd == "rand":
-        min_val, max_val, addr, size = operands
-        set_val(mem, addr, random.randrange(min_val, max_val), size)
+        case "memory":
+            columns = 16
+            print("     |" + " ".join(f"{i:02x}" for i in range(columns)))
+            print("-" * (6 + columns * 3))
+            for row in range(0, len(mem), columns):
+                chunk = mem[row:row + columns]
+                hexed = " ".join(f"{b:02x}" for b in chunk)
+                print(f"{row:<5}|{hexed}")
 
-    elif cmd == "add":
-        val, addr1, size1, addr2 = operands
-        # note: size2 assumed equal to size1 in this encoding; adjust op_codes sizes if you need distinct size2
-        set_val(mem, addr2, val + get_val(mem, addr1, size1), size1)
+        case "flags":
+            for i in range(16 * 16 * 4):
+                print(get_bit(flags, i), end="")
+            print()
 
-    elif cmd == "addv":
-        addr1, size1, addr2, size2, addr3, size3 = operands
-        set_val(mem, addr3, get_val(mem, addr1, size1) + get_val(mem, addr2, size2), size3)
-
-    elif cmd == "sub":
-        val, addr1, size1, addr2 = operands
-        set_val(mem, addr2, get_val(mem, addr1, size1) - val, size1)
-
-    elif cmd == "subv":
-        addr1, size1, addr2, size2, addr3, size3 = operands
-        set_val(mem, addr3, get_val(mem, addr1, size1) - get_val(mem, addr2, size2), size3)
-
-    elif cmd == "mul":
-        val, addr1, size1, addr2 = operands
-        set_val(mem, addr2, val * get_val(mem, addr1, size1), size1)
-
-    elif cmd == "mulv":
-        addr1, size1, addr2, size2, addr3, size3 = operands
-        set_val(mem, addr3, get_val(mem, addr1, size1) * get_val(mem, addr2, size2), size3)
-
-    elif cmd == "div":
-        val, addr1, size1, addr2 = operands
-        if val != 0:
-            set_val(mem, addr2, get_val(mem, addr1, size1) // val, size1)
-
-    elif cmd == "divv":
-        addr1, size1, addr2, size2, addr3, size3 = operands
-        val2 = get_val(mem, addr2, size2)
-        if val2 != 0:
-            set_val(mem, addr3, get_val(mem, addr1, size1) // val2, size3)
-
-    elif cmd == "mod":
-        val, addr1, size1, addr2 = operands
-        if val != 0:
-            set_val(mem, addr2, get_val(mem, addr1, size1) % val, size1)
-
-    elif cmd == "modv":
-        addr1, size1, addr2, size2, addr3, size3 = operands
-        val2 = get_val(mem, addr2, size2)
-        if val2 != 0:
-            set_val(mem, addr3, get_val(mem, addr1, size1) % val2, size3)
-
-    elif cmd == "cur":
-        print(pc)
-
-    elif cmd == "memory":
-        columns = 16
-        print("    |" + "".join(hex(i) for i in range(columns)))
-        print("-" * (5 + columns))
-        for row in range(0, memsize, columns):
-            bits = "".join(str(get_bit(mem, i)) for i in range(row, min(row + columns, memsize)))
-            print(f"{row // columns:<4}|{bits:<{columns}}")
-
-    elif cmd == "flags":
-        for i in range(16 * 16 * 4):
-            print(get_bit(flags, i), end="")
-        print()
-
-    elif cmd == "setpc":
-        pos, = operands
-        pc = pos
-
-    elif cmd == "compare":
-        val, addr1, size1, addr2, size2 = operands
-        if val == get_val(mem, addr1, size1):
-            set_val(mem, addr2, 0, size2)
-        elif val > get_val(mem, addr1, size1):
-            set_val(mem, addr2, 1, size2)
-        else:
-            set_val(mem, addr2, 2, size2)
-
-    elif cmd == "comparev":
-        addr1, size1, addr2, size2, addr3, size3 = operands
-        if get_val(mem, addr1, size1) == get_val(mem, addr2, size2):
-            set_val(mem, addr3, 0, size3)
-        elif get_val(mem, addr1, size1) > get_val(mem, addr2, size2):
-            set_val(mem, addr3, 1, size3)
-        else:
-            set_val(mem, addr3, 2, size3)
-
-    elif cmd == "isequal":
-        val, addr1, size1, addr2 = operands
-        if val == get_val(mem, addr1, size1):
-            set_val(mem, addr2, 1, 1)
-        else:
-            set_val(mem, addr2, 0, 1)
-
-    elif cmd == "not":
-        addr1, size1, addr2, size2 = operands
-        val1 = get_val(mem, addr1, size1)
-        result = val1 ^ ((1 << size1) - 1)
-        set_val(mem, addr2, result, size2)
-
-    elif cmd == "or":
-        addr1, size1, addr2, size2, addr3, size3 = operands
-        val1 = get_val(mem, addr1, size1)
-        val2 = get_val(mem, addr2, size2)
-        set_val(mem, addr3, val1 | val2, size3)
-
-    elif cmd == "and":
-        addr1, size1, addr2, size2, addr3, size3 = operands
-        val1 = get_val(mem, addr1, size1)
-        val2 = get_val(mem, addr2, size2)
-        set_val(mem, addr3, val1 & val2, size3)
-
-    elif cmd == "nor":
-        addr1, size1, addr2, size2, addr3, size3 = operands
-        val1 = get_val(mem, addr1, size1)
-        val2 = get_val(mem, addr2, size2)
-        result = ~(val1 | val2) & ((1 << max(size1, size2)) - 1)
-        set_val(mem, addr3, result, size3)
-
-    elif cmd == "nand":
-        addr1, size1, addr2, size2, addr3, size3 = operands
-        val1 = get_val(mem, addr1, size1)
-        val2 = get_val(mem, addr2, size2)
-        result = ~(val1 & val2) & ((1 << max(size1, size2)) - 1)
-        set_val(mem, addr3, result, size3)
-
-    elif cmd == "xor":
-        addr1, size1, addr2, size2, addr3, size3 = operands
-        val1 = get_val(mem, addr1, size1)
-        val2 = get_val(mem, addr2, size2)
-        set_val(mem, addr3, val1 ^ val2, size3)
-
-    elif cmd == "xnor":
-        addr1, size1, addr2, size2, addr3, size3 = operands
-        val1 = get_val(mem, addr1, size1)
-        val2 = get_val(mem, addr2, size2)
-        result = ~(val1 ^ val2) & ((1 << max(size1, size2)) - 1)
-        set_val(mem, addr3, result, size3)
-
-    elif cmd == "shl":
-        addr1, size1, addr2, size2, addr3, size3 = operands
-        val1 = get_val(mem, addr1, size1)
-        shift = get_val(mem, addr2, size2)
-        result = (val1 << shift) % (2 ** size1)
-        set_val(mem, addr3, result, size3)
-
-    elif cmd == "shr":
-        addr1, size1, addr2, size2, addr3, size3 = operands
-        val1 = get_val(mem, addr1, size1)
-        shift = get_val(mem, addr2, size2)
-        result = val1 >> shift
-        set_val(mem, addr3, result, size3)
-
-    elif cmd == "subroutine":
-        pos, = operands
-        nextreturn = pc
-        pc = pos
-
-    elif cmd == "return":
-        pc = nextreturn
-
-    elif cmd == "if":
-        addr, size, pos = operands
-        if get_val(mem, addr, size) != 0:
+        case "setpc":
+            pos, = operands
             pc = pos
 
-    elif cmd == "ifnot":
-        addr, size, pos = operands
-        if get_val(mem, addr, size) == 0:
-            pc = pos
-
-    elif cmd == "ifsubroutine":
-        addr, size, pos = operands
-        if get_val(mem, addr, size) != 0:
+        case "subroutine":
+            pos, = operands
             nextreturn = pc
             pc = pos
 
-    elif cmd == "ifnotsubroutine":
-        addr, size, pos = operands
-        if get_val(mem, addr, size) == 0:
-            nextreturn = pc
-            pc = pos
+        case "return":
+            pc = nextreturn
 
-    elif cmd == "sleep":
-        ms, = operands
-        time.sleep(ms / 1000)
+        case "sleep":
+            ms, = operands
+            time.sleep(ms / 1000)
 
-    elif cmd == "gettime":
-        addr, size = operands
-        set_val(mem, addr, int(time.time() * 1000), size)
+        case "refreshscreen":
+            update_graphics()  # pump window events (incl. QUIT) only when a frame is actually presented
+            if running:
+                render_screen()
 
-    elif cmd == "getmemsize":
-        addr, size = operands
-        set_val(mem, addr, memsize, size)
+        case "romread8":
+            ra, rd = operands
+            reg[rd] = rom_read(bytecode, reg[ra], 1)
 
-    elif cmd == "getflag":
-        flag_index, addr, size = operands
-        set_val(mem, addr, get_flag_value(flag_index), size)
+        case "romread16":
+            ra, rd = operands
+            reg[rd] = rom_read(bytecode, reg[ra], 2)
 
-    elif cmd == "romread":
-        pos_field, addr, size = operands
-        bit_pos = get_val(mem, pos_field, 32)
-        val = get_val_from_bytecode(bytecode, bit_pos, size)
-        set_val(mem, addr, val, size)
+        case "romread32":
+            ra, rd = operands
+            reg[rd] = rom_read(bytecode, reg[ra], 4)
 
-    elif cmd == "setpixel":
-        addrx, sizex, addry, sizey, addrc, sizec = operands
-        x = get_val(mem, addrx, sizex)
-        y = get_val(mem, addry, sizey)
-        color = get_val(mem, addrc, sizec)
-        mode = get_flag_value(0)
-        width = 128 if mode in (4, 5, 6) else 64
-        target = memsize - 1 - x - y * width
-        set_bit(mem, target, 1 if color else 0)
+        case "setpixel":
+            rx, ry, rc = operands
+            x, y, color = reg[rx], reg[ry], reg[rc]
+            mode = get_flag_value(0)
+            width = 128 if mode in (4, 5, 6) else 64
+            target = x + y * width
+            set_bit(framebuffer, target, 1 if color else 0)
 
-    elif cmd == "refreshscreen":
-        render_screen()
+        case "getpixel":
+            rx, ry, rdst = operands
+            x, y = reg[rx], reg[ry]
+            mode = get_flag_value(0)
+            width = 128 if mode in (4, 5, 6) else 64
+            source = x + y * width
+            reg[rdst] = get_bit(framebuffer, source)
 
-    elif cmd == "exit":
-        running = False
+        case "getkeyboard":
+            r, = operands
+            update_keyboard()  # only poll the real keyboard when a program actually asks for it
+            reg[r] = keyboard_state
+
+        case "gettime":
+            r, = operands
+            reg[r] = int(time.time() * 1000) % (1 << 32)  # time measured in milliseconds
+
+        case "getmemsize":
+            r, = operands
+            reg[r] = len(mem)
+
+        case "getflag":
+            flag_index, r = operands
+            reg[r] = get_flag_value(flag_index)
+
+        case "randreg":
+            min_val, max_val, r = operands
+            reg[r] = random.randrange(min_val, max_val)
+
+        case "setreg":
+            r, val = operands
+            reg[r] = val % (1 << 32)
+
+        case "movreg":
+            dst, src = operands
+            reg[dst] = reg[src]
+
+        case "loadreg8":
+            r, addr = operands
+            reg[r] = get_val(mem, addr, 1)
+
+        case "loadreg16":
+            r, addr = operands
+            reg[r] = get_val(mem, addr, 2)
+
+        case "loadreg32":
+            r, addr = operands
+            reg[r] = get_val(mem, addr, 4)
+
+        case "storereg8":
+            r, addr = operands
+            set_val(mem, addr, reg[r] & 0xFF, 1)
+
+        case "storereg16":
+            r, addr = operands
+            set_val(mem, addr, reg[r] & 0xFFFF, 2)
+
+        case "storereg32":
+            r, addr = operands
+            set_val(mem, addr, reg[r] & 0xFFFFFFFF, 4)
+
+        case "addreg":
+            r1, r2, dst = operands
+            reg[dst] = (reg[r1] + reg[r2]) % (1 << 32)
+
+        case "subreg":
+            r1, r2, dst = operands
+            reg[dst] = (reg[r1] - reg[r2]) % (1 << 32)
+
+        case "mulreg":
+            r1, r2, dst = operands
+            reg[dst] = (reg[r1] * reg[r2]) % (1 << 32)
+
+        case "divreg":
+            r1, r2, dst = operands
+            if reg[r2] != 0:
+                reg[dst] = reg[r1] // reg[r2]
+
+        case "modreg":
+            r1, r2, dst = operands
+            if reg[r2] != 0:
+                reg[dst] = reg[r1] % reg[r2]
+
+        case "addregv":
+            r1, val, dst = operands
+            reg[dst] = (reg[r1] + val) % (1 << 32)
+
+        case "subregv":
+            r1, val, dst = operands
+            reg[dst] = (reg[r1] - val) % (1 << 32)
+
+        case "mulregv":
+            r1, val, dst = operands
+            reg[dst] = (reg[r1] * val) % (1 << 32)
+
+        case "compreg":
+            r1, r2, dst = operands
+            if reg[r1] == reg[r2]:
+                reg[dst] = 0
+            elif reg[r1] > reg[r2]:
+                reg[dst] = 1
+            else:
+                reg[dst] = 2
+
+        case "ifreg":
+            r, pos = operands
+            if reg[r] != 0:
+                pc = pos
+
+        case "ifnotreg":
+            r, pos = operands
+            if reg[r] == 0:
+                pc = pos
+
+        case "ifsubreg":
+            r, pos = operands
+            if reg[r] != 0:
+                nextreturn = pc
+                pc = pos
+
+        case "ifnotsubreg":
+            r, pos = operands
+            if reg[r] == 0:
+                nextreturn = pc
+                pc = pos
+
+        case "notreg":
+            r1, dst = operands
+            reg[dst] = (~reg[r1]) & 0xFFFFFFFF
+
+        case "orreg":
+            r1, r2, dst = operands
+            reg[dst] = reg[r1] | reg[r2]
+
+        case "andreg":
+            r1, r2, dst = operands
+            reg[dst] = reg[r1] & reg[r2]
+
+        case "norreg":
+            r1, r2, dst = operands
+            reg[dst] = (~(reg[r1] | reg[r2])) & 0xFFFFFFFF
+
+        case "nandreg":
+            r1, r2, dst = operands
+            reg[dst] = (~(reg[r1] & reg[r2])) & 0xFFFFFFFF
+
+        case "xorreg":
+            r1, r2, dst = operands
+            reg[dst] = reg[r1] ^ reg[r2]
+
+        case "xnorreg":
+            r1, r2, dst = operands
+            reg[dst] = (~(reg[r1] ^ reg[r2])) & 0xFFFFFFFF
+
+        case "shlreg":
+            r1, r2, dst = operands
+            reg[dst] = (reg[r1] << reg[r2]) & 0xFFFFFFFF
+
+        case "shrreg":
+            r1, r2, dst = operands
+            reg[dst] = reg[r1] >> reg[r2]
+
+        case "loadregi8":
+            ra, rd = operands
+            reg[rd] = get_val(mem, reg[ra], 1)
+
+        case "loadregi16":
+            ra, rd = operands
+            reg[rd] = get_val(mem, reg[ra], 2)
+
+        case "loadregi32":
+            ra, rd = operands
+            reg[rd] = get_val(mem, reg[ra], 4)
+
+        case "storeregi8":
+            ra, rv = operands
+            set_val(mem, reg[ra], reg[rv] & 0xFF, 1)
+
+        case "storeregi16":
+            ra, rv = operands
+            set_val(mem, reg[ra], reg[rv] & 0xFFFF, 2)
+
+        case "storeregi32":
+            ra, rv = operands
+            set_val(mem, reg[ra], reg[rv] & 0xFFFFFFFF, 4)
+
+        case "eqreg":
+            r1, r2, dst = operands
+            reg[dst] = 1 if reg[r1] == reg[r2] else 0
+
+        case "neqreg":
+            r1, r2, dst = operands
+            reg[dst] = 1 if reg[r1] != reg[r2] else 0
+
+        case "ltreg":
+            r1, r2, dst = operands
+            reg[dst] = 1 if reg[r1] < reg[r2] else 0
+
+        case "gtreg":
+            r1, r2, dst = operands
+            reg[dst] = 1 if reg[r1] > reg[r2] else 0
+
+        case "lereg":
+            r1, r2, dst = operands
+            reg[dst] = 1 if reg[r1] <= reg[r2] else 0
+
+        case "gereg":
+            r1, r2, dst = operands
+            reg[dst] = 1 if reg[r1] >= reg[r2] else 0
+
+        case "outreg":
+            r, = operands
+            print(reg[r], end="")
+
+        case "exit":
+            running = False
 
 if pygame is not None:
     pygame.quit()
