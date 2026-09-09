@@ -1,4 +1,6 @@
 #include <stdio.h>
+
+#define ULVM_MEM_SIZE 256
 #include "unilang.c"
 
 UnilangVM vm;

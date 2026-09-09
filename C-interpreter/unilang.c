@@ -126,50 +126,59 @@ typedef uint8_t (*vm_readbyte)(uint32_t addr);
 #define ULVM_FLAG_NUM 16
 #define ULVM_FLAG_SIZE 4
 
+#ifndef ULVM_MEM_SIZE
+#define ULVM_MEM_SIZE 64 // in bytes
+#warning "ULVM_MEM_SIZE not defined, defaulting to 64 bytes"
+#endif
+
 typedef struct UnilangVM
 {
     uint32_t pc;
+    uint8_t mem[ULVM_MEM_SIZE];
     uint8_t flags[ULVM_FLAG_NUM / (8 / ULVM_FLAG_SIZE)];
+    uint8_t supportedflags[ULVM_FLAG_NUM / 8]; // the user will handle setting this in their main()
     vm_outputchar outputchar;
     vm_readbyte readbyte;
 };
 
-#define ULVM_NEXTBYTE() ((uint32_t) vm->readbyte(vm->pc++))
+void ULVM_init(UnilangVM *vm, vm_outputchar outputchar, vm_readbyte readbyte)
+{
+    vm->pc = 0;
+    vm->outputchar = outputchar;
+    vm->readbyte = readbyte;
+    memset(vm->mem, 0, ULVM_MEM_SIZE);
+    memset(vm->flags, 0, ULVM_FLAG_NUM / (8 / ULVM_FLAG_SIZE));
+};
+
+#define ULVM_NEXTBYTE() ((uint32_t)vm->readbyte(vm->pc++))
 #define ULVM_NEXT2BYTES() (ULVM_NEXTBYTE() << 8 | ULVM_NEXTBYTE())
 #define ULVM_NEXT4BYTES() (ULVM_NEXT2BYTES() << 16 | ULVM_NEXT2BYTES())
 
-void ULVM_handlenextinstruction (UnilangVM *vm)
+void ULVM_handlenextinstruction(UnilangVM *vm)
 {
     switch (ULVM_NEXTBYTE())
     {
     case OP_NOP:
         break;
     case OP_FLAG:
-        {
-            uint8_t flag = ULVM_NEXTBYTE();
-            uint8_t value = ULVM_NEXTBYTE();
-            vm->flags[flag / (8 / ULVM_FLAG_SIZE)] = value << (4 * (flag % (8 / ULVM_FLAG_SIZE)));
-            break;
-        }
+    {
+        uint8_t flag = ULVM_NEXTBYTE();
+        uint8_t value = ULVM_NEXTBYTE();
+        vm->flags[flag / (8 / ULVM_FLAG_SIZE)] = value << (4 * (flag % (8 / ULVM_FLAG_SIZE)));
+        break;
+    }
     case OP_PRINT:
+    {
+        uint16_t size = ULVM_NEXT2BYTES();
+        for (uint16_t i = 0; i < size; i++)
         {
-            uint16_t size = ULVM_NEXT2BYTES();
-            for (uint16_t i = 0; i < size; i++)
-            {
-                vm->outputchar((char) ULVM_NEXTBYTE());
-            }
-            vm->outputchar('\n');
-            break;
+            vm->outputchar((char)ULVM_NEXTBYTE());
         }
+        vm->outputchar('\n');
+        break;
+    }
     case OP_EXIT:
         vm->pc = -1;
         break;
     }
-};
-
-void ULVM_init (UnilangVM *vm, vm_outputchar outputchar, vm_readbyte readbyte)
-{
-    vm->pc = 0;
-    vm->outputchar = outputchar;
-    vm->readbyte = readbyte;
 };
