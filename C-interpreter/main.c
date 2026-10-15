@@ -26,12 +26,6 @@ static uint8_t my_readbyte(uint32_t addr)
     return 0;
 }
 
-static int gfx_width(void)
-{
-    uint8_t mode = ulvm_getflag(g_vm, 0);
-    return (mode >= 4 && mode <= 6) ? 128 : 64;
-}
-
 static void my_setpixel(uint8_t x, uint8_t y, uint8_t color)
 {
     if (!renderer)
@@ -55,6 +49,40 @@ static void my_refreshscreen(void)
 {
     if (renderer)
         SDL_RenderPresent(renderer);
+}
+
+static void my_clearscreen(void)
+{
+    if (!renderer)
+        return;
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+    SDL_RenderClear(renderer);
+}
+
+static void my_enablegraphics(uint16_t wx, uint16_t wy, uint8_t colorsize)
+{
+    (void)colorsize;
+    if (window)
+        return;
+    window = SDL_CreateWindow("unilang", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                               wx * SCALE, wy * SCALE, 0);
+    renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    my_clearscreen();
+    SDL_RenderPresent(renderer);
+}
+
+static void my_disablegraphics(void)
+{
+    if (renderer)
+    {
+        SDL_DestroyRenderer(renderer);
+        renderer = NULL;
+    }
+    if (window)
+    {
+        SDL_DestroyWindow(window);
+        window = NULL;
+    }
 }
 
 static uint8_t my_getkeyboard(void)
@@ -94,7 +122,7 @@ static int my_isflagsupported(uint8_t flag, uint8_t val)
     }
     else if (flag == 1)
     {
-        if (val == 0)
+        if (val == 0 || val == 1)
             return 1;
         else
             return 0;
@@ -138,14 +166,10 @@ int main(int argc, char **argv)
         printf("SDL_Init failed: %s\n", SDL_GetError());
         return 1;
     }
-    window = SDL_CreateWindow("unilang", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                               64 * SCALE, 64 * SCALE, 0);
-    renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
-
     UnilangVM vm;
     g_vm = &vm;
     ULVM_init(&vm, my_outputchar, my_readbyte);
-    ULVM_set_graphics(&vm, my_setpixel, my_getpixel, my_refreshscreen);
+    ULVM_set_graphics(&vm, my_setpixel, my_getpixel, my_refreshscreen, my_enablegraphics, my_disablegraphics, my_clearscreen);
     ULVM_set_keyboard(&vm, my_getkeyboard);
     ULVM_set_time(&vm, my_gettime, my_sleep);
     ULVM_set_flagsupport(&vm, my_isflagsupported);
@@ -156,8 +180,7 @@ int main(int argc, char **argv)
             break;
     }
 
-    SDL_DestroyRenderer(renderer);
-    SDL_DestroyWindow(window);
+    my_disablegraphics();
     SDL_Quit();
     free(rom);
     return 0;

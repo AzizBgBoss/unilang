@@ -4,6 +4,159 @@
 #include <stdlib.h>
 #include <string.h>
 
+/*
+unilang bytecode VM by AzizBgBoss
+https://github.com/AzizBgBoss/unilang
+
+This VM executes compiled unilang bytecode (produced by a separate converter/assembler or written by hand if you hate yourself enough).
+
+Operand encoding conventions (all big-endian):
+  addr  -> 4 bytes (unsigned int, byte offset into RAM)
+  reg   -> 1 byte  (register index, 0-15)
+  val   -> 4 bytes (unsigned int)
+  byte  -> 1 byte
+  flag  -> 1 byte
+  count -> 4 bytes
+  pos   -> 4 bytes (bytecode offset, used for jumps/subroutines)
+  text  -> 2 byte length prefix, followed by that many raw bytes
+
+- flag 0 (graphics) (this will consume the last n bits of memory):
+0 - disable graphics
+1 - enable monochrome graphics (64x64) (1 x 64 x 64 = 4096 bits = 512 bytes)
+2 - enable 4-shade grayscale graphics (64x64) (4 x 64 x 64 = 16384 bits = 2048 bytes)
+3 - enable 8-bit color graphics (64x64) (8 x 64 x 64 = 32768 bits = 4096 bytes)
+4 - enable monochrome graphics (128x64) (1 x 128 x 64 = 8192 bits = 1024 bytes)
+5 - enable 4-shade grayscale graphics (128x64) (4 x 128 x 64 = 32768 bits = 4096 bytes)
+6 - enable 8-bit color graphics (128x64) (8 x 128 x 64 = 65536 bits = 8192 bytes)
+
+- flag 1 (keyboard) (this will consume the last n bits of memory (after graphics if it's used)) (Only gets supported once graphics are supported and on):
+0 - disable keyboard
+1 - NES style keyboard (Up + Down + Left + Right + A + B + select + start) (1 x 8 = 8 bits)
+On keyboard: (Up + Down + Left + Right + C + V + Backspace + Enter)
+*/
+
+#if defined(ARDUINO_ARCH_AVR)
+  #include <avr/pgmspace.h>
+  #define READ_FLASH_BYTE(addr) pgm_read_byte(addr)
+#else
+  #define PROGMEM
+  #define READ_FLASH_BYTE(addr) (*(const uint8_t*)(addr))
+#endif
+
+/**
+ * 4x6 monochrome bitmap font for rendering
+ * Author: Luiz Bills <luizbills@pm.me>
+ *
+ * License: Public Domain
+ *
+ * Based on the following projects:
+ * - https://github.com/dhepper/font8x8
+ * - https://alasseearfalas.itch.io/another-tiny-pixel-font-mono-3x5
+ */
+
+// Contains unicode points U+0020 - U+007F (basic latin)
+
+#define ULVM_GLYPH_W 4
+#define ULVM_GLYPH_H 6
+
+const uint8_t ulvm_font4x6_basic[][3] PROGMEM = {
+    { 0x00, 0x00, 0x00 }, // U+0020 (space)
+    { 0x22, 0x20, 0x20 }, // U+0021 (!)
+    { 0x55, 0x00, 0x00 }, // U+0022 (")
+    { 0x57, 0x57, 0x50 }, // U+0023 (#)
+    { 0x63, 0x67, 0x20 }, // U+0024 ($)
+    { 0x54, 0x21, 0x50 }, // U+0025 (%)
+    { 0x63, 0x65, 0x60 }, // U+0026 (&)
+    { 0x22, 0x00, 0x00 }, // U+0027 (')
+    { 0x21, 0x11, 0x20 }, // U+0028 (()
+    { 0x24, 0x44, 0x20 }, // U+0029 ())
+    { 0x52, 0x50, 0x00 }, // U+002a (*)
+    { 0x02, 0x72, 0x00 }, // U+002b (+)
+    { 0x00, 0x00, 0x21 }, // U+002c (,)
+    { 0x00, 0x70, 0x00 }, // U+002d (-)
+    { 0x00, 0x00, 0x10 }, // U+002e (.)
+    { 0x44, 0x21, 0x10 }, // U+002f (/)
+    { 0x75, 0x55, 0x70 }, // U+0030 (0)
+    { 0x32, 0x22, 0x70 }, // U+0031 (1)
+    { 0x74, 0x71, 0x70 }, // U+0032 (2)
+    { 0x74, 0x74, 0x70 }, // U+0033 (3)
+    { 0x55, 0x74, 0x40 }, // U+0034 (4)
+    { 0x71, 0x74, 0x70 }, // U+0035 (5)
+    { 0x71, 0x75, 0x70 }, // U+0036 (6)
+    { 0x74, 0x44, 0x40 }, // U+0037 (7)
+    { 0x75, 0x75, 0x70 }, // U+0038 (8)
+    { 0x75, 0x74, 0x70 }, // U+0039 (9)
+    { 0x00, 0x20, 0x20 }, // U+003a (:)
+    { 0x00, 0x20, 0x21 }, // U+003b (;)
+    { 0x42, 0x12, 0x40 }, // U+003c (<)
+    { 0x07, 0x07, 0x00 }, // U+003d (=)
+    { 0x12, 0x42, 0x10 }, // U+003e (>)
+    { 0x74, 0x60, 0x20 }, // U+003f (?)
+    { 0x25, 0x51, 0x60 }, // U+0040 (@)
+    { 0x25, 0x75, 0x50 }, // U+0041 (A)
+    { 0x35, 0x35, 0x30 }, // U+0042 (B)
+    { 0x61, 0x11, 0x60 }, // U+0043 (C)
+    { 0x35, 0x55, 0x30 }, // U+0044 (D)
+    { 0x71, 0x31, 0x70 }, // U+0045 (E)
+    { 0x71, 0x31, 0x10 }, // U+0046 (F)
+    { 0x61, 0x55, 0x60 }, // U+0047 (G)
+    { 0x55, 0x75, 0x50 }, // U+0048 (H)
+    { 0x72, 0x22, 0x70 }, // U+0049 (I)
+    { 0x44, 0x45, 0x20 }, // U+004a (J)
+    { 0x55, 0x35, 0x50 }, // U+004b (K)
+    { 0x11, 0x11, 0x70 }, // U+004c (L)
+    { 0x57, 0x75, 0x50 }, // U+004d (M)
+    { 0x75, 0x55, 0x50 }, // U+004e (N)
+    { 0x25, 0x55, 0x20 }, // U+004f (O)
+    { 0x75, 0x71, 0x10 }, // U+0050 (P)
+    { 0x65, 0x53, 0x60 }, // U+0051 (Q)
+    { 0x35, 0x35, 0x50 }, // U+0052 (R)
+    { 0x61, 0x74, 0x30 }, // U+0053 (S)
+    { 0x72, 0x22, 0x20 }, // U+0054 (T)
+    { 0x55, 0x55, 0x70 }, // U+0055 (U)
+    { 0x55, 0x52, 0x20 }, // U+0056 (V)
+    { 0x55, 0x77, 0x50 }, // U+0057 (W)
+    { 0x55, 0x25, 0x50 }, // U+0058 (X)
+    { 0x55, 0x22, 0x20 }, // U+0059 (Y)
+    { 0x74, 0x21, 0x70 }, // U+005a (Z)
+    { 0x62, 0x22, 0x60 }, // U+005b ([)
+    { 0x11, 0x24, 0x40 }, // U+005c (\)
+    { 0x32, 0x22, 0x30 }, // U+005d (])
+    { 0x25, 0x00, 0x00 }, // U+005e (^)
+    { 0x00, 0x00, 0x70 }, // U+005f (_)
+    { 0x12, 0x00, 0x00 }, // U+0060 (`)
+    { 0x06, 0x55, 0x60 }, // U+0061 (a)
+    { 0x13, 0x55, 0x30 }, // U+0062 (b)
+    { 0x06, 0x11, 0x60 }, // U+0063 (c)
+    { 0x46, 0x55, 0x60 }, // U+0064 (d)
+    { 0x02, 0x53, 0x60 }, // U+0065 (e)
+    { 0x42, 0x72, 0x20 }, // U+0066 (f)
+    { 0x02, 0x56, 0x42 }, // U+0067 (g)
+    { 0x11, 0x35, 0x50 }, // U+0068 (h)
+    { 0x02, 0x02, 0x20 }, // U+0069 (i)
+    { 0x02, 0x02, 0x21 }, // U+006a (j)
+    { 0x15, 0x35, 0x50 }, // U+006b (k)
+    { 0x22, 0x22, 0x40 }, // U+006c (l)
+    { 0x05, 0x75, 0x50 }, // U+006d (m)
+    { 0x03, 0x55, 0x50 }, // U+006e (n)
+    { 0x02, 0x55, 0x20 }, // U+006f (o)
+    { 0x03, 0x55, 0x31 }, // U+0070 (p)
+    { 0x06, 0x55, 0x64 }, // U+0071 (q)
+    { 0x02, 0x51, 0x10 }, // U+0072 (r)
+    { 0x06, 0x14, 0x30 }, // U+0073 (s)
+    { 0x27, 0x22, 0x40 }, // U+0074 (t)
+    { 0x05, 0x55, 0x60 }, // U+0075 (u)
+    { 0x05, 0x52, 0x20 }, // U+0076 (v)
+    { 0x05, 0x57, 0x50 }, // U+0077 (w)
+    { 0x05, 0x22, 0x50 }, // U+0078 (x)
+    { 0x05, 0x56, 0x42 }, // U+0079 (y)
+    { 0x07, 0x41, 0x70 }, // U+007a (z)
+    { 0x62, 0x12, 0x60 }, // U+007b ({)
+    { 0x22, 0x22, 0x20 }, // U+007c (|)
+    { 0x32, 0x42, 0x30 }, // U+007d (})
+    { 0x03, 0x60, 0x00 }, // U+007e (~)
+};
+
 enum OP_CODES
 {
     // System / I/O / Misc Operations
@@ -36,7 +189,10 @@ enum OP_CODES
     OP_GETTIME,         // get the current time (ms) into a register - parameters: reg(1)
     OP_GETMEMSIZE,      // get the size of memory in bytes into a register - parameters: reg(1)
     OP_GETFLAG,         // read the current value of a flag into a register - parameters: flag(1), reg(1)
-    OP_RANDREG,         // set a register to a random value between min and max (exclusive) - parameters: min(4), max(4), reg(1)
+    OP_RANDREG,         // set a register to a random value between min and max (exclusive) - parameters: r1(min)(1), r2(max)(1), dst(1)
+    OP_SRANDREG,        // set the unilang propriatary pseudo-random function seed to the value in the reg - parameters: reg(1)
+    OP_DRAWSTRING,      // draw a set of characters from memory (RAM or ROM) at a certain position using the 4x6 font included with auto wrapping, returns the next glyph x and y - parameters: regx(1), regy(1), regcolor(1), regaddr(1), reglen(1), src(1) [0=ram,1=rom], regreturnx(1), regreturny(1)
+    OP_NUMTOSTR,        // convert a number in a register to ASCII decimal digits written into RAM, result length into a register - parameters: reg(1), addr(4), reglen(1)
 
     // Direct Register & Memory Operations
     OP_SETREG = 0x40, // reg = val - parameters: reg(1), val(4)
@@ -103,6 +259,9 @@ typedef uint32_t (*vm_gettime)(void);
 typedef void     (*vm_sleep)(uint32_t ms);
 typedef void     (*vm_refreshscreen)(void);
 typedef uint32_t (*vm_input)(char *buf, uint32_t maxchars);
+typedef void     (*vm_enablegraphics)(uint16_t wx, uint16_t wy, uint8_t colorsize);
+typedef void     (*vm_disablegraphics)(void);
+typedef void     (*vm_clearscreen)(void);
 
 #define ULVM_FLAG_NUM 16
 #define ULVM_FLAG_SIZE 4
@@ -112,9 +271,7 @@ typedef uint32_t (*vm_input)(char *buf, uint32_t maxchars);
 #warning "ULVM_MEM_SIZE not defined, defaulting to 64 bytes"
 #endif
 
-#ifndef ULVM_CALLSTACK_SIZE
 #define ULVM_CALLSTACK_SIZE 16
-#endif
 
 struct UnilangVM
 {
@@ -131,6 +288,8 @@ struct UnilangVM
     vm_outputchar outputchar;
     vm_readbyte readbyte;
     vm_isflagsupported isflagsupported;
+    uint8_t graphics_mode;
+
     vm_setpixel setpixel;
     vm_getpixel getpixel;
     vm_getkeyboard getkeyboard;
@@ -138,6 +297,13 @@ struct UnilangVM
     vm_sleep sleep;
     vm_refreshscreen refreshscreen;
     vm_input input;
+    vm_enablegraphics enablegraphics;
+    vm_disablegraphics disablegraphics;
+    vm_clearscreen clearscreen;
+
+    uint32_t rand_state;
+    uint16_t gfx_w, gfx_h;
+    uint16_t cursor_x, cursor_y;
 };
 
 static inline void ULVM_init(UnilangVM *vm, vm_outputchar outputchar, vm_readbyte readbyte)
@@ -147,13 +313,34 @@ static inline void ULVM_init(UnilangVM *vm, vm_outputchar outputchar, vm_readbyt
     vm->running = 1;
     vm->outputchar = outputchar;
     vm->readbyte = readbyte;
+    vm->rand_state = 1;
 }
 
-static inline void ULVM_set_graphics(UnilangVM *vm, vm_setpixel setpixel, vm_getpixel getpixel, vm_refreshscreen refreshscreen)
+static inline uint32_t ulvm_rand(UnilangVM *vm)
+{
+    // xorshift32 - unilang's own pseudo-random function
+    uint32_t x = vm->rand_state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    vm->rand_state = x;
+    return x;
+}
+
+static inline void ulvm_srand(UnilangVM *vm, uint32_t seed)
+{
+    vm->rand_state = (seed == 0) ? 1 : seed;
+}
+
+static inline void ULVM_set_graphics(UnilangVM *vm, vm_setpixel setpixel, vm_getpixel getpixel, vm_refreshscreen refreshscreen,
+                                      vm_enablegraphics enablegraphics, vm_disablegraphics disablegraphics, vm_clearscreen clearscreen)
 {
     vm->setpixel = setpixel;
     vm->getpixel = getpixel;
     vm->refreshscreen = refreshscreen;
+    vm->enablegraphics = enablegraphics;
+    vm->disablegraphics = disablegraphics;
+    vm->clearscreen = clearscreen;
 }
 
 static inline void ULVM_set_keyboard(UnilangVM *vm, vm_getkeyboard getkeyboard)
@@ -251,6 +438,108 @@ static inline uint32_t ulvm_rom_read(UnilangVM *vm, uint32_t addr, int size)
     return val;
 }
 
+static inline void ulvm_graphics_dims(uint8_t val, uint16_t *wx, uint16_t *wy, uint8_t *colorsize)
+{
+    switch (val)
+    {
+    case 1: *wx = 64;  *wy = 64; *colorsize = 1; break;
+    case 2: *wx = 64;  *wy = 64; *colorsize = 4; break;
+    case 3: *wx = 64;  *wy = 64; *colorsize = 8; break;
+    case 4: *wx = 128; *wy = 64; *colorsize = 1; break;
+    case 5: *wx = 128; *wy = 64; *colorsize = 4; break;
+    case 6: *wx = 128; *wy = 64; *colorsize = 8; break;
+    default: *wx = 0; *wy = 0; *colorsize = 0; break;
+    }
+}
+
+static inline void ulvm_drawchar(UnilangVM *vm, uint16_t x, uint16_t y, uint8_t color, uint8_t c)
+{
+    if (!vm->setpixel)
+        return;
+    if (c < 0x20 || c > 0x7F)
+        c = 0x20;
+    const uint8_t *glyph = ulvm_font4x6_basic[c - 0x20];
+    for (int row = 0; row < 6; row++)
+    {
+        uint8_t byte = glyph[row / 2];
+        uint8_t nibble = (row % 2 == 0) ? ((byte >> 4) & 0xF) : (byte & 0xF);
+        for (int col = 0; col < 4; col++)
+        {
+            if (nibble & (1 << col))
+                vm->setpixel((uint8_t)(x + col), (uint8_t)(y + row), color);
+        }
+    }
+}
+
+static inline void ulvm_drawstring(UnilangVM *vm, uint8_t color, char c)
+{
+    if (c == '\n')
+    {
+        vm->cursor_x = 0;
+        vm->cursor_y += ULVM_GLYPH_H;
+    }
+    else
+    {
+        ulvm_drawchar(vm, vm->cursor_x, vm->cursor_y, color, (uint8_t)c);
+        vm->cursor_x += ULVM_GLYPH_W;
+        if (vm->cursor_x + 4 > vm->gfx_w)
+        {
+            vm->cursor_x = 0;
+            vm->cursor_y += ULVM_GLYPH_H;
+        }
+    }
+    if (vm->cursor_y + 6 > vm->gfx_h)
+    {
+        vm->cursor_x = 0;
+        vm->cursor_y = 0;
+    }
+}
+
+static inline void ulvm_drawstring_mem(UnilangVM *vm, uint16_t x, uint16_t y, uint8_t color,
+                                        uint32_t addr, uint32_t len, uint8_t rom,
+                                        uint16_t *retx, uint16_t *rety)
+{
+    vm->cursor_x = x;
+    vm->cursor_y = y;
+    for (uint32_t i = 0; i < len; i++)
+    {
+        uint8_t c;
+        if (rom)
+        {
+            c = vm->readbyte(addr + i);
+        }
+        else
+        {
+            if (!ULVM_INBOUNDS(addr + i, 1))
+                break;
+            c = vm->mem[addr + i];
+        }
+        ulvm_drawstring(vm, color, (char)c);
+    }
+    if (retx) *retx = vm->cursor_x;
+    if (rety) *rety = vm->cursor_y;
+}
+
+static inline uint8_t ulvm_itoa(UnilangVM *vm, uint32_t v, uint32_t addr)
+{
+    char tmp[10];
+    int n = 0;
+    if (v == 0)
+        tmp[n++] = '0';
+    while (v > 0 && n < 10)
+    {
+        tmp[n++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    for (int i = 0; i < n; i++)
+    {
+        uint32_t a = addr + (uint32_t)(n - 1 - i);
+        if (ULVM_INBOUNDS(a, 1))
+            vm->mem[a] = (uint8_t)tmp[i];
+    }
+    return (uint8_t)n;
+}
+
 static inline int ULVM_handlenextinstruction(UnilangVM *vm)
 {
     uint8_t opbyte = (uint8_t)ULVM_NEXTBYTE();
@@ -265,6 +554,27 @@ static inline int ULVM_handlenextinstruction(UnilangVM *vm)
         uint8_t flag = (uint8_t)ULVM_NEXTBYTE();
         uint8_t val = (uint8_t)ULVM_NEXTBYTE();
         ulvm_setflag(vm, flag, val);
+        if (flag == 0 && val != vm->graphics_mode)
+        {
+            if (val == 0)
+            {
+                if (vm->disablegraphics)
+                    vm->disablegraphics();
+            }
+            else
+            {
+                uint16_t wx, wy;
+                uint8_t colorsize;
+                ulvm_graphics_dims(val, &wx, &wy, &colorsize);
+                vm->gfx_w = wx;
+                vm->gfx_h = wy;
+                vm->cursor_x = 0;
+                vm->cursor_y = 0;
+                if (vm->enablegraphics)
+                    vm->enablegraphics(wx, wy, colorsize);
+            }
+            vm->graphics_mode = val;
+        }
         break;
     }
 
@@ -418,6 +728,8 @@ static inline int ULVM_handlenextinstruction(UnilangVM *vm)
     case OP_REFRESHSCREEN:
         if (vm->refreshscreen)
             vm->refreshscreen();
+        if (vm->clearscreen)
+            vm->clearscreen();
         break;
 
     case OP_ROMREAD8:
@@ -481,11 +793,47 @@ static inline int ULVM_handlenextinstruction(UnilangVM *vm)
 
     case OP_RANDREG:
     {
-        uint32_t min = ULVM_NEXT4BYTES();
-        uint32_t max = ULVM_NEXT4BYTES();
+        uint8_t r1 = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t r2 = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t dst = (uint8_t)ULVM_NEXTBYTE();
+        uint32_t min = ULVM_R(r1);
+        uint32_t max = ULVM_R(r2);
+        if (max > min)
+            ULVM_R(dst) = min + (ulvm_rand(vm) % (max - min));
+        break;
+    }
+
+    case OP_SRANDREG:
+    {
         uint8_t r = (uint8_t)ULVM_NEXTBYTE();
-        uint32_t span = (max > min) ? (max - min) : 1;
-        ULVM_R(r) = min + ((uint32_t)rand() % span);
+        ulvm_srand(vm, ULVM_R(r));
+        break;
+    }
+
+    case OP_DRAWSTRING:
+    {
+        uint8_t regx = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t regy = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t regcolor = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t regaddr = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t reglen = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t src = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t regreturnx = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t regreturny = (uint8_t)ULVM_NEXTBYTE();
+        uint16_t retx, rety;
+        ulvm_drawstring_mem(vm, (uint16_t)ULVM_R(regx), (uint16_t)ULVM_R(regy), (uint8_t)ULVM_R(regcolor),
+                            ULVM_R(regaddr), ULVM_R(reglen), src, &retx, &rety);
+        ULVM_R(regreturnx) = retx;
+        ULVM_R(regreturny) = rety;
+        break;
+    }
+
+    case OP_NUMTOSTR:
+    {
+        uint8_t r = (uint8_t)ULVM_NEXTBYTE();
+        uint32_t addr = ULVM_NEXT4BYTES();
+        uint8_t rlen = (uint8_t)ULVM_NEXTBYTE();
+        ULVM_R(rlen) = ulvm_itoa(vm, ULVM_R(r), addr);
         break;
     }
 

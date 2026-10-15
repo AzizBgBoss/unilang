@@ -7,81 +7,84 @@
 #define KEY_SELECT (1 << 6)
 #define KEY_START (1 << 7)
 
-// Visible ASCII 32..126 from font4x6_basic.h, 4x6, one uint4 row per entry.
-// Each row uses the font encoding: bit 0 is the leftmost pixel.
-const uint4 glyph_rows[570] = {
-    0, 0, 0, 0, 0, 0, 2, 2, 2, 0, 2, 0, 5, 5, 0, 0, 0, 0, 5, 7, 5, 7, 5, 0,
-    6, 3, 6, 7, 2, 0, 5, 4, 2, 1, 5, 0, 6, 3, 6, 5, 6, 0, 2, 2, 0, 0, 0, 0,
-    2, 1, 1, 1, 2, 0, 2, 4, 4, 4, 2, 0, 5, 2, 5, 0, 0, 0, 0, 2, 7, 2, 0, 0,
-    0, 0, 0, 0, 2, 1, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 1, 0, 4, 4, 2, 1, 1, 0,
-    7, 5, 5, 5, 7, 0, 3, 2, 2, 2, 7, 0, 7, 4, 7, 1, 7, 0, 7, 4, 7, 4, 7, 0,
-    5, 5, 7, 4, 4, 0, 7, 1, 7, 4, 7, 0, 7, 1, 7, 5, 7, 0, 7, 4, 4, 4, 4, 0,
-    7, 5, 7, 5, 7, 0, 7, 5, 7, 4, 7, 0, 0, 0, 2, 0, 2, 0, 0, 0, 2, 0, 2, 1,
-    4, 2, 1, 2, 4, 0, 0, 7, 0, 7, 0, 0, 1, 2, 4, 2, 1, 0, 7, 4, 6, 0, 2, 0,
-    2, 5, 5, 1, 6, 0, 2, 5, 7, 5, 5, 0, 3, 5, 3, 5, 3, 0, 6, 1, 1, 1, 6, 0,
-    3, 5, 5, 5, 3, 0, 7, 1, 3, 1, 7, 0, 7, 1, 3, 1, 1, 0, 6, 1, 5, 5, 6, 0,
-    5, 5, 7, 5, 5, 0, 7, 2, 2, 2, 7, 0, 4, 4, 4, 5, 2, 0, 5, 5, 3, 5, 5, 0,
-    1, 1, 1, 1, 7, 0, 5, 7, 7, 5, 5, 0, 7, 5, 5, 5, 5, 0, 2, 5, 5, 5, 2, 0,
-    7, 5, 7, 1, 1, 0, 6, 5, 5, 3, 6, 0, 3, 5, 3, 5, 5, 0, 6, 1, 7, 4, 3, 0,
-    7, 2, 2, 2, 2, 0, 5, 5, 5, 5, 7, 0, 5, 5, 5, 2, 2, 0, 5, 5, 7, 7, 5, 0,
-    5, 5, 2, 5, 5, 0, 5, 5, 2, 2, 2, 0, 7, 4, 2, 1, 7, 0, 6, 2, 2, 2, 6, 0,
-    1, 1, 2, 4, 4, 0, 3, 2, 2, 2, 3, 0, 2, 5, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0,
-    1, 2, 0, 0, 0, 0, 0, 6, 5, 5, 6, 0, 1, 3, 5, 5, 3, 0, 0, 6, 1, 1, 6, 0,
-    4, 6, 5, 5, 6, 0, 0, 2, 5, 3, 6, 0, 4, 2, 7, 2, 2, 0, 0, 2, 5, 6, 4, 2,
-    1, 1, 3, 5, 5, 0, 0, 2, 0, 2, 2, 0, 0, 2, 0, 2, 2, 1, 1, 5, 3, 5, 5, 0,
-    2, 2, 2, 2, 4, 0, 0, 5, 7, 5, 5, 0, 0, 3, 5, 5, 5, 0, 0, 2, 5, 5, 2, 0,
-    0, 3, 5, 5, 3, 1, 0, 6, 5, 5, 6, 4, 0, 2, 5, 1, 1, 0, 0, 6, 1, 4, 3, 0,
-    2, 7, 2, 2, 4, 0, 0, 5, 5, 5, 6, 0, 0, 5, 5, 2, 2, 0, 0, 5, 5, 7, 5, 0,
-    0, 5, 2, 2, 5, 0, 0, 5, 5, 6, 4, 2, 0, 7, 4, 1, 7, 0, 6, 2, 1, 2, 6, 0,
-    2, 2, 2, 2, 2, 0, 3, 2, 4, 2, 3, 0, 0, 3, 6, 0, 0, 0
-};
-
-uint8 draw_char(uint8 ch, uint8 ox, uint8 oy)
-{
-    if (ch < 32)
-    {
-        ch = 32;
-    }
-    if (ch > 126)
-    {
-        ch = 63;
-    }
-    uint32 glyph = ch;
-    for (uint8 row = 0; row < 6; row++)
-    {
-        uint4 bits = glyph_rows[(glyph - 32) * 6 + row];
-        for (uint8 col = 0; col < 4; col++)
-        {
-            if (bits & (1 << col))
-            {
-                setpixel(ox + col, oy + row, 1);
-            }
-        }
-    }
-}
-
-uint8 draw_string(const char text[], uint8 ox, uint8 oy)
-{
-    uint8 i = 0;
-    char ch = romread(text + i * 8, 8);
-    while (ch != 0)
-    {
-        draw_char(ch, ox + i * 4, oy);
-        i++;
-        ch = romread(text + i * 8, 8);
-    }
-}
-
-uint8 player_x = 0;
-uint8 player_y = 0;
+uint8 player_x = 30;
+uint8 player_y = 56;
 uint8 player_w = 3;
 uint8 player_h = 5;
 uint8 jumpTimer = 0;
 
+uint32 score = 0;
+uint8 fallspeed = 1;
+char scorebuf[8];
+
 uint8 draw_player()
 {
-    // Draw the player as a white square
-    draw_char('I', player_x, player_y);
+    drawchar('I', player_x, player_y);
+}
+
+#define ENEMIES 5
+uint8 enemies[ENEMIES * 2];
+#define ENEMY_X(e) enemies[e * 2]
+#define ENEMY_Y(e) enemies[e * 2 + 1]
+
+uint8 draw_enemies()
+{
+    for (uint8 i = 0; i < ENEMIES; i++)
+    {
+        drawchar('A', ENEMY_X(i), ENEMY_Y(i));
+    }
+}
+
+uint8 update_enemies()
+{
+    for (uint8 i = 0; i < ENEMIES; i++)
+    {
+        uint8 ey = ENEMY_Y(i);
+        ey = ey + fallspeed;
+        if (ey >= 64)
+        {
+            ey = 0;
+            ENEMY_X(i) = rand(0, 60);
+        }
+        ENEMY_Y(i) = ey;
+    }
+}
+
+uint8 abs_diff(uint8 a, uint8 b)
+{
+    if (a > b)
+    {
+        return a - b;
+    }
+    return b - a;
+}
+
+bool check_collision()
+{
+    for (uint8 i = 0; i < ENEMIES; i++)
+    {
+        uint8 dx = abs_diff(player_x, ENEMY_X(i));
+        uint8 dy = abs_diff(player_y, ENEMY_Y(i));
+        if (dx < 5)
+        {
+            if (dy < 7)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+uint8 draw_hud()
+{
+    for (uint8 i = 0; i < 8; i++)
+    {
+        scorebuf[i] = ' ';
+    }
+    uint8 slen = numtostr(score, scorebuf);
+    drawstring("SCORE", 0, 0);
+    drawstring(scorebuf, 34, 0);
 }
 
 uint32 main()
@@ -102,62 +105,108 @@ uint32 main()
     }
     else
     {
-        printf("NES keyboard not supported!");
+        printf("NES keyboard not supported!\n");
     }
 
-    printf("Video game 1");
+    printf("Dodge the A's!");
+    srand(gettime());
 
     while (true)
     {
-        uint8 keys = getkey();
-
-        // Gravity
-        if (jumpTimer > 0)
+        // reset a fresh round
+        player_x = 30;
+        player_y = 56;
+        jumpTimer = 0;
+        score = 0;
+        fallspeed = 1;
+        for (uint8 i = 0; i < ENEMIES; i++)
         {
-            if (player_y > 0)
-            {
-                player_y--;
-            }
-        }
-        else
-        {
-            if (player_y < 64 - player_h)
-            {
-                player_y++;
-            }
+            ENEMY_X(i) = rand(0, 60);
+            ENEMY_Y(i) = (64 / ENEMIES) * i;
         }
 
-        // Movement
-        if (keys & KEY_LEFT)
+        bool alive = true;
+        while (alive)
         {
-            if (player_x > 0)
+            uint8 keys = getkey();
+
+            // Gravity
+            if (jumpTimer > 0)
             {
-                player_x--;
+                if (player_y > 0)
+                {
+                    player_y--;
+                }
             }
-        }
-        else if (keys & KEY_RIGHT)
-        {
-            if (player_x < 64 - player_w)
+            else
             {
-                player_x++;
+                if (player_y < 64 - player_h)
+                {
+                    player_y++;
+                }
             }
-        }
-        if (keys & KEY_A)
-        {
-            if (jumpTimer == 0)
+
+            // Movement
+            if (keys & KEY_LEFT)
             {
-                jumpTimer = 10; // Set jump duration
+                if (player_x > 0)
+                {
+                    player_x--;
+                }
+            }
+            else if (keys & KEY_RIGHT)
+            {
+                if (player_x < 64 - player_w)
+                {
+                    player_x++;
+                }
+            }
+            if (keys & KEY_A)
+            {
+                if (jumpTimer == 0)
+                {
+                    jumpTimer = 10;
+                }
+            }
+            if (jumpTimer > 0)
+            {
+                jumpTimer--;
+            }
+
+            update_enemies();
+
+            if (check_collision())
+            {
+                alive = false;
+            }
+
+            draw_player();
+            draw_enemies();
+            draw_hud();
+            refreshscreen();
+            sleep(16);
+
+            score++;
+            if (score % 200 == 0)
+            {
+                fallspeed++;
             }
         }
 
-        if (jumpTimer > 0)
+        // game over screen -- wait for START to play again
+        bool waiting = true;
+        while (waiting)
         {
-            jumpTimer--;
+            drawstring("GAME OVER", 8, 24);
+            draw_hud();
+            refreshscreen();
+            uint8 k = getkey();
+            if (k & KEY_START)
+            {
+                waiting = false;
+            }
+            sleep(16);
         }
-        
-        draw_player();
-        draw_char((player_x % 10) + '0', 10, 0);
-        refreshscreen();
     }
 
     return 0;

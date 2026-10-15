@@ -192,6 +192,10 @@ OPS = {
     "gettime":         (0x1A, [1]),                   # reg
     "getmemsize":      (0x1B, [1]),                   # reg
     "getflag":         (0x1C, [1, 1]),                # flag, reg
+    "randreg":         (0x1D, [1, 1, 1]),             # r1(min), r2(max), dst
+    "srandreg":        (0x1E, [1]),                   # reg
+    "drawstring":      (0x1F, [1, 1, 1, 1, 1, 1, 1, 1]),  # regx, regy, regcolor, regaddr, reglen, src(0=ram,1=rom), regreturnx, regreturny
+    "numtostr":        (0x20, [1, 4, 1]),             # reg, addr, reglen
 
     "setreg":          (0x40, [1, 4]),                # reg, val
     "movreg":          (0x41, [1, 1]),                # dst, src
@@ -643,10 +647,32 @@ class Compiler:
         if isinstance(node, c_ast.Assignment):
             if node.op != "=":
                 raise NotImplementedError(f"unsupported assignment operator '{node.op}'")
+
             rhs = self.gen_expr(node.rvalue)
-            dest = self.var_addr(node.lvalue.name)
-            self.emit_copy(rhs, dest)
-            return dest
+
+            if isinstance(node.lvalue, c_ast.ID):
+                dest = self.var_addr(node.lvalue.name)
+                self.emit_copy(rhs, dest)
+                return dest
+
+            if isinstance(node.lvalue, c_ast.ArrayRef):
+                if not isinstance(node.lvalue.name, c_ast.ID):
+                    raise NotImplementedError("only simple array names can be indexed")
+
+                base_addr = self.var_addr(node.lvalue.name.name)
+                elem_bytes = self.array_elem_bytes.get(node.lvalue.name.name, INT_SIZE)
+
+                index_addr = self.gen_expr(node.lvalue.subscript)
+                self.emit_load(index_addr, self.addr_size(index_addr), RA)
+                self.emit("mulregv", RA, elem_bytes, RA)
+                self.emit("addregv", RA, base_addr, RA)
+
+                self.emit_load(rhs, self.addr_size(rhs), RB)
+                self.emit(f"storeregi{elem_bytes * 8}", RA, RB)
+
+                return rhs
+
+            raise NotImplementedError("unsupported assignment target")
 
         if isinstance(node, c_ast.UnaryOp):
             if node.op in ("p++", "++", "p--", "--"):
@@ -734,6 +760,12 @@ class Compiler:
                 return self.gen_getpixel(node)
             if name == "isflagsupported":
                 return self.gen_isflagsupported(node)
+            if name == "rand":
+                return self.gen_rand(node)
+            if name == "numtostr":
+                return self.gen_numtostr(node)
+            if name == "gettime":
+                return self.gen_gettime()
             if name == "input":
                 args = node.args.exprs if node.args else []
                 if len(args) != 1:
@@ -768,7 +800,7 @@ class Compiler:
                 if not isinstance(args[1], c_ast.Constant):
                     raise NotImplementedError("__mem_ptr() size must be a compile-time constant")
                 return self.gen_expr(args[0])
-            if name in ("flag", "setpixel", "exit"):
+            if name in ("flag", "setpixel", "exit", "srand", "drawchar", "drawstring"):
                 raise NotImplementedError(f"'{name}' does not return a value")
             return self.gen_call(node)
 
@@ -879,6 +911,111 @@ class Compiler:
         dest = self.alloc_temp(1)
         self.emit_store(12, dest, 1)
         return dest
+
+    def gen_rand(self, call):
+        # rand(min, max) -- max is EXCLUDED, matching the VM's randreg
+        # semantics. min/max are register operands now (loaded at runtime
+        # via RA/RB), so either argument can be a variable or expression,
+        # not just a constant. If max <= min at runtime, the VM leaves dst
+        # unchanged (a no-op), same convention as divreg/modreg.
+        args = call.args.exprs if call.args else []
+        if len(args) != 2:
+            raise NotImplementedError("rand(min, max) takes exactly 2 arguments")
+        min_r = self.resolve_operand(args[0])
+        max_r = self.resolve_operand(args[1])
+        self.load_resolved(min_r, RA)
+        self.load_resolved(max_r, RB)
+        self.emit("randreg", RA, RB, RA)
+        dest = self.alloc_temp(INT_SIZE)
+        self.emit_store(RA, dest, INT_SIZE)
+        return dest
+
+    def gen_srand(self, call):
+        args = call.args.exprs if call.args else []
+        if len(args) != 1:
+            raise NotImplementedError("srand(seed) takes exactly 1 argument")
+        seed_r = self.resolve_operand(args[0])
+        self.load_resolved(seed_r, RA)
+        self.emit("srandreg", RA)
+
+    def gen_gettime(self):
+        self.emit("gettime", 12)
+        dest = self.alloc_temp(INT_SIZE)
+        self.emit_store(12, dest, INT_SIZE)
+        return dest
+
+    def gen_numtostr(self, call):
+        args = call.args.exprs if call.args else []
+        if len(args) != 2:
+            raise NotImplementedError("numtostr(value, buf) takes exactly 2 arguments")
+        val_node, buf_node = args
+        if not isinstance(buf_node, c_ast.ID) or buf_node.name not in self.array_elem_bytes:
+            raise NotImplementedError("numtostr()'s second argument must be a char[] buffer")
+        if self.array_elem_bytes[buf_node.name] != 1:
+            raise NotImplementedError("numtostr()'s buffer must be a char[]")
+        buf_addr = self.var_addr(buf_node.name)
+        val_r = self.resolve_operand(val_node)
+        self.load_resolved(val_r, RA)
+        self.emit("numtostr", RA, buf_addr, 12)
+        dest = self.alloc_temp(1)
+        self.emit_store(12, dest, 1)
+        return dest
+
+    # -- text drawing (drawchar/drawstring) ------------------------------------
+    # Scratch registers 8-13 are used here (never RA/RB) since these calls are
+    # always self-contained statements/expressions: every input register is
+    # loaded immediately before emitting "drawstring", and the two output
+    # registers (14, 15) are discarded right after -- no value needs to
+    # survive across separate emit() calls the way arithmetic temps do.
+    def gen_draw_common(self, x_node, y_node, addr_kind, addr_val, length, src, color=1):
+        x_r = self.resolve_operand(x_node)
+        y_r = self.resolve_operand(y_node)
+        self.load_resolved(x_r, 8)
+        self.load_resolved(y_r, 9)
+        self.emit_set_const(10, color)
+        if addr_kind == "const":
+            self.emit_set_const(11, addr_val)
+        else:  # "load" -- addr_val is a RAM address whose runtime VALUE is the actual address/ROM offset
+            self.emit_load(addr_val, INT_SIZE, 11)
+        self.emit_set_const(12, length)
+        self.emit("drawstring", 8, 9, 10, 11, 12, src, 14, 15)
+
+    def gen_drawchar(self, call):
+        self.uses_graphics = True
+        args = call.args.exprs if call.args else []
+        if len(args) != 3:
+            raise NotImplementedError("drawchar(c, x, y) takes exactly 3 arguments")
+        c_node, x_node, y_node = args
+        c_r = self.resolve_operand(c_node)
+        self.load_resolved(c_r, RA)
+        char_addr = self.alloc_temp(1)
+        self.emit_store(RA, char_addr, 1)
+        self.gen_draw_common(x_node, y_node, "const", char_addr, 1, 0)
+
+    def gen_drawstring(self, call):
+        self.uses_graphics = True
+        args = call.args.exprs if call.args else []
+        if len(args) != 3:
+            raise NotImplementedError("drawstring(str, x, y) takes exactly 3 arguments")
+        str_node, x_node, y_node = args
+        if isinstance(str_node, c_ast.Constant) and str_node.type == "string":
+            # String literal -- lives in ROM (rom_data), src=1. gen_expr() on a
+            # string constant allocates the const array and returns a RAM temp
+            # whose runtime VALUE is the ROM byte offset (patched in finalize()).
+            chars = self.string_bytes(str_node)
+            rom_offset_temp = self.gen_expr(str_node)
+            self.gen_draw_common(x_node, y_node, "load", rom_offset_temp, len(chars), 1)
+        elif isinstance(str_node, c_ast.ID) and str_node.name in self.array_elem_bytes:
+            # Plain char[] variable -- lives in RAM, src=0. Its address is a
+            # compile-time constant, so it's used directly (no load needed).
+            name = str_node.name
+            if self.array_elem_bytes[name] != 1:
+                raise NotImplementedError("drawstring() requires a char[] array")
+            base_addr = self.var_addr(name)
+            total_bytes = self.var_sizes[name]
+            self.gen_draw_common(x_node, y_node, "const", base_addr, total_bytes, 0)
+        else:
+            raise NotImplementedError("drawstring() requires a string literal or a char[] variable")
 
     # -- functions (compiled by inlining at each call site) -----------------------
     def gen_call(self, node):
@@ -1059,6 +1196,12 @@ class Compiler:
                 self.emit("sleep", int(args[0].value, 0))
             elif name == "refreshscreen":
                 self.emit("refreshscreen")
+            elif name == "srand":
+                self.gen_srand(node)
+            elif name == "drawchar":
+                self.gen_drawchar(node)
+            elif name == "drawstring":
+                self.gen_drawstring(node)
             elif name == "input":
                 args = node.args.exprs if node.args else []
                 if len(args) != 1:
