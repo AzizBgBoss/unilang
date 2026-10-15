@@ -2,10 +2,23 @@
 uniClang -> unilang bytecode (.ulc) compiler by AzizBgBoss
 https://github.com/AzizBgBoss/unilang
 
-Source files use the .uc extension; compiled bytecode uses .ulc.
+Source files are plain C (.c); compiled bytecode uses .ulc.
 Requires pycparser:  pip install pycparser
 
-See README.md for full documentation of the uniClang subset and the .ulc bytecode format.
+See README.md for full documentation of the supported C subset and the .ulc bytecode format.
+
+C-closeness summary (details in README.md):
+  - a real preprocessor (preprocessor.py): #include, #define/#undef, #if/#ifdef/
+    #elif/#else/#endif, #pragma once, -I and -D command line options
+  - standard type names (int, unsigned, short, long, uint8_t..uint32_t, size_t,
+    _Bool, void), user typedefs, enums, const scalars
+  - pointers (T *p, &x, *p, p[i], pointer arithmetic, array-to-pointer decay,
+    pointer parameters), casts, sizeof, compile-time constant folding
+  - operators: unary - + ! ~, ?:, && and || with short-circuit evaluation,
+    compound assignment (+= -= ...), pre/post ++ and -- on any lvalue, comma
+  - statements: if/else, while, do/while, for, switch/case/default, break,
+    continue, return (also an early return from main)
+  - printf(%d %i %u %c %s %%), puts, putchar
 
 Function calls are implemented by INLINING the callee's body at the call site
 (with fresh, uniquely-named parameter/local/return addresses per call) rather
@@ -52,114 +65,14 @@ REGISTER/BYTE-ONLY REWRITE (matches main.py's clean ISA):
     allocate a single byte.
 '''
 
+import os
 import re
 import sys
+from preprocessor import Preprocessor
 import pycparser
 from pycparser import c_ast
 
-
-def strip_comments(source):
-    """Remove // and /* */ comments before handing source to pycparser,
-    which (unlike a real compiler) expects comments to already be gone —
-    normally the C preprocessor (cpp) does this, but this pipeline doesn't
-    run one. Preserves newlines (so line numbers in parse errors stay
-    accurate) and is string/char-literal aware so '//' or '/*' inside a
-    string or char constant isn't mistaken for a comment."""
-    out = []
-    i, n = 0, len(source)
-    in_string = in_char = in_line_comment = in_block_comment = False
-    while i < n:
-        c = source[i]
-        nxt = source[i + 1] if i + 1 < n else ""
-        if in_line_comment:
-            if c == "\n":
-                in_line_comment = False
-                out.append(c)
-            i += 1
-            continue
-        if in_block_comment:
-            if c == "\n":
-                out.append(c)  # keep line numbers aligned
-            elif c == "*" and nxt == "/":
-                in_block_comment = False
-                i += 1
-            i += 1
-            continue
-        if in_string or in_char:
-            out.append(c)
-            if c == "\\" and i + 1 < n:
-                out.append(nxt)
-                i += 2
-                continue
-            if (in_string and c == '"') or (in_char and c == "'"):
-                in_string = in_char = False
-            i += 1
-            continue
-        if c == '"':
-            in_string = True
-            out.append(c)
-        elif c == "'":
-            in_char = True
-            out.append(c)
-        elif c == "/" and nxt == "/":
-            in_line_comment = True
-            i += 1
-        elif c == "/" and nxt == "*":
-            in_block_comment = True
-            i += 1
-        else:
-            out.append(c)
-        i += 1
-    return "".join(out)
-
-def apply_defines(source):
-    """Minimal #define support: object-like (#define X val) and
-    function-like (#define f(x) expr) macros, textually substituted."""
-    defines = {}  # name -> (params or None, body)
-    obj_re = re.compile(r'^#define\s+(\w+)\s+(.*)$')
-    func_re = re.compile(r'^#define\s+(\w+)\((\s*\w+(?:\s*,\s*\w+)*\s*)?\)\s*(.*)$')
-    out_lines = []
-    for line in source.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("#define"):
-            m = func_re.match(stripped)
-            if m and "(" in stripped.split(None, 2)[1]:
-                name, params, body = m.group(1), m.group(2) or "", m.group(3)
-                params = [p.strip() for p in params.split(",")] if params.strip() else []
-                defines[name] = (params, body.strip())
-            else:
-                m = obj_re.match(stripped)
-                if m:
-                    defines[m.group(1)] = (None, m.group(2).strip())
-            continue  # drop the #define line itself
-        out_lines.append(line)
-    source = "\n".join(out_lines)
-
-    # Repeatedly expand macros in the body text (handles nested macro use).
-    for _ in range(8):  # bounded passes instead of tracking a changed-flag per token
-        changed = False
-        for name, (params, body) in defines.items():
-            if params is None:
-                pattern = re.compile(r'\b' + re.escape(name) + r'\b')
-                new_source, n = pattern.subn(body, source)
-                if n:
-                    source = new_source
-                    changed = True
-            else:
-                call_re = re.compile(r'\b' + re.escape(name) + r'\s*\(([^()]*)\)')
-                def _expand(m, params=params, body=body):
-                    args = [a.strip() for a in m.group(1).split(",")] if m.group(1).strip() else []
-                    text = body
-                    for p, a in zip(params, args):
-                        text = re.sub(r'\b' + re.escape(p) + r'\b', a, text)
-                    return "(" + text + ")"
-                new_source, n = call_re.subn(_expand, source)
-                if n:
-                    source = new_source
-                    changed = True
-        if not changed:
-            break
-    return source
+from preprocessor import Preprocessor, PreprocessorError
 
 
 
@@ -264,6 +177,21 @@ DEFAULT_TYPE = "uint32"
 INT_SIZE = TYPE_BYTES[DEFAULT_TYPE]  # width used by VM pointers and compiler scratch (4 bytes)
 VARS_START = 0          # byte address where user variables start
 
+# Standard C type names accepted as aliases: name -> (bytes, is_signed).
+# The VM is unsigned-only, so signed types are stored like their unsigned
+# twins (see README: +, -, * wrap correctly; <, /, %, >> and printing don't).
+TYPE_ALIASES = {
+    "uint8_t": (1, False), "uint16_t": (2, False), "uint32_t": (4, False),
+    "int8_t": (1, True), "int16_t": (2, True), "int32_t": (4, True),
+    "size_t": (4, False), "uintptr_t": (4, False),
+}
+
+M32 = 0xFFFFFFFF
+
+
+class _NotConst(Exception):
+    """Raised internally when an expression isn't a compile-time constant."""
+
 
 class Label:
     """A jump target resolved once its position in the bytecode is known."""
@@ -294,6 +222,14 @@ class Compiler:
 
         self.const_arrays = {}       # name -> {base_addr, elem_bytes, count}
         self.rom_data = []           # {"patch_pos", "data"}
+
+        self.typedefs = {}           # user typedef name -> byte size
+        self.constants = {}          # enum constants and const scalars -> int value
+        self.ptr_elem = {}           # address of a pointer variable -> pointee byte size
+        self.array_by_addr = {}      # base address of a RAM array -> element byte size
+        self.break_stack = []        # jump targets for `break`
+        self.continue_stack = []     # jump targets for `continue`
+        self.used_signed = False     # set when a signed integer type is used
 
     @staticmethod
     def rewrite_alloc_syntax(source):
@@ -342,6 +278,7 @@ class Compiler:
     # -- memory allocation ---------------------------------------------------
     def alloc_var(self, name, size=INT_SIZE):
         addr = self.next_addr
+        self.constants.pop(name, None)  # a variable shadows a same-named constant
         self.next_addr += size
         self.vars[name] = addr
         self.var_sizes[name] = size
@@ -408,8 +345,9 @@ class Compiler:
         # as scratch and clobber A before the caller ever uses it. Resolving
         # both operands first (each landing in its own temp/constant) and
         # only THEN loading them into registers, back to back, avoids that.
-        if isinstance(node, c_ast.Constant) and node.type in ("int", "char"):
-            return ("const", self.const_value(node))
+        value = self.try_const(node)
+        if value is not None:
+            return ("const", value)
         addr = self.gen_expr(node)
         return ("addr", addr, self.addr_size(addr))
 
@@ -436,48 +374,283 @@ class Compiler:
         comparisons = ("==", "!=", "<", ">", "<=", ">=")
         if isinstance(node, c_ast.BinaryOp) and (node.op in comparisons or node.op in ("&&", "||")):
             return self.gen_expr(node)
+        if isinstance(node, c_ast.UnaryOp) and node.op == "!":
+            return self.gen_expr(node)
         return self.to_bool(self.gen_expr(node))
 
     @staticmethod
-    def type_name(type_node):
-        if not isinstance(type_node, c_ast.TypeDecl) or not isinstance(type_node.type, c_ast.IdentifierType):
-            raise NotImplementedError("only fixed-width unsigned types are supported")
-        names = type_node.type.names
-        if len(names) != 1 or names[0] not in TYPE_BYTES:
-            raise NotImplementedError("only bool, char, uint1, uint2, uint4, uint8, uint16, and uint32 are supported")
-        return names[0]
+    def is_void_type(type_node):
+        return (isinstance(type_node, c_ast.TypeDecl)
+                and isinstance(type_node.type, c_ast.IdentifierType)
+                and list(type_node.type.names) == ["void"])
 
-    @classmethod
-    def type_size(cls, type_node):
+    def scalar_size(self, type_node):
+        """Byte width of a scalar TypeDecl: uniClang names, standard C names,
+        fixed-width stdint names, user typedefs and enums."""
+        t = type_node.type
+        if isinstance(t, c_ast.Enum):
+            return INT_SIZE
+        if not isinstance(t, c_ast.IdentifierType):
+            raise NotImplementedError("structs and unions are not supported")
+        words = list(t.names)
+        if len(words) == 1:
+            w = words[0]
+            if w in TYPE_BYTES:
+                return TYPE_BYTES[w]
+            if w in TYPE_ALIASES:
+                size, signed = TYPE_ALIASES[w]
+                self.used_signed = self.used_signed or signed
+                return size
+            if w in self.typedefs:
+                return self.typedefs[w]
+        if "float" in words or "double" in words:
+            raise NotImplementedError("floating point types are not supported")
+        if "void" in words:
+            raise NotImplementedError("'void' is only valid as a function return type, a (void) parameter list, or a pointer target")
+        if words.count("long") > 1:
+            raise NotImplementedError("64-bit integers (long long) are not supported")
+        if "char" in words:
+            if "signed" in words:
+                self.used_signed = True
+            return 1
+        if "_Bool" in words:
+            return 1
+        if not set(words) <= {"int", "short", "long", "signed", "unsigned"}:
+            raise NotImplementedError(f"unknown or unsupported type '{' '.join(words)}'")
+        if "unsigned" not in words:
+            self.used_signed = True
+        return 2 if "short" in words else 4
+
+    def type_size(self, type_node):
         if isinstance(type_node, c_ast.ArrayDecl):
-            elem_size = cls.type_size(type_node.type)
-            if isinstance(type_node.dim, c_ast.Constant):
-                count = int(type_node.dim.value, 0)
-                return elem_size * count
-            return elem_size
+            elem_size = self.type_size(type_node.type)
+            if type_node.dim is None:
+                return elem_size  # size inferred from the initializer by the caller
+            return elem_size * self.const_value(type_node.dim, "array size")
+        if isinstance(type_node, c_ast.PtrDecl):
+            return INT_SIZE
         if isinstance(type_node, c_ast.TypeDecl):
-            return TYPE_BYTES[cls.type_name(type_node)]
+            return self.scalar_size(type_node)
         raise NotImplementedError(f"unsupported type node '{type(type_node).__name__}'")
 
+    def ptr_pointee_size(self, ptr_node):
+        target = ptr_node.type
+        if isinstance(target, c_ast.PtrDecl):
+            return INT_SIZE  # pointer to pointer: the pointee is itself a 4-byte address
+        if isinstance(target, c_ast.TypeDecl):
+            if self.is_void_type(target):
+                return 1  # void * is byte-addressed
+            return self.scalar_size(target)
+        raise NotImplementedError("unsupported pointer target type")
+
     def function_return_size(self, fn):
-        return self.type_size(fn.decl.type.type)
+        ret = fn.decl.type.type
+        if self.is_void_type(ret):
+            return INT_SIZE  # unused slot; keeps call codegen uniform
+        return self.type_size(ret)
+
+    @staticmethod
+    def fn_params(fn):
+        args = fn.decl.type.args
+        params = args.params if args else []
+        if len(params) == 1 and isinstance(params[0], c_ast.Typename):
+            return []  # f(void)
+        return params
 
     def param_size(self, param):
-        if isinstance(param.type, c_ast.ArrayDecl):
+        if isinstance(param.type, (c_ast.ArrayDecl, c_ast.PtrDecl)):
             return INT_SIZE
         return self.type_size(param.type)
+
+    def param_pointee(self, param):
+        """Pointee/element byte size if the parameter is a pointer or array, else None."""
+        if isinstance(param.type, c_ast.ArrayDecl):
+            return self.type_size(param.type.type)
+        if isinstance(param.type, c_ast.PtrDecl):
+            return self.ptr_pointee_size(param.type)
+        return None
 
     @staticmethod
     def is_const_decl(node):
         return "const" in getattr(node, "quals", []) or "const" in getattr(node.type, "quals", [])
 
+    # -- compile-time constants ---------------------------------------------------
     @staticmethod
-    def const_value(node):
-        if not isinstance(node, c_ast.Constant):
-            raise NotImplementedError("const array values must be compile-time constants")
-        if node.type == "char":
-            return ord(bytes(node.value[1:-1], "utf-8").decode("unicode_escape"))
-        return int(node.value, 0)
+    def parse_int_literal(text):
+        text = text.rstrip("uUlL")
+        if len(text) > 1 and text[0] == "0" and text[1] not in "xXbB":
+            return int(text, 8)
+        return int(text, 0)
+
+    def const_value(self, node, what="expression"):
+        value = self.try_const(node)
+        if value is None:
+            raise NotImplementedError(f"{what} must be a compile-time constant")
+        return value
+
+    def try_const(self, node):
+        """The value of a compile-time constant expression (folded to uint32
+        semantics), or None if the expression isn't constant."""
+        try:
+            return self.eval_const(node)
+        except _NotConst:
+            return None
+
+    def eval_const(self, node):
+        if isinstance(node, c_ast.Constant):
+            if node.type == "char":
+                return ord(bytes(node.value[1:-1], "utf-8").decode("unicode_escape"))
+            if node.type.endswith("int"):
+                return self.parse_int_literal(node.value) & M32
+            raise _NotConst()
+        if isinstance(node, c_ast.ID):
+            if node.name in self.vars:
+                raise _NotConst()
+            if node.name in ("true", "false"):
+                return 1 if node.name == "true" else 0
+            if node.name in self.constants:
+                return self.constants[node.name]
+            raise _NotConst()
+        if isinstance(node, c_ast.UnaryOp):
+            if node.op == "sizeof":
+                return self.sizeof_value(node.expr)
+            if node.op in ("-", "+", "~", "!"):
+                v = self.eval_const(node.expr)
+                if node.op == "-":
+                    return (-v) & M32
+                if node.op == "~":
+                    return (~v) & M32
+                if node.op == "!":
+                    return int(v == 0)
+                return v
+            raise _NotConst()
+        if isinstance(node, c_ast.BinaryOp):
+            a = self.eval_const(node.left)
+            b = self.eval_const(node.right)
+            op = node.op
+            if op == "+": r = a + b
+            elif op == "-": r = a - b
+            elif op == "*": r = a * b
+            elif op == "/" or op == "%":
+                if b == 0:
+                    raise _NotConst()
+                r = a // b if op == "/" else a % b
+            elif op == "&": r = a & b
+            elif op == "|": r = a | b
+            elif op == "^": r = a ^ b
+            elif op == "<<": r = (a << b) if b < 32 else 0
+            elif op == ">>": r = (a >> b) if b < 32 else 0
+            elif op == "==": r = int(a == b)
+            elif op == "!=": r = int(a != b)
+            elif op == "<": r = int(a < b)
+            elif op == ">": r = int(a > b)
+            elif op == "<=": r = int(a <= b)
+            elif op == ">=": r = int(a >= b)
+            elif op == "&&": r = int(bool(a) and bool(b))
+            elif op == "||": r = int(bool(a) or bool(b))
+            else:
+                raise _NotConst()
+            return r & M32
+        if isinstance(node, c_ast.TernaryOp):
+            return self.eval_const(node.iftrue if self.eval_const(node.cond) else node.iffalse)
+        if isinstance(node, c_ast.Cast):
+            target = node.to_type.type
+            if self.is_void_type(target):
+                raise _NotConst()
+            v = self.eval_const(node.expr)
+            size = INT_SIZE if isinstance(target, c_ast.PtrDecl) else self.scalar_size(target)
+            return v & ((1 << (size * 8)) - 1)
+        raise _NotConst()
+
+    def sizeof_value(self, expr):
+        if isinstance(expr, c_ast.Typename):
+            return self.type_size(expr.type)
+        if isinstance(expr, c_ast.ID):
+            name = expr.name
+            if name in self.vars:
+                return self.var_sizes[name]
+            if name in self.const_arrays:
+                c = self.const_arrays[name]
+                return c["elem_bytes"] * c["count"]
+            raise _NotConst()
+        if isinstance(expr, c_ast.ArrayRef) or (isinstance(expr, c_ast.UnaryOp) and expr.op == "*"):
+            return self.lvalue_elem_size(expr)
+        raise _NotConst()
+
+    # -- pointer typing (compile-time only; the VM has no types) -------------------
+    def expr_ptr_elem(self, node):
+        """If `node` is a pointer or array expression, the byte size of what it
+        points at; otherwise None."""
+        if isinstance(node, c_ast.ID):
+            if node.name in self.vars:
+                addr = self.vars[node.name]
+                if addr in self.ptr_elem:
+                    return self.ptr_elem[addr]
+                if addr in self.array_by_addr:
+                    return self.array_by_addr[addr]
+                return None
+            if node.name in self.const_arrays:
+                return self.const_arrays[node.name]["elem_bytes"]
+            return None
+        if isinstance(node, c_ast.Constant):
+            return 1 if node.type == "string" else None
+        if isinstance(node, c_ast.UnaryOp):
+            if node.op == "&":
+                return self.lvalue_elem_size(node.expr)
+            if node.op in ("p++", "++", "p--", "--"):
+                return self.expr_ptr_elem(node.expr)
+            return None
+        if isinstance(node, c_ast.BinaryOp) and node.op in ("+", "-"):
+            left = self.expr_ptr_elem(node.left)
+            if left is not None:
+                return None if (node.op == "-" and self.expr_ptr_elem(node.right) is not None) else left
+            return self.expr_ptr_elem(node.right) if node.op == "+" else None
+        if isinstance(node, c_ast.Cast):
+            if isinstance(node.to_type.type, c_ast.PtrDecl):
+                return self.ptr_pointee_size(node.to_type.type)
+            return None
+        if isinstance(node, c_ast.TernaryOp):
+            found = self.expr_ptr_elem(node.iftrue)
+            return found if found is not None else self.expr_ptr_elem(node.iffalse)
+        if isinstance(node, c_ast.Assignment):
+            return self.expr_ptr_elem(node.lvalue)
+        if isinstance(node, c_ast.FuncCall) and isinstance(node.name, c_ast.ID):
+            fn = self.function_asts.get(node.name.name)
+            if fn is not None and isinstance(fn.decl.type.type, c_ast.PtrDecl):
+                return self.ptr_pointee_size(fn.decl.type.type)
+        return None
+
+    def lvalue_elem_size(self, node):
+        """Width in bytes of the object an lvalue designates (emits no code)."""
+        if isinstance(node, c_ast.ID):
+            addr = self.var_addr(node.name)
+            if addr in self.array_by_addr:
+                return self.array_by_addr[addr]
+            return self.addr_size(addr)
+        if isinstance(node, c_ast.ArrayRef):
+            elem = self.expr_ptr_elem(node.name)
+            if elem is None:
+                raise NotImplementedError("subscripted value is neither an array nor a pointer")
+            return elem
+        if isinstance(node, c_ast.UnaryOp) and node.op == "*":
+            elem = self.expr_ptr_elem(node.expr)
+            if elem is None:
+                raise NotImplementedError("cannot dereference a value that is not a pointer")
+            return elem
+        raise NotImplementedError("expression is not an lvalue")
+
+    def expr_is_rom(self, node):
+        """True for string literals and const arrays, which live in ROM and
+        therefore can't be used through a (RAM-only) pointer."""
+        if isinstance(node, c_ast.Constant):
+            return node.type == "string"
+        return isinstance(node, c_ast.ID) and node.name in self.const_arrays and node.name not in self.vars
+
+    def check_not_rom(self, node):
+        if self.expr_is_rom(node):
+            raise NotImplementedError(
+                "string literals and const arrays live in ROM; pointers can only address RAM. "
+                "Use a RAM array (e.g. `char s[] = \"text\";`) if you need a pointer to it.")
 
     @staticmethod
     def string_bytes(node):
@@ -569,30 +742,226 @@ class Compiler:
         self.emit("print", " are available. Increase 'memsize' in main.py.")
         self.define_label(label_ok)
 
+    # -- lvalues / pointer helpers ---------------------------------------------
+    @staticmethod
+    def has_side_effects(node):
+        if isinstance(node, (c_ast.Assignment, c_ast.FuncCall)):
+            return True
+        if isinstance(node, c_ast.UnaryOp) and node.op in ("p++", "++", "p--", "--"):
+            return True
+        return any(Compiler.has_side_effects(child) for _, child in node.children())
+
+    def emit_addr_in_ra(self, node):
+        """Emit code that leaves the runtime byte address designated by an lvalue
+        (array element, pointer subscript, or *pointer) in RA, and return the
+        element width in bytes. Nothing else may be emitted between this call
+        and the instruction that consumes RA."""
+        if isinstance(node, c_ast.ArrayRef):
+            if (isinstance(node.name, c_ast.ID) and node.name.name in self.vars
+                    and self.vars[node.name.name] in self.array_by_addr):
+                base_addr = self.vars[node.name.name]
+                elem_bytes = self.array_by_addr[base_addr]
+                const_index = self.try_const(node.subscript)
+                if const_index is not None:
+                    self.emit_set_const(RA, base_addr + const_index * elem_bytes)
+                    return elem_bytes
+                index_addr = self.gen_expr(node.subscript)
+                self.emit_load(index_addr, self.addr_size(index_addr), RA)
+                if elem_bytes != 1:
+                    self.emit("mulregv", RA, elem_bytes, RA)   # RA = index * elem_bytes
+                self.emit("addregv", RA, base_addr, RA)        # RA = absolute runtime address
+                return elem_bytes
+            elem_bytes = self.expr_ptr_elem(node.name)
+            if elem_bytes is None:
+                raise NotImplementedError("subscripted value is neither an array nor a pointer")
+            self.check_not_rom(node.name)
+            ptr_addr = self.gen_expr(node.name)
+            const_index = self.try_const(node.subscript)
+            if const_index is not None:
+                self.emit_load(ptr_addr, self.addr_size(ptr_addr), RA)
+                if const_index * elem_bytes:
+                    self.emit("addregv", RA, const_index * elem_bytes, RA)
+                return elem_bytes
+            index_addr = self.gen_expr(node.subscript)
+            self.emit_load(index_addr, self.addr_size(index_addr), RA)
+            if elem_bytes != 1:
+                self.emit("mulregv", RA, elem_bytes, RA)
+            self.emit_load(ptr_addr, self.addr_size(ptr_addr), RB)
+            self.emit("addreg", RA, RB, RA)
+            return elem_bytes
+        if isinstance(node, c_ast.UnaryOp) and node.op == "*":
+            elem_bytes = self.expr_ptr_elem(node.expr)
+            if elem_bytes is None:
+                raise NotImplementedError("cannot dereference a value that is not a pointer")
+            self.check_not_rom(node.expr)
+            ptr_addr = self.gen_expr(node.expr)
+            self.emit_load(ptr_addr, self.addr_size(ptr_addr), RA)
+            return elem_bytes
+        raise NotImplementedError("expression is not an assignable location")
+
+    def gen_incdec(self, node, want_value):
+        """++/-- (prefix or postfix) on a variable, array element or *pointer.
+        Pointers move by whole elements. With want_value=False (statement
+        context) no copy of the old value is made."""
+        increment = "+" in node.op
+        post = node.op.startswith("p")
+        target = node.expr
+        step = self.expr_ptr_elem(target) or 1
+        opname = "addregv" if increment else "subregv"
+        if isinstance(target, c_ast.ID):
+            addr = self.var_addr(target.name)
+            size = self.addr_size(addr)
+            old = None
+            if want_value and post:
+                old = self.alloc_temp(size)
+                self.emit_copy(addr, old)
+            self.emit_load(addr, size, RA)
+            self.emit(opname, RA, step, RA)
+            self.emit_store(RA, addr, size)
+            return old if old is not None else addr
+        elem = self.emit_addr_in_ra(target)
+        self.emit(f"loadregi{self._reg_width(elem)}", RA, RB)
+        old = None
+        if want_value and post:
+            old = self.alloc_temp(elem)
+            self.emit_store(RB, old, elem)
+        self.emit(opname, RB, step, RB)
+        self.emit(f"storeregi{self._reg_width(elem)}", RA, RB)
+        if not want_value:
+            return None
+        if post:
+            return old
+        result = self.alloc_temp(elem)
+        self.emit_store(RB, result, elem)
+        return result
+
+    def gen_unary(self, node):
+        op = node.op
+        if op == "&":
+            target = node.expr
+            if isinstance(target, c_ast.ID):
+                # Must produce a temp whose VALUE is the address (so
+                # emit_copy/gen_expr consumers -- which always treat a
+                # gen_expr result as "a location to load from" -- see a
+                # location holding the address, not the address itself
+                # misread as a location).
+                addr_val = self.var_addr(target.name)
+                out = self.alloc_temp(INT_SIZE)
+                self.emit_store_const(out, INT_SIZE, addr_val)
+                return out
+            self.emit_addr_in_ra(target)
+            out = self.alloc_temp(INT_SIZE)
+            self.emit_store(RA, out, INT_SIZE)
+            return out
+        if op in ("p++", "++", "p--", "--"):
+            return self.gen_incdec(node, want_value=True)
+        if op == "*":
+            elem = self.emit_addr_in_ra(node)
+            self.emit(f"loadregi{self._reg_width(elem)}", RA, RB)
+            result = self.alloc_temp(elem)
+            self.emit_store(RB, result, elem)
+            return result
+        if op == "+":
+            return self.gen_expr(node.expr)
+        if op == "-":
+            operand = self.resolve_operand(node.expr)
+            self.emit_set_const(RA, 0)
+            self.load_resolved(operand, RB)
+            self.emit("subreg", RA, RB, RA)
+            dest = self.alloc_temp(INT_SIZE)
+            self.emit_store(RA, dest, INT_SIZE)
+            return dest
+        if op == "~":
+            operand = self.resolve_operand(node.expr)
+            self.load_resolved(operand, RA)
+            self.emit("notreg", RA, RA)
+            dest = self.alloc_temp(INT_SIZE)
+            self.emit_store(RA, dest, INT_SIZE)
+            return dest
+        if op == "!":
+            operand = self.resolve_operand(node.expr)
+            self.load_resolved(operand, RA)
+            self.emit_set_const(RB, 0)
+            self.emit("eqreg", RA, RB, RA)
+            dest = self.alloc_temp(1)
+            self.emit_store(RA, dest, 1)
+            return dest
+        if op == "sizeof":
+            raise NotImplementedError("sizeof is only supported on types, variables and array/pointer elements")
+        raise NotImplementedError(f"unsupported unary operator '{op}'")
+
+    def gen_pointer_arith(self, node, left_elem, right_elem):
+        op = node.op
+        if left_elem is not None and right_elem is not None:
+            if op != "-":
+                raise NotImplementedError("cannot add two pointers")
+            left_r = self.resolve_operand(node.left)
+            right_r = self.resolve_operand(node.right)
+            self.load_resolved(left_r, RA)
+            self.load_resolved(right_r, RB)
+            self.emit("subreg", RA, RB, RA)
+            if left_elem != 1:
+                self.emit_set_const(RB, left_elem)
+                self.emit("divreg", RA, RB, RA)  # distance in elements, like C
+            dest = self.alloc_temp(INT_SIZE)
+            self.emit_store(RA, dest, INT_SIZE)
+            return dest
+        if left_elem is not None:
+            ptr_node, int_node, elem = node.left, node.right, left_elem
+        else:
+            if op != "+":
+                raise NotImplementedError("cannot subtract a pointer from an integer")
+            ptr_node, int_node, elem = node.right, node.left, right_elem
+        ptr_r = self.resolve_operand(ptr_node)
+        int_r = self.resolve_operand(int_node)
+        self.load_resolved(ptr_r, RA)
+        self.load_resolved(int_r, RB)
+        if elem != 1:
+            self.emit("mulregv", RB, elem, RB)  # scale by the element size, like C
+        self.emit("addreg" if op == "+" else "subreg", RA, RB, RA)
+        dest = self.alloc_temp(INT_SIZE)
+        self.emit_store(RA, dest, INT_SIZE)
+        return dest
+
     # -- expressions: returns the byte-address holding the result --------------
     def gen_expr(self, node):
+        if isinstance(node, (c_ast.UnaryOp, c_ast.BinaryOp, c_ast.TernaryOp, c_ast.Cast)):
+            value = self.try_const(node)  # constant folding
+            if value is not None:
+                dest = self.alloc_temp(INT_SIZE)
+                self.emit_store_const(dest, INT_SIZE, value)
+                return dest
+
         if isinstance(node, c_ast.Constant):
             if node.type == "string":
                 name = f"__str{len(self.rom_data)}"
                 return self.add_const_array(name, TYPE_BYTES["char"], self.string_bytes(node) + [0])
-            if node.type not in ("int", "char"):
+            if node.type != "char" and not node.type.endswith("int"):
                 raise NotImplementedError(f"unsupported constant type '{node.type}'")
-            val = self.const_value(node)
             dest = self.alloc_temp(INT_SIZE)
-            self.emit_store_const(dest, INT_SIZE, val)
+            self.emit_store_const(dest, INT_SIZE, self.const_value(node))
             return dest
 
         if isinstance(node, c_ast.ID):
-            if node.name in ("true", "false"):
-                dest = self.alloc_temp(INT_SIZE)
-                self.emit_store_const(dest, INT_SIZE, 1 if node.name == "true" else 0)
-                return dest
+            if node.name in self.vars:
+                addr = self.vars[node.name]
+                if addr in self.array_by_addr:
+                    # a RAM array decays to the address of its first element
+                    out = self.alloc_temp(INT_SIZE)
+                    self.emit_store_const(out, INT_SIZE, addr)
+                    return out
+                return addr
             if node.name in self.const_arrays:
                 return self.const_arrays[node.name]["base"]
-            return self.var_addr(node.name)
+            if node.name in ("true", "false") or node.name in self.constants:
+                dest = self.alloc_temp(INT_SIZE)
+                self.emit_store_const(dest, INT_SIZE, self.const_value(node))
+                return dest
+            return self.var_addr(node.name)  # raises: use of undeclared variable
 
         if isinstance(node, c_ast.ArrayRef):
-            if isinstance(node.name, c_ast.ID) and node.name.name in self.const_arrays:
+            if (isinstance(node.name, c_ast.ID) and node.name.name in self.const_arrays
+                    and node.name.name not in self.vars):
                 const_array = self.const_arrays[node.name.name]
                 elem_bytes = const_array["elem_bytes"]
                 index_addr = self.gen_expr(node.subscript)
@@ -605,48 +974,31 @@ class Compiler:
                 self.emit_store(RB, result, elem_bytes)
                 return result
 
-            if not isinstance(node.name, c_ast.ID):
-                raise NotImplementedError("only simple array names can be indexed")
-            base_addr = self.var_addr(node.name.name)
-            elem_bytes = self.array_elem_bytes.get(node.name.name, INT_SIZE)
-            index_addr = self.gen_expr(node.subscript)
-            self.emit_load(index_addr, self.addr_size(index_addr), RA)
-            self.emit("mulregv", RA, elem_bytes, RA)      # RA = index * elem_bytes
-            self.emit("addregv", RA, base_addr, RA)       # RA = absolute runtime address
-            self.emit(f"loadregi{elem_bytes * 8}", RA, RB)
+            elem_bytes = self.emit_addr_in_ra(node)
+            self.emit(f"loadregi{self._reg_width(elem_bytes)}", RA, RB)
             result = self.alloc_temp(elem_bytes)
             self.emit_store(RB, result, elem_bytes)
             return result
 
         if isinstance(node, c_ast.UnaryOp):
-            if node.op == "&":
-                if isinstance(node.expr, c_ast.ID):
-                    # Must produce a temp whose VALUE is the address (so
-                    # emit_copy/gen_expr consumers -- which always treat a
-                    # gen_expr result as "a location to load from" -- see a
-                    # location holding the address, not the address itself
-                    # misread as a location).
-                    addr_val = self.var_addr(node.expr.name)
-                    out = self.alloc_temp(INT_SIZE)
-                    self.emit_store_const(out, INT_SIZE, addr_val)
-                    return out
-                if isinstance(node.expr, c_ast.ArrayRef):
-                    if not isinstance(node.expr.name, c_ast.ID):
-                        raise NotImplementedError("only simple array names can be indexed")
-                    base_addr = self.var_addr(node.expr.name.name)
-                    elem_bytes = self.array_elem_bytes.get(node.expr.name.name, INT_SIZE)
-                    index_addr = self.gen_expr(node.expr.subscript)
-                    self.emit_load(index_addr, self.addr_size(index_addr), RA)
-                    self.emit("mulregv", RA, elem_bytes, RA)
-                    self.emit("addregv", RA, base_addr, RA)
-                    out = self.alloc_temp(INT_SIZE)
-                    self.emit_store(RA, out, INT_SIZE)
-                    return out
-                raise NotImplementedError("only identifiers and array elements can be addressed")
+            return self.gen_unary(node)
 
         if isinstance(node, c_ast.Assignment):
             if node.op != "=":
-                raise NotImplementedError(f"unsupported assignment operator '{node.op}'")
+                # compound assignment: `a OP= b` is compiled as `a = a OP b`
+                if self.has_side_effects(node.lvalue):
+                    raise NotImplementedError(
+                        f"'{node.op}' on a target with side effects (e.g. a[i++] {node.op} 1) is not supported")
+                node = c_ast.Assignment("=", node.lvalue,
+                                        c_ast.BinaryOp(node.op[:-1], node.lvalue, node.rvalue, node.coord),
+                                        node.coord)
+
+            if isinstance(node.lvalue, c_ast.ID):
+                name = node.lvalue.name
+                if name not in self.vars and name in self.constants:
+                    raise NotImplementedError(f"cannot assign to constant '{name}'")
+                if self.vars.get(name) in self.ptr_elem:
+                    self.check_not_rom(node.rvalue)
 
             rhs = self.gen_expr(node.rvalue)
 
@@ -655,34 +1007,46 @@ class Compiler:
                 self.emit_copy(rhs, dest)
                 return dest
 
-            if isinstance(node.lvalue, c_ast.ArrayRef):
-                if not isinstance(node.lvalue.name, c_ast.ID):
-                    raise NotImplementedError("only simple array names can be indexed")
+            # array element, pointer subscript or *pointer: the address goes
+            # in RA only after rhs is already evaluated into a temp
+            elem_bytes = self.emit_addr_in_ra(node.lvalue)
+            self.emit_load(rhs, self.addr_size(rhs), RB)
+            self.emit(f"storeregi{self._reg_width(elem_bytes)}", RA, RB)
+            return rhs
 
-                base_addr = self.var_addr(node.lvalue.name.name)
-                elem_bytes = self.array_elem_bytes.get(node.lvalue.name.name, INT_SIZE)
+        if isinstance(node, c_ast.TernaryOp):
+            dest = self.alloc_temp(INT_SIZE)
+            else_label = Label("ternary_else")
+            end_label = Label("ternary_end")
+            cond = self.gen_cond(node.cond)
+            self.emit_load(cond, 1, RA)
+            self.emit("ifnotreg", RA, else_label)
+            self.emit_copy(self.gen_expr(node.iftrue), dest)
+            self.emit("setpc", end_label)
+            self.define_label(else_label)
+            self.emit_copy(self.gen_expr(node.iffalse), dest)
+            self.define_label(end_label)
+            return dest
 
-                index_addr = self.gen_expr(node.lvalue.subscript)
-                self.emit_load(index_addr, self.addr_size(index_addr), RA)
-                self.emit("mulregv", RA, elem_bytes, RA)
-                self.emit("addregv", RA, base_addr, RA)
+        if isinstance(node, c_ast.Cast):
+            target = node.to_type.type
+            if self.is_void_type(target):
+                self.gen_expr(node.expr)  # evaluated only for its side effects
+                return self.alloc_temp(INT_SIZE)
+            if isinstance(target, c_ast.ArrayDecl):
+                raise NotImplementedError("cannot cast to an array type")
+            size = INT_SIZE if isinstance(target, c_ast.PtrDecl) else self.scalar_size(target)
+            src = self.gen_expr(node.expr)
+            dest = self.alloc_temp(size)
+            self.emit_load(src, self.addr_size(src), RA)  # zero-extend / truncate through the register
+            self.emit_store(RA, dest, size)
+            return dest
 
-                self.emit_load(rhs, self.addr_size(rhs), RB)
-                self.emit(f"storeregi{elem_bytes * 8}", RA, RB)
-
-                return rhs
-
-            raise NotImplementedError("unsupported assignment target")
-
-        if isinstance(node, c_ast.UnaryOp):
-            if node.op in ("p++", "++", "p--", "--"):
-                addr = self.var_addr(node.expr.name)
-                size = self.addr_size(addr)
-                self.emit_load(addr, size, RA)
-                self.emit("addregv" if "+" in node.op else "subregv", RA, 1, RA)
-                self.emit_store(RA, addr, size)
-                return addr
-            raise NotImplementedError(f"unsupported unary operator '{node.op}'")
+        if isinstance(node, c_ast.ExprList):
+            result = None
+            for item in node.exprs:
+                result = self.gen_expr(item)
+            return result
 
         if isinstance(node, c_ast.BinaryOp):
             comparisons = ("==", "!=", "<", ">", "<=", ">=")
@@ -693,52 +1057,60 @@ class Compiler:
                 return self.gen_cond(node)
 
             if node.op in ("&&", "||"):
-                left_bool = self.gen_bool_operand(node.left)
-                right_bool = self.gen_bool_operand(node.right)
-                self.emit_load(left_bool, 1, RA)
-                self.emit_load(right_bool, 1, RB)
-                self.emit("andreg" if node.op == "&&" else "orreg", RA, RB, RA)
+                # short-circuit like C: the right operand is only evaluated
+                # when the left one doesn't already decide the result
                 dest = self.alloc_temp(1)
+                end_label = Label("shortcircuit")
+                left_bool = self.gen_bool_operand(node.left)
+                self.emit_load(left_bool, 1, RA)
                 self.emit_store(RA, dest, 1)
+                self.emit("ifnotreg" if node.op == "&&" else "ifreg", RA, end_label)
+                right_bool = self.gen_bool_operand(node.right)
+                self.emit_load(right_bool, 1, RA)
+                self.emit_store(RA, dest, 1)
+                self.define_label(end_label)
                 return dest
 
+            # Arithmetic and bitwise results are 32-bit (C's integer promotion):
+            # `uint8 a = 200; a + 100` is 300, not 44. Narrowing only happens
+            # when the value is stored back into a narrower variable.
             bitwise_ops = {"&": "andreg", "|": "orreg", "^": "xorreg", "<<": "shlreg", ">>": "shrreg"}
             if node.op in bitwise_ops:
                 left_r = self.resolve_operand(node.left)
                 right_r = self.resolve_operand(node.right)
-                left_size = self.load_resolved(left_r, RA)
-                right_size = self.load_resolved(right_r, RB)
-                # shl/shr keep the left operand's width; the others take the wider of the two.
-                result_size = left_size if node.op in ("<<", ">>") else max(left_size, right_size)
+                self.load_resolved(left_r, RA)
+                self.load_resolved(right_r, RB)
                 self.emit(bitwise_ops[node.op], RA, RB, RA)
-                dest = self.alloc_temp(result_size)
-                self.emit_store(RA, dest, result_size)
+                dest = self.alloc_temp(INT_SIZE)
+                self.emit_store(RA, dest, INT_SIZE)
                 return dest
 
             const_ops = {"+": "addregv", "-": "subregv", "*": "mulregv"}
             reg_ops = {"+": "addreg", "-": "subreg", "*": "mulreg", "/": "divreg", "%": "modreg"}
             if node.op not in reg_ops:
                 raise NotImplementedError(f"unsupported operator '{node.op}' in expression")
-            right_is_const = isinstance(node.right, c_ast.Constant)
-            left_is_const = isinstance(node.left, c_ast.Constant)
-            if right_is_const and node.op in const_ops:
-                left_size = self.load_operand(node.left, RA)
-                self.emit(const_ops[node.op], RA, self.const_value(node.right), RA)
-                result_size = left_size
-            elif left_is_const and node.op in ("+", "*"):
+            if node.op in ("+", "-"):
+                left_elem = self.expr_ptr_elem(node.left)
+                right_elem = self.expr_ptr_elem(node.right)
+                if left_elem is not None or right_elem is not None:
+                    return self.gen_pointer_arith(node, left_elem, right_elem)
+            right_const = self.try_const(node.right)
+            left_const = self.try_const(node.left)
+            if right_const is not None and node.op in const_ops:
+                self.load_operand(node.left, RA)
+                self.emit(const_ops[node.op], RA, right_const, RA)
+            elif left_const is not None and node.op in ("+", "*"):
                 # commutative -- swap so the constant still uses the cheaper *v opcode
-                right_size = self.load_operand(node.right, RA)
-                self.emit(const_ops[node.op], RA, self.const_value(node.left), RA)
-                result_size = right_size
+                self.load_operand(node.right, RA)
+                self.emit(const_ops[node.op], RA, left_const, RA)
             else:
                 left_r = self.resolve_operand(node.left)
                 right_r = self.resolve_operand(node.right)
-                left_size = self.load_resolved(left_r, RA)
-                right_size = self.load_resolved(right_r, RB)
+                self.load_resolved(left_r, RA)
+                self.load_resolved(right_r, RB)
                 self.emit(reg_ops[node.op], RA, RB, RA)
-                result_size = max(left_size, right_size)
-            dest = self.alloc_temp(result_size)
-            self.emit_store(RA, dest, result_size)
+            dest = self.alloc_temp(INT_SIZE)
+            self.emit_store(RA, dest, INT_SIZE)
             return dest
 
         if isinstance(node, c_ast.FuncCall):
@@ -1135,6 +1507,8 @@ class Compiler:
                 if isinstance(node.type, c_ast.ArrayDecl):
                     self.array_elem_bytes[node.name] = self.type_size(node.type.type)
             addr = self.alloc_var(node.name, size)
+            if isinstance(node.type, c_ast.ArrayDecl) or (meta is not None and meta["kind"] == "array"):
+                self.array_by_addr[addr] = self.array_elem_bytes[node.name]
             if node.init is not None:
                 if isinstance(node.init, c_ast.InitList):
                     if not isinstance(node.type, c_ast.ArrayDecl):
@@ -1269,9 +1643,8 @@ class Compiler:
         raise NotImplementedError(f"unsupported statement '{type(node).__name__}'")
 
     # -- entry point ---------------------------------------------------------
-    def compile(self, source):
-        source = strip_comments(source)
-        source = apply_defines(source)
+    def compile(self, source, filename="<input>"):
+        source = Preprocessor().process(source, filename)
         clean_source, self.alloc_meta = self.rewrite_alloc_syntax(source)
         clean_source = self.rewrite_mem_syntax(clean_source)
         clean_source = "\n".join(
@@ -1325,7 +1698,7 @@ def main():
     with open(in_path, "r") as f:
         source = f.read()
 
-    bytecode = Compiler().compile(source)
+    bytecode = Compiler().compile(source, in_path)
 
     with open(out_path, "wb") as f:
         f.write(bytecode)
