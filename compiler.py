@@ -68,10 +68,8 @@ REGISTER/BYTE-ONLY REWRITE (matches main.py's clean ISA):
 import os
 import re
 import sys
-from preprocessor import Preprocessor
 import pycparser
 from pycparser import c_ast
-
 from preprocessor import Preprocessor, PreprocessorError
 
 
@@ -162,6 +160,7 @@ OPS = {
 # does load(s) -> op -> store as one atomic sequence, so reusing the same
 # two registers everywhere is safe.
 RA, RB = 14, 15
+RC = 13
 
 TYPE_BYTES = {
     "bool": 1,
@@ -221,15 +220,22 @@ class Compiler:
         self.array_elem_bytes = {}   # array variable name -> element width in bytes
 
         self.const_arrays = {}       # name -> {base_addr, elem_bytes, count}
+        self.const_array_types = {}  # name -> declared ArrayDecl type, for nested ROM indexing
         self.rom_data = []           # {"patch_pos", "data"}
 
         self.typedefs = {}           # user typedef name -> byte size
+        self.structs = {}            # struct tag or typedef name -> {"size": n, "fields": {name: {"offset": o, "size": s}}}
+        self.struct_defs = {}        # struct tag or typedef name -> original Struct AST node
         self.constants = {}          # enum constants and const scalars -> int value
         self.ptr_elem = {}           # address of a pointer variable -> pointee byte size
         self.array_by_addr = {}      # base address of a RAM array -> element byte size
+        self.var_types = {}          # variable name -> declared type AST node
         self.break_stack = []        # jump targets for `break`
         self.continue_stack = []     # jump targets for `continue`
         self.used_signed = False     # set when a signed integer type is used
+        self.cur_coord = None        # source position of the statement being compiled
+        self.at_global_scope = False
+        self.max_addr = 0            # peak RAM use: temporaries are reused, so next_addr alone isn't enough
 
     @staticmethod
     def rewrite_alloc_syntax(source):
@@ -275,11 +281,30 @@ class Compiler:
                 lines.append(line)
         return '\n'.join(lines)
 
+    @staticmethod
+    def rewrite_cpp_tag_typedefs(source):
+        def add_enum(match):
+            keyword, tag = match.group(1), match.group(2)
+            return f"{keyword}\ntypedef enum {tag} {tag};"
+
+        def add_struct(match):
+            keyword, tag = match.group(1), match.group(2)
+            return f"{keyword}\ntypedef struct {tag} {tag};"
+
+        source = re.sub(r"(?s)(\benum\s+([A-Za-z_]\w*)\s*\{.*?\}\s*;)", add_enum, source)
+        source = re.sub(r"(?s)(\bstruct\s+([A-Za-z_]\w*)\s*\{.*?\}\s*;)", add_struct, source)
+        return source
+
     # -- memory allocation ---------------------------------------------------
     def alloc_var(self, name, size=INT_SIZE):
         addr = self.next_addr
         self.constants.pop(name, None)  # a variable shadows a same-named constant
         self.next_addr += size
+        if self.next_addr > self.max_addr:
+            self.max_addr = self.next_addr
+        # this address may have held something else before it was freed
+        self.ptr_elem.pop(addr, None)
+        self.array_by_addr.pop(addr, None)
         self.vars[name] = addr
         self.var_sizes[name] = size
         self.addr_sizes[addr] = size
@@ -384,14 +409,61 @@ class Compiler:
                 and isinstance(type_node.type, c_ast.IdentifierType)
                 and list(type_node.type.names) == ["void"])
 
+    def struct_field_size(self, decl):
+        if decl.bitsize is not None:
+            width = self.const_value(decl.bitsize, "bitfield width")
+            return max(1, (width + 7) // 8)
+        return self.type_size(decl.type)
+
+    def struct_size(self, struct_node):
+        if struct_node is None or struct_node.decls is None:
+            raise NotImplementedError("incomplete struct type is not supported")
+        name = struct_node.name
+        if name in self.structs and self.structs[name]["fields"]:
+            return self.structs[name]["size"]
+        offset = 0
+        fields = {}
+        for decl in struct_node.decls:
+            if decl.name is None:
+                continue
+            size = self.struct_field_size(decl)
+            fields[decl.name] = {"offset": offset, "size": size}
+            offset += size
+        if name is not None:
+            self.structs[name] = {"size": offset, "fields": fields}
+        return offset
+
+    def struct_field_info(self, struct_type, field_name):
+        if not isinstance(struct_type, c_ast.Struct):
+            raise NotImplementedError("expected a struct type")
+        info = self.structs.get(struct_type.name)
+        if info is not None and field_name in info["fields"]:
+            return info["fields"][field_name]
+        for decl in struct_type.decls or []:
+            if decl.name == field_name:
+                offset = 0
+                for prev in struct_type.decls:
+                    if prev.name is None:
+                        continue
+                    if prev.name == field_name:
+                        break
+                    offset += self.struct_field_size(prev)
+                size = self.struct_field_size(decl)
+                return {"offset": offset, "size": size}
+        raise NotImplementedError(f"struct field '{field_name}' not found")
+
     def scalar_size(self, type_node):
         """Byte width of a scalar TypeDecl: uniClang names, standard C names,
         fixed-width stdint names, user typedefs and enums."""
         t = type_node.type
         if isinstance(t, c_ast.Enum):
             return INT_SIZE
+        if isinstance(t, c_ast.Struct):
+            return self.struct_size(t)
+        if isinstance(t, c_ast.Union):
+            raise NotImplementedError("unions are not supported")
         if not isinstance(t, c_ast.IdentifierType):
-            raise NotImplementedError("structs and unions are not supported")
+            raise NotImplementedError(f"unsupported type node '{type(t).__name__}'")
         words = list(t.names)
         if len(words) == 1:
             w = words[0]
@@ -430,7 +502,11 @@ class Compiler:
         if isinstance(type_node, c_ast.PtrDecl):
             return INT_SIZE
         if isinstance(type_node, c_ast.TypeDecl):
+            if isinstance(type_node.type, c_ast.Struct):
+                return self.struct_size(type_node.type)
             return self.scalar_size(type_node)
+        if isinstance(type_node, c_ast.Struct):
+            return self.struct_size(type_node)
         raise NotImplementedError(f"unsupported type node '{type(type_node).__name__}'")
 
     def ptr_pointee_size(self, ptr_node):
@@ -440,6 +516,8 @@ class Compiler:
         if isinstance(target, c_ast.TypeDecl):
             if self.is_void_type(target):
                 return 1  # void * is byte-addressed
+            if isinstance(target.type, c_ast.Struct):
+                return self.struct_size(target.type)
             return self.scalar_size(target)
         raise NotImplementedError("unsupported pointer target type")
 
@@ -508,6 +586,8 @@ class Compiler:
                 raise _NotConst()
             if node.name in ("true", "false"):
                 return 1 if node.name == "true" else 0
+            if node.name in ("NULL", "nullptr"):
+                return 0
             if node.name in self.constants:
                 return self.constants[node.name]
             raise _NotConst()
@@ -562,6 +642,156 @@ class Compiler:
             return v & ((1 << (size * 8)) - 1)
         raise _NotConst()
 
+    def resolve_struct_type(self, type_node):
+        if isinstance(type_node, c_ast.PtrDecl):
+            return self.resolve_struct_type(type_node.type)
+        if isinstance(type_node, c_ast.ArrayDecl):
+            return self.resolve_struct_type(type_node.type)
+        if isinstance(type_node, c_ast.TypeDecl):
+            if isinstance(type_node.type, c_ast.Struct):
+                return type_node.type
+            if isinstance(type_node.type, c_ast.IdentifierType):
+                for name in type_node.type.names:
+                    if name in self.struct_defs:
+                        return self.struct_defs[name]
+            return None
+        return None
+
+    def resolve_type_for_expr(self, expr):
+        if isinstance(expr, c_ast.ID):
+            typ = self.var_types.get(expr.name, self.const_array_types.get(expr.name))
+        else:
+            typ = None
+        if isinstance(expr, c_ast.ArrayRef):
+            base_type = self.resolve_type_for_expr(expr.name)
+            if isinstance(base_type, c_ast.ArrayDecl):
+                return base_type.type
+            if isinstance(base_type, c_ast.PtrDecl):
+                return base_type.type
+            if isinstance(base_type, c_ast.TypeDecl) and isinstance(base_type.type, c_ast.ArrayDecl):
+                return base_type.type.type
+            return None
+        if isinstance(expr, c_ast.UnaryOp) and expr.op == "*":
+            base_type = self.resolve_type_for_expr(expr.expr)
+            if isinstance(base_type, c_ast.PtrDecl):
+                return base_type.type
+            if isinstance(base_type, c_ast.TypeDecl) and isinstance(base_type.type, c_ast.PtrDecl):
+                return base_type.type.type
+            return None
+        if isinstance(expr, c_ast.StructRef):
+            base = getattr(expr, "expr", getattr(expr, "name", None))
+            base_type = self.resolve_type_for_expr(base)
+            field_name = expr.field.name
+            target_type = base_type
+            if isinstance(target_type, c_ast.PtrDecl):
+                target_type = target_type.type
+            if isinstance(target_type, c_ast.TypeDecl):
+                if isinstance(target_type.type, c_ast.IdentifierType):
+                    for name in target_type.type.names:
+                        if name in self.struct_defs:
+                            target_type = c_ast.TypeDecl(declname=target_type.declname, quals=target_type.quals, align=target_type.align, type=self.struct_defs[name])
+                            break
+                if isinstance(target_type.type, c_ast.Struct):
+                    struct = target_type.type
+                    for decl in struct.decls or []:
+                        if decl.name == field_name:
+                            return decl.type
+            if isinstance(base_type, c_ast.ArrayDecl):
+                elem = base_type.type
+                if isinstance(elem, c_ast.TypeDecl) and isinstance(elem.type, c_ast.Struct):
+                    struct = elem.type
+                    for decl in struct.decls or []:
+                        if decl.name == field_name:
+                            return decl.type
+            return None
+        if isinstance(expr, c_ast.Cast):
+            return expr.to_type
+        if isinstance(typ, c_ast.TypeDecl) and isinstance(typ.type, c_ast.IdentifierType):
+            for name in typ.type.names:
+                if name in self.struct_defs:
+                    return c_ast.TypeDecl(declname=typ.declname, quals=typ.quals, align=typ.align, type=self.struct_defs[name])
+        return typ
+
+    def expr_type(self, expr):
+        if isinstance(expr, c_ast.Constant):
+            if expr.type == "char":
+                return c_ast.TypeDecl(declname=None, quals=[], align=None,
+                                     type=c_ast.IdentifierType(names=["char"]))
+            words = expr.type.replace("const", "").strip().split()
+            return c_ast.TypeDecl(declname=None, quals=[], align=None,
+                                  type=c_ast.IdentifierType(names=words or ["int"]))
+        if isinstance(expr, c_ast.ID):
+            return self.var_types.get(expr.name)
+        if isinstance(expr, c_ast.Cast):
+            return expr.to_type.type
+        if isinstance(expr, c_ast.UnaryOp):
+            if expr.op == "sizeof":
+                return c_ast.TypeDecl(declname=None, quals=[], align=None,
+                                     type=c_ast.IdentifierType(names=["size_t"]))
+            if expr.op == "*":
+                return self.resolve_type_for_expr(expr)
+            return self.expr_type(expr.expr)
+        if isinstance(expr, (c_ast.ArrayRef, c_ast.StructRef)):
+            return self.resolve_type_for_expr(expr)
+        if isinstance(expr, c_ast.BinaryOp):
+            if expr.op in ("==", "!=", "<", ">", "<=", ">=", "&&", "||"):
+                return c_ast.TypeDecl(declname=None, quals=[], align=None,
+                                     type=c_ast.IdentifierType(names=["bool"]))
+            return self.expr_type(expr.left) or self.expr_type(expr.right)
+        if isinstance(expr, c_ast.TernaryOp):
+            return self.expr_type(expr.iftrue) or self.expr_type(expr.iffalse)
+        return None
+
+    def scalar_type_signed(self, type_node):
+        if isinstance(type_node, c_ast.PtrDecl):
+            return False
+        if isinstance(type_node, c_ast.TypeDecl):
+            type_node = type_node.type
+        if isinstance(type_node, c_ast.Enum):
+            return True
+        if not isinstance(type_node, c_ast.IdentifierType):
+            return False
+        words = list(type_node.names)
+        if len(words) == 1 and words[0] in TYPE_ALIASES:
+            return TYPE_ALIASES[words[0]][1]
+        return "unsigned" not in words and (
+            any(word in ("signed", "int", "short", "long") for word in words)
+        )
+
+    def scalar_type_size(self, type_node):
+        try:
+            return self.type_size(type_node)
+        except NotImplementedError:
+            return INT_SIZE
+
+    def comparison_is_signed(self, left, right, left_size, right_size):
+        left_type = self.expr_type(left)
+        right_type = self.expr_type(right)
+        if isinstance(left_type, c_ast.PtrDecl) or isinstance(right_type, c_ast.PtrDecl):
+            return False
+        left_signed = self.scalar_type_signed(left_type)
+        right_signed = self.scalar_type_signed(right_type)
+        left_promoted_size = max(INT_SIZE, left_size)
+        right_promoted_size = max(INT_SIZE, right_size)
+        left_signed = left_signed or left_size < INT_SIZE
+        right_signed = right_signed or right_size < INT_SIZE
+        if left_signed and right_signed:
+            return True
+        if left_signed and not right_signed:
+            return left_promoted_size > right_promoted_size
+        if right_signed and not left_signed:
+            return right_promoted_size > left_promoted_size
+        return False
+
+    def load_comparison_operand(self, node, resolved, reg):
+        size = self.load_resolved(resolved, reg)
+        type_node = self.expr_type(node)
+        if self.scalar_type_signed(type_node) and size < INT_SIZE:
+            sign_bit = 1 << (size * 8 - 1)
+            self.emit_set_const(RC, sign_bit)
+            self.emit("xorreg", reg, RC, reg)
+            self.emit("subreg", reg, RC, reg)
+
     def sizeof_value(self, expr):
         if isinstance(expr, c_ast.Typename):
             return self.type_size(expr.type)
@@ -575,6 +805,24 @@ class Compiler:
             raise _NotConst()
         if isinstance(expr, c_ast.ArrayRef) or (isinstance(expr, c_ast.UnaryOp) and expr.op == "*"):
             return self.lvalue_elem_size(expr)
+        if isinstance(expr, c_ast.StructRef):
+            base = getattr(expr, "expr", getattr(expr, "name", None))
+            base_type = self.resolve_type_for_expr(base)
+            if isinstance(base_type, c_ast.PtrDecl):
+                target = base_type.type
+                if isinstance(target, c_ast.TypeDecl) and isinstance(target.type, c_ast.IdentifierType):
+                    for name in target.type.names:
+                        if name in self.struct_defs:
+                            target = c_ast.TypeDecl(declname=target.declname, quals=target.quals, align=target.align, type=self.struct_defs[name])
+                            break
+                if isinstance(target, c_ast.TypeDecl) and isinstance(target.type, c_ast.Struct):
+                    return self.struct_field_info(target.type, expr.field.name)["size"]
+            if isinstance(base_type, c_ast.TypeDecl) and isinstance(base_type.type, c_ast.IdentifierType):
+                for name in base_type.type.names:
+                    if name in self.struct_defs:
+                        base_type = c_ast.TypeDecl(declname=base_type.declname, quals=base_type.quals, align=base_type.align, type=self.struct_defs[name])
+                        break
+            return self.struct_field_info(base_type.type, expr.field.name)["size"]
         raise _NotConst()
 
     # -- pointer typing (compile-time only; the VM has no types) -------------------
@@ -590,7 +838,34 @@ class Compiler:
                     return self.array_by_addr[addr]
                 return None
             if node.name in self.const_arrays:
+                array_type = self.const_array_types.get(node.name)
+                if array_type is not None and isinstance(array_type, c_ast.ArrayDecl):
+                    return self.type_size(array_type.type)
                 return self.const_arrays[node.name]["elem_bytes"]
+            return None
+        if isinstance(node, c_ast.StructRef):
+            base = getattr(node, "expr", getattr(node, "name", None))
+            base_type = self.resolve_type_for_expr(base)
+            if isinstance(base_type, c_ast.TypeDecl) and isinstance(base_type.type, c_ast.Struct):
+                field_decl = None
+                for decl in base_type.type.decls or []:
+                    if decl.name == node.field.name:
+                        field_decl = decl
+                        break
+                if field_decl is None:
+                    return None
+                if isinstance(field_decl.type, c_ast.ArrayDecl):
+                    return self.type_size(field_decl.type.type)
+                if isinstance(field_decl.type, c_ast.PtrDecl):
+                    return self.ptr_pointee_size(field_decl.type)
+                return None
+            return None
+        if isinstance(node, c_ast.ArrayRef):
+            result_type = self.resolve_type_for_expr(node)
+            if isinstance(result_type, c_ast.ArrayDecl):
+                return self.type_size(result_type.type)
+            if isinstance(result_type, c_ast.PtrDecl):
+                return self.ptr_pointee_size(result_type)
             return None
         if isinstance(node, c_ast.Constant):
             return 1 if node.type == "string" else None
@@ -632,6 +907,12 @@ class Compiler:
             if elem is None:
                 raise NotImplementedError("subscripted value is neither an array nor a pointer")
             return elem
+        if isinstance(node, c_ast.StructRef):
+            base_type = self.resolve_type_for_expr(node.expr)
+            if isinstance(base_type, c_ast.TypeDecl) and isinstance(base_type.type, c_ast.Struct):
+                info = self.struct_field_info(base_type.type, node.field.name)
+                return info["size"]
+            return 1
         if isinstance(node, c_ast.UnaryOp) and node.op == "*":
             elem = self.expr_ptr_elem(node.expr)
             if elem is None:
@@ -644,13 +925,22 @@ class Compiler:
         therefore can't be used through a (RAM-only) pointer."""
         if isinstance(node, c_ast.Constant):
             return node.type == "string"
+        if isinstance(node, c_ast.BinaryOp) and node.op in ("+", "-"):
+            return self.expr_is_rom(node.left) or self.expr_is_rom(node.right)
+        if isinstance(node, c_ast.Cast):
+            return self.expr_is_rom(node.expr)
         return isinstance(node, c_ast.ID) and node.name in self.const_arrays and node.name not in self.vars
 
     def check_not_rom(self, node):
-        if self.expr_is_rom(node):
-            raise NotImplementedError(
-                "string literals and const arrays live in ROM; pointers can only address RAM. "
-                "Use a RAM array (e.g. `char s[] = \"text\";`) if you need a pointer to it.")
+        """Allow read-only ROM-backed pointers for the VM's flat-memory model.
+
+        MicroCity relies on AVR-style PROGMEM pointers and string literals that
+        point into ROM; these are read-only references, not writable RAM
+        addresses. The compiler's earlier blanket rejection blocks valid code
+        like `const char *s = "text";` and `const BuildingInfo *info =
+        &BuildingMetaData[...]`.
+        """
+        return
 
     @staticmethod
     def string_bytes(node):
@@ -667,7 +957,7 @@ class Compiler:
             packed += value.to_bytes(elem_bytes, "big")
         return bytes(packed)
 
-    def add_const_array(self, name, elem_bytes, values):
+    def add_const_array(self, name, elem_bytes, values, type_node=None, relocations=None):
         base = self.alloc_temp(INT_SIZE)
         instr_start = len(self.buf)
         # placeholder ROM offset, patched in finalize() once we know it
@@ -675,9 +965,64 @@ class Compiler:
         patch_pos = instr_start + 1 + 1  # opcode(1) + reg(1), then the 4-byte val
         self.emit_store(RA, base, INT_SIZE)
         self.const_arrays[name] = {"base": base, "elem_bytes": elem_bytes, "count": len(values)}
+        if type_node is not None:
+            self.const_array_types[name] = type_node
         self.array_elem_bytes[name] = elem_bytes
-        self.rom_data.append({"patch_pos": patch_pos, "data": self.pack_values(values, elem_bytes)})
+        self.rom_data.append({
+            "name": name,
+            "patch_pos": patch_pos,
+            "data": self.pack_values(values, elem_bytes),
+            "relocations": relocations or [],
+        })
         return base
+
+    def const_array_access(self, node):
+        indices = []
+        current = node
+        while isinstance(current, c_ast.ArrayRef):
+            indices.append(current.subscript)
+            current = current.name
+        if not isinstance(current, c_ast.ID) or current.name not in self.const_arrays:
+            return None
+        array_type = self.const_array_types.get(current.name)
+        if array_type is None:
+            if len(indices) != 1:
+                return None
+            return current.name, list(reversed(indices)), None
+        index_types = []
+        for index in reversed(indices):
+            if not isinstance(array_type, c_ast.ArrayDecl):
+                return None
+            array_type = array_type.type
+            index_types.append(array_type)
+        return current.name, list(reversed(indices)), array_type
+
+    def gen_const_array_address(self, node):
+        access = self.const_array_access(node)
+        if access is None:
+            return None
+        name, indices, result_type = access
+        if result_type is None:
+            elem_bytes = self.const_arrays[name]["elem_bytes"]
+            stride_sizes = [elem_bytes]
+        else:
+            stride_sizes = []
+            current_type = self.const_array_types[name]
+            for _ in indices:
+                current_type = current_type.type
+                stride_sizes.append(self.type_size(current_type))
+
+        index_values = [self.gen_expr(index) for index in indices]
+        offset = self.alloc_temp(INT_SIZE)
+        self.emit_copy(self.const_arrays[name]["base"], offset)
+        for index_value, stride in zip(index_values, stride_sizes):
+            self.emit_load(offset, INT_SIZE, RA)
+            self.emit_load(index_value, self.addr_size(index_value), RB)
+            if stride != 1:
+                self.emit("mulregv", RB, stride, RB)
+            self.emit("addreg", RA, RB, RA)
+            self.emit_store(RA, offset, INT_SIZE)
+        return offset, result_type
 
     # -- low level emission ---------------------------------------------------
     def emit(self, op, *operands):
@@ -705,11 +1050,18 @@ class Compiler:
                 raise RuntimeError(f"label '{label.name}' used but never defined")
             self.buf[pos:pos + width] = label.addr.to_bytes(width, "big")
         byte_offset = len(self.buf)
+        rom_offsets = {}
         for item in self.rom_data:
             self.buf[item["patch_pos"]:item["patch_pos"] + 4] = byte_offset.to_bytes(4, "big")
+            rom_offsets[item["name"]] = byte_offset
             byte_offset += len(item["data"])
         for item in self.rom_data:
-            self.buf.extend(item["data"])
+            data = bytearray(item["data"])
+            for offset, target in item["relocations"]:
+                if target not in rom_offsets:
+                    raise ValueError(f"ROM pointer in '{item['name']}' refers to unknown array '{target}'")
+                data[offset:offset + INT_SIZE] = rom_offsets[target].to_bytes(INT_SIZE, "big")
+            self.buf.extend(data)
         return bytes(self.buf)
 
     # -- startup prologue: query real memory size, warn if too small ------------
@@ -749,6 +1101,12 @@ class Compiler:
             return True
         if isinstance(node, c_ast.UnaryOp) and node.op in ("p++", "++", "p--", "--"):
             return True
+        if isinstance(node, (c_ast.ArrayRef, c_ast.StructRef)):
+            return False
+        if isinstance(node, c_ast.UnaryOp) and node.op in ("*", "&"):
+            return False
+        if isinstance(node, c_ast.Cast):
+            return Compiler.has_side_effects(node.expr)
         return any(Compiler.has_side_effects(child) for _, child in node.children())
 
     def emit_addr_in_ra(self, node):
@@ -756,6 +1114,66 @@ class Compiler:
         (array element, pointer subscript, or *pointer) in RA, and return the
         element width in bytes. Nothing else may be emitted between this call
         and the instruction that consumes RA."""
+        if isinstance(node, c_ast.ArrayRef):
+            const_access = self.gen_const_array_address(node)
+            if const_access is not None:
+                offset, result_type = const_access
+                if isinstance(result_type, c_ast.ArrayDecl):
+                    elem_bytes = self.type_size(result_type.type)
+                elif result_type is not None:
+                    elem_bytes = self.type_size(result_type)
+                else:
+                    elem_bytes = self.const_arrays[self.const_array_access(node)[0]]["elem_bytes"]
+                self.emit_load(offset, INT_SIZE, RA)
+                return elem_bytes
+        if isinstance(node, c_ast.StructRef):
+            field = node.field.name
+            base = getattr(node, "expr", getattr(node, "name", None))
+            base_type = None
+            if isinstance(base, c_ast.ID):
+                base_type = self.resolve_type_for_expr(base)
+                base_addr = self.var_addr(base.name)
+                self.emit_set_const(RA, base_addr)
+            elif isinstance(base, c_ast.ArrayRef) or (isinstance(base, c_ast.UnaryOp) and base.op == "*"):
+                self.emit_addr_in_ra(base)
+                base_type = self.resolve_type_for_expr(base)
+            elif isinstance(base, c_ast.StructRef):
+                self.emit_addr_in_ra(base)
+                base_type = self.resolve_type_for_expr(base)
+            else:
+                base_addr = self.gen_expr(base)
+                self.emit_load(base_addr, self.addr_size(base_addr), RA)
+                base_type = self.resolve_type_for_expr(base)
+            if base_type is None:
+                raise NotImplementedError(f"cannot resolve type for struct field access '{field}'")
+            if isinstance(base_type, c_ast.TypeDecl) and isinstance(base_type.type, c_ast.IdentifierType):
+                for name in base_type.type.names:
+                    if name in self.struct_defs:
+                        base_type = c_ast.TypeDecl(declname=base_type.declname, quals=base_type.quals, align=base_type.align, type=self.struct_defs[name])
+                        break
+            if isinstance(base_type, c_ast.PtrDecl):
+                target = base_type.type
+                if isinstance(target, c_ast.TypeDecl) and isinstance(target.type, c_ast.IdentifierType):
+                    for name in target.type.names:
+                        if name in self.struct_defs:
+                            target = c_ast.TypeDecl(declname=target.declname, quals=target.quals, align=target.align, type=self.struct_defs[name])
+                            break
+                if not isinstance(target, c_ast.TypeDecl) or not isinstance(target.type, c_ast.Struct):
+                    raise NotImplementedError(f"field '{field}' requires a struct or pointer-to-struct base")
+                base_type = target
+            if not isinstance(base_type, c_ast.TypeDecl) or not isinstance(base_type.type, c_ast.Struct):
+                raise NotImplementedError(f"field '{field}' requires a struct or pointer-to-struct base")
+            info = self.struct_field_info(base_type.type, field)
+            field_decl = None
+            for decl in base_type.type.decls or []:
+                if decl.name == field:
+                    field_decl = decl
+                    break
+            if field_decl is not None and isinstance(field_decl.type, c_ast.ArrayDecl):
+                self.emit("addregv", RA, info["offset"], RA)
+                return self.type_size(field_decl.type.type)
+            self.emit("addregv", RA, info["offset"], RA)
+            return info["size"]
         if isinstance(node, c_ast.ArrayRef):
             if (isinstance(node.name, c_ast.ID) and node.name.name in self.vars
                     and self.vars[node.name.name] in self.array_by_addr):
@@ -953,23 +1371,59 @@ class Compiler:
                 return addr
             if node.name in self.const_arrays:
                 return self.const_arrays[node.name]["base"]
-            if node.name in ("true", "false") or node.name in self.constants:
+            if node.name in ("true", "false", "NULL", "nullptr") or node.name in self.constants:
                 dest = self.alloc_temp(INT_SIZE)
                 self.emit_store_const(dest, INT_SIZE, self.const_value(node))
                 return dest
             return self.var_addr(node.name)  # raises: use of undeclared variable
 
+        if isinstance(node, c_ast.StructRef):
+            field_name = node.field.name
+            base = getattr(node, "expr", getattr(node, "name", None))
+            base_type = self.resolve_type_for_expr(base)
+            struct_type = self.resolve_struct_type(base_type)
+            if struct_type is None:
+                raise NotImplementedError(f"unsupported struct field access '{field_name}'")
+            field_size = self.struct_field_info(struct_type, field_name)["size"]
+            field_decl = None
+            for decl in (struct_type.decls or []):
+                if decl.name == field_name:
+                    field_decl = decl
+                    break
+            if field_decl is not None and isinstance(field_decl.type, c_ast.ArrayDecl):
+                result = self.alloc_temp(INT_SIZE)
+                self.emit_addr_in_ra(node)
+                self.emit_store(RA, result, INT_SIZE)
+                return result
+            if node.type == '.':
+                if isinstance(base, c_ast.ID):
+                    base_addr = self.var_addr(base.name)
+                    self.emit_set_const(RA, base_addr)
+                elif isinstance(base, c_ast.ArrayRef) or (isinstance(base, c_ast.UnaryOp) and base.op == "*"):
+                    self.emit_addr_in_ra(base)
+                else:
+                    self.emit_load(self.gen_expr(base), self.addr_size(self.gen_expr(base)), RA)
+                self.emit("addregv", RA, self.struct_field_info(struct_type, field_name)["offset"], RA)
+            else:
+                self.load_resolved(self.resolve_operand(base), RA)
+                self.emit("addregv", RA, self.struct_field_info(struct_type, field_name)["offset"], RA)
+            self.emit(f"loadregi{self._reg_width(field_size)}", RA, RB)
+            result = self.alloc_temp(field_size)
+            self.emit_store(RB, result, field_size)
+            return result
+
         if isinstance(node, c_ast.ArrayRef):
-            if (isinstance(node.name, c_ast.ID) and node.name.name in self.const_arrays
-                    and node.name.name not in self.vars):
-                const_array = self.const_arrays[node.name.name]
-                elem_bytes = const_array["elem_bytes"]
-                index_addr = self.gen_expr(node.subscript)
-                self.emit_load(index_addr, self.addr_size(index_addr), RA)
-                self.emit("mulregv", RA, elem_bytes, RA)          # RA = index * elem_bytes
-                self.emit_load(const_array["base"], INT_SIZE, RB)  # RB = ROM base offset
-                self.emit("addreg", RA, RB, RA)                    # RA = absolute ROM offset
-                self.emit(f"romread{elem_bytes * 8}", RA, RB)      # RB = value read from ROM
+            const_access = self.gen_const_array_address(node)
+            if const_access is not None:
+                offset, result_type = const_access
+                if isinstance(result_type, c_ast.ArrayDecl):
+                    result = self.alloc_temp(INT_SIZE)
+                    self.emit_copy(offset, result)
+                    return result
+                elem_bytes = self.type_size(result_type) if result_type is not None else self.const_arrays[
+                    self.const_array_access(node)[0]]["elem_bytes"]
+                self.emit_load(offset, INT_SIZE, RA)
+                self.emit(f"romread{elem_bytes * 8}", RA, RB)
                 result = self.alloc_temp(elem_bytes)
                 self.emit_store(RB, result, elem_bytes)
                 return result
@@ -1185,20 +1639,27 @@ class Compiler:
         if isinstance(node, c_ast.BinaryOp) and node.op in comparisons:
             left_r = self.resolve_operand(node.left)
             right_r = self.resolve_operand(node.right)
-            self.load_resolved(left_r, RA)
-            self.load_resolved(right_r, RB)
+            left_size = INT_SIZE if left_r[0] == "const" else left_r[2]
+            right_size = INT_SIZE if right_r[0] == "const" else right_r[2]
+            self.load_comparison_operand(node.left, left_r, RA)
+            self.load_comparison_operand(node.right, right_r, RB)
+            if node.op not in ("==", "!=") and self.comparison_is_signed(
+                    node.left, node.right, left_size, right_size):
+                self.emit_set_const(RC, 0x80000000)
+                self.emit("xorreg", RA, RC, RA)
+                self.emit("xorreg", RB, RC, RB)
             self.emit(opmap[node.op], RA, RB, RA)
             bool_addr = self.alloc_temp(1)
             self.emit_store(RA, bool_addr, 1)
             return bool_addr
 
-        if isinstance(node, c_ast.Constant):
+        value = self.try_const(node)
+        if value is not None:
             bool_addr = self.alloc_temp(1)
-            self.emit_store_const(bool_addr, 1, 1 if self.const_value(node) != 0 else 0)
+            self.emit_store_const(bool_addr, 1, 1 if value != 0 else 0)
             return bool_addr
 
-        val = self.gen_expr(node)
-        return self.to_bool(val)
+        return self.gen_bool_operand(node)
 
     # -- printf ----------------------------------------------------------------
     def gen_printf(self, call):
@@ -1207,23 +1668,87 @@ class Compiler:
             raise NotImplementedError("printf's first argument must be a string literal")
         fmt = bytes(args[0].value[1:-1], "utf-8").decode("unicode_escape")
         rest = args[1:]
-
-        parts = fmt.split("%d")
-        trailing_newline = parts[-1].endswith("\n")
+        trailing_newline = fmt.endswith("\n")
         if trailing_newline:
-            parts[-1] = parts[-1][:-1]
+            fmt = fmt[:-1]
 
-        if len(parts) - 1 > len(rest):
-            raise NotImplementedError("printf format has more %d specifiers than arguments")
+        pieces = []  # ("text", str) or ("spec", conversion char)
+        literal = []
+        i = 0
+        while i < len(fmt):
+            if fmt[i] != "%":
+                literal.append(fmt[i])
+                i += 1
+                continue
+            m = re.match(r"%(%|(?:hh|h|ll|l|z)?([diucs]))", fmt[i:])
+            if not m:
+                raise NotImplementedError(
+                    f"unsupported printf format at '{fmt[i:i + 4]}' (supported: %d %i %u %c %s %%)")
+            if m.group(1) == "%":
+                literal.append("%")
+            else:
+                if literal:
+                    pieces.append(("text", "".join(literal)))
+                    literal = []
+                pieces.append(("spec", m.group(2)))
+            i += m.end()
+        if literal:
+            pieces.append(("text", "".join(literal)))
 
-        for i, literal in enumerate(parts):
-            if literal:
-                self.emit("printn", literal)
-            if i < len(rest):
-                addr = self.gen_expr(rest[i])
+        if sum(1 for kind, _ in pieces if kind == "spec") > len(rest):
+            raise NotImplementedError("printf format has more specifiers than arguments")
+
+        arg_i = 0
+        for idx, (kind, val) in enumerate(pieces):
+            if kind == "text":
+                if trailing_newline and idx == len(pieces) - 1:
+                    self.emit("print", val)  # text + newline in one instruction
+                    trailing_newline = False
+                else:
+                    self.emit("printn", val)
+                continue
+            arg = rest[arg_i]
+            arg_i += 1
+            if val in "diu":
+                addr = self.gen_expr(arg)
                 self.emit_load(addr, self.addr_size(addr), RA)
                 self.emit("outreg", RA)  # prints the register's full numeric value, any width
+            elif val == "c":
+                self.gen_print_char(arg)
+            else:
+                self.gen_print_str(arg)
         if trailing_newline:
+            self.emit("print", "")
+
+    def gen_print_char(self, arg):
+        addr = self.gen_expr(arg)
+        tmp = self.alloc_temp(1)
+        self.emit_load(addr, self.addr_size(addr), RA)
+        self.emit_store(RA, tmp, 1)
+        self.emit("outc", tmp)
+
+    def gen_print_str(self, arg, newline=False):
+        if isinstance(arg, c_ast.Constant) and arg.type == "string":
+            text = bytes(arg.value[1:-1], "utf-8").decode("unicode_escape")
+            if text or newline:
+                self.emit("print" if newline else "printn", text)
+            return
+        if self.expr_ptr_elem(arg) != 1:
+            raise NotImplementedError("%s / puts need a char array, char pointer or string literal")
+        rom = self.expr_is_rom(arg)
+        ptr = self.gen_expr(arg)
+        tmp = self.alloc_temp(1)
+        loop, done = Label("strloop"), Label("strdone")
+        self.emit_load(ptr, INT_SIZE, RA)
+        self.define_label(loop)
+        self.emit("romread8" if rom else "loadregi8", RA, RB)
+        self.emit("ifnotreg", RB, done)
+        self.emit_store(RB, tmp, 1)
+        self.emit("outc", tmp)
+        self.emit("addregv", RA, 1, RA)
+        self.emit("setpc", loop)
+        self.define_label(done)
+        if newline:
             self.emit("print", "")
 
     # -- graphics / keyboard builtins ------------------------------------------
@@ -1277,8 +1802,8 @@ class Compiler:
             raise NotImplementedError("isflagsupported(flag, val) takes exactly 2 arguments")
         if not isinstance(args[0], c_ast.Constant) or not isinstance(args[1], c_ast.Constant):
             raise NotImplementedError("isflagsupported(flag, val) requires constant arguments")
-        flag = int(args[0].value, 0)
-        val = int(args[1].value, 0)
+        flag = self.const_value(args[0])
+        val = self.const_value(args[1])
         self.emit("isflagsupported", flag, val, 12)
         dest = self.alloc_temp(1)
         self.emit_store(12, dest, 1)
@@ -1291,12 +1816,16 @@ class Compiler:
         # not just a constant. If max <= min at runtime, the VM leaves dst
         # unchanged (a no-op), same convention as divreg/modreg.
         args = call.args.exprs if call.args else []
-        if len(args) != 2:
-            raise NotImplementedError("rand(min, max) takes exactly 2 arguments")
-        min_r = self.resolve_operand(args[0])
-        max_r = self.resolve_operand(args[1])
-        self.load_resolved(min_r, RA)
-        self.load_resolved(max_r, RB)
+        if len(args) == 0:  # C-style rand(): 0..RAND_MAX (32767)
+            self.emit_set_const(RA, 0)
+            self.emit_set_const(RB, 32768)
+        elif len(args) != 2:
+            raise NotImplementedError("rand() or rand(min, max) -- max is exclusive")
+        else:
+            min_r = self.resolve_operand(args[0])
+            max_r = self.resolve_operand(args[1])
+            self.load_resolved(min_r, RA)
+            self.load_resolved(max_r, RB)
         self.emit("randreg", RA, RB, RA)
         dest = self.alloc_temp(INT_SIZE)
         self.emit_store(RA, dest, INT_SIZE)
@@ -1404,7 +1933,7 @@ class Compiler:
             )
 
         fn = self.function_asts[name]
-        params = fn.decl.type.args.params if fn.decl.type.args else []
+        params = self.fn_params(fn)
         if len(args) != len(params):
             raise NotImplementedError(f"'{name}' expects {len(params)} argument(s), got {len(args)}")
 
@@ -1414,45 +1943,373 @@ class Compiler:
 
         # Evaluate arguments *before* shadowing names, so `foo(x)` uses the
         # caller's x even if the callee also has a parameter named x.
+        for a, p in zip(args, params):
+            if self.param_pointee(p) is not None:
+                self.check_not_rom(a)
         arg_vals = [self.gen_expr(a) for a in args]
 
-        shadowed = {}  # name -> previous address (or NO_PREV sentinel) to restore after inlining
+        shadowed = {}  # name -> previous address/size/type (or NO_PREV sentinel) to restore after inlining
         NO_PREV = object()
         for p, val in zip(params, arg_vals):
             param_size = self.param_size(p)
             addr = self.alloc_var(prefix + p.name, param_size)
+            pointee = self.param_pointee(p)
+            if pointee is not None:
+                self.ptr_elem[addr] = pointee
             self.emit_copy(val, addr)
             shadowed[p.name] = (
                 self.vars.get(p.name, NO_PREV),
                 self.var_sizes.get(p.name, NO_PREV),
+                self.var_types.get(p.name, NO_PREV),
             )
             self.vars[p.name] = addr
             self.var_sizes[p.name] = param_size
+            self.var_types[p.name] = p.type
 
         ret_addr = self.alloc_var(prefix + "__ret", self.function_return_size(fn))
         end_label = Label(f"end_{prefix}")
 
         self.inlining_stack.append(name)
         self.return_stack.append((ret_addr, end_label))
+        saved_loops = (self.break_stack, self.continue_stack)
+        self.break_stack, self.continue_stack = [], []
         self.gen_stmt(fn.body)
+        self.break_stack, self.continue_stack = saved_loops
         self.return_stack.pop()
         self.inlining_stack.pop()
         self.define_label(end_label)
 
-        for pname, (prev, prev_size) in shadowed.items():
+        for pname, (prev, prev_size, prev_type) in shadowed.items():
             if prev is NO_PREV:
-                del self.vars[pname]
-                del self.var_sizes[pname]
+                self.vars.pop(pname, None)
+                self.var_sizes.pop(pname, None)
+                self.var_types.pop(pname, None)
             else:
                 self.vars[pname] = prev
                 self.var_sizes[pname] = prev_size
+                self.var_types[pname] = prev_type
 
         return ret_addr
 
+    # -- declarations --------------------------------------------------------------
+    def register_enum(self, enum):
+        if enum.values is None:
+            return
+        value = -1
+        for item in enum.values.enumerators:
+            value = self.const_value(item.value, "enum value") if item.value is not None else value + 1
+            self.constants[item.name] = value & M32
+
+    def register_typedef(self, node):
+        if node.name in TYPE_BYTES or node.name in TYPE_ALIASES:
+            return  # the compiler's own built-in typedefs
+        ty = node.type
+        if isinstance(ty, c_ast.TypeDecl) and isinstance(ty.type, c_ast.Enum):
+            self.register_enum(ty.type)
+            self.typedefs[node.name] = INT_SIZE
+            return
+        if isinstance(ty, c_ast.TypeDecl) and isinstance(ty.type, c_ast.Struct):
+            self.register_struct(node.name, ty.type)
+            self.typedefs[node.name] = self.structs[node.name]["size"]
+            return
+        if isinstance(ty, c_ast.TypeDecl) and isinstance(ty.type, c_ast.IdentifierType):
+            if any(name in self.struct_defs for name in ty.type.names):
+                for name in ty.type.names:
+                    if name in self.struct_defs:
+                        self.typedefs[node.name] = self.structs.get(name, {}).get("size", self.struct_size(self.struct_defs[name]))
+                        self.struct_defs[node.name] = self.struct_defs[name]
+                        break
+                return
+        if not isinstance(ty, c_ast.TypeDecl):
+            raise NotImplementedError("only typedefs of integer, enum and struct types are supported")
+        self.typedefs[node.name] = self.scalar_size(ty)
+
+    def array_count(self, t, init):
+        if t.dim is not None:
+            count = self.const_value(t.dim, "array size")
+            if count <= 0:
+                raise NotImplementedError("array size must be positive")
+            return count
+        if isinstance(init, c_ast.InitList):
+            return len(init.exprs)
+        if isinstance(init, c_ast.Constant) and init.type == "string":
+            return len(self.string_bytes(init)) + 1
+        raise NotImplementedError("array size can't be inferred without an initializer")
+
+    def const_struct_bytes(self, init, struct_node):
+        if not isinstance(init, c_ast.InitList):
+            raise NotImplementedError("struct initializers must use {...}")
+        out = bytearray()
+        values = list(init.exprs)
+        for decl in struct_node.decls or []:
+            if decl.name is None:
+                continue
+            if values:
+                value = values.pop(0)
+            else:
+                value = c_ast.Constant(type="int", value="0")
+            if isinstance(decl.type, c_ast.TypeDecl) and isinstance(decl.type.type, c_ast.Struct):
+                size = self.type_size(decl.type)
+                if not isinstance(value, c_ast.InitList):
+                    raise NotImplementedError("nested struct initializers must be enclosed in {...}")
+                raw = self.const_struct_bytes(value, decl.type.type)
+                out.extend(raw)
+                continue
+            field_size = self.struct_field_size(decl)
+            raw = value.to_bytes(field_size, "big") if isinstance(value, int) else self.const_scalar_bytes(value, decl.type, field_size)
+            out.extend(raw)
+        return bytes(out)
+
+    def const_scalar_bytes(self, expr, type_node, forced_size=None):
+        value = self.const_value(expr, "const initializer")
+        size = forced_size if forced_size is not None else self.type_size(type_node)
+        if size == 0:
+            return b""
+        if value < 0:
+            value &= (1 << (size * 8)) - 1
+        return value.to_bytes(size, "big")
+
+    def const_array_element_bytes(self, init, type_node):
+        if isinstance(type_node, c_ast.ArrayDecl):
+            if not isinstance(init, c_ast.InitList):
+                if isinstance(type_node.type, c_ast.TypeDecl):
+                    return self.const_scalar_bytes(init, type_node.type)
+                return self.const_scalar_bytes(init, type_node.type)
+            out = bytearray()
+            for item in init.exprs:
+                out.extend(self.const_array_element_bytes(item, type_node.type))
+            return bytes(out)
+        if isinstance(type_node, c_ast.TypeDecl) and isinstance(type_node.type, c_ast.Struct):
+            return self.const_struct_bytes(init, type_node.type)
+        if isinstance(type_node, c_ast.TypeDecl) and isinstance(type_node.type, c_ast.IdentifierType):
+            for name in type_node.type.names:
+                if name in self.struct_defs:
+                    return self.const_struct_bytes(init, self.struct_defs[name])
+        if isinstance(init, c_ast.InitList):
+            out = bytearray()
+            for item in init.exprs:
+                out.extend(self.const_array_element_bytes(item, type_node))
+            return bytes(out)
+        return self.const_scalar_bytes(init, type_node)
+
+    def flatten_const_values(self, init, type_node):
+        if isinstance(type_node, c_ast.ArrayDecl):
+            if isinstance(init, c_ast.InitList):
+                values = []
+                for item in init.exprs:
+                    if isinstance(item, c_ast.InitList):
+                        raw = self.const_array_element_bytes(item, type_node.type)
+                        values.append(int.from_bytes(raw, "big"))
+                    else:
+                        values.append(self.const_value(item, "const array value"))
+                return values
+            return [self.const_value(init, "const array value")]
+        if isinstance(type_node, c_ast.TypeDecl) and isinstance(type_node.type, c_ast.Struct):
+            raw = self.const_struct_bytes(init, type_node.type)
+            return [int.from_bytes(raw, "big")]
+        if isinstance(type_node, c_ast.TypeDecl) and isinstance(type_node.type, c_ast.IdentifierType):
+            names = tuple(type_node.type.names)
+            for name in names:
+                if name in self.struct_defs:
+                    if isinstance(init, c_ast.InitList) and init.exprs and all(isinstance(item, c_ast.InitList) for item in init.exprs):
+                        values = []
+                        for item in init.exprs:
+                            raw = self.const_struct_bytes(item, self.struct_defs[name])
+                            values.append(int.from_bytes(raw, "big"))
+                        return values
+                    raw = self.const_struct_bytes(init, self.struct_defs[name])
+                    return [int.from_bytes(raw, "big")]
+        if isinstance(init, c_ast.InitList):
+            values = []
+            for item in init.exprs:
+                values.extend(self.flatten_const_values(item, type_node))
+            return values
+        return [self.const_value(init, "const array value")]
+
+    def gen_array_init(self, node, addr, elem, count):
+        init = node.init
+        if isinstance(init, c_ast.Constant) and init.type == "string":
+            if elem != 1:
+                raise NotImplementedError("only char arrays can be initialized from a string literal")
+            data = self.string_bytes(init) + [0]
+            if len(data) > count:
+                raise NotImplementedError(f"string is too long for array '{node.name}'")
+            if not self.at_global_scope:
+                data += [0] * (count - len(data))
+            if all(b < 128 for b in data):
+                self.emit("write", addr, bytes(data).decode("ascii"))  # one instruction for the whole string
+                return
+            items = [("const", b) for b in data]
+        elif isinstance(init, c_ast.InitList):
+            items = [("expr", e) for e in init.exprs]
+        else:
+            raise NotImplementedError("arrays must be initialized with a {...} list or a string literal")
+        if len(items) > count:
+            raise NotImplementedError(f"too many initializers for array '{node.name}'")
+        for i in range(count):
+            elem_addr = addr + i * elem
+            self.addr_sizes[elem_addr] = elem
+            if i < len(items):
+                kind, item = items[i]
+                value = item if kind == "const" else self.try_const(item)
+                if value is None:
+                    self.emit_copy(self.gen_expr(item), elem_addr)
+                    continue
+                self.emit_store_const(elem_addr, elem, value)
+            elif not self.at_global_scope:  # globals start zeroed; locals must be cleared like C does
+                self.emit_store_const(elem_addr, elem, 0)
+
+    def register_struct(self, name, struct_node):
+        if name is None:
+            return
+        self.struct_defs[name] = struct_node
+        if name in self.structs:
+            return
+        if struct_node.decls is None:
+            self.structs[name] = {"size": 0, "fields": {}}
+            return
+        fields = {}
+        offset = 0
+        for decl in struct_node.decls:
+            if decl.name is None:
+                continue
+            size = self.struct_field_size(decl)
+            fields[decl.name] = {"offset": offset, "size": size}
+            offset += size
+        self.structs[name] = {"size": offset, "fields": fields}
+
+    def gen_decl(self, node):
+        t = node.type
+        enum = t.type if (isinstance(t, c_ast.TypeDecl) and isinstance(t.type, c_ast.Enum)) else (
+            t if isinstance(t, c_ast.Enum) else None)
+        if enum is not None:
+            self.register_enum(enum)
+        if isinstance(t, c_ast.TypeDecl) and isinstance(t.type, c_ast.Struct):
+            if t.type.name is not None:
+                self.register_struct(t.type.name, t.type)
+        elif isinstance(t, c_ast.Struct) and t.name is not None:
+            self.register_struct(t.name, t)
+        if node.name is None or isinstance(t, c_ast.FuncDecl):
+            return  # bare enum definition or a function prototype
+        if "extern" in (node.storage or []) and node.init is None:
+            return  # forward declaration; definition appears later in another translation unit
+        if "static" in (node.storage or []) and self.inlining_stack:
+            # The VM frontend is intentionally lightweight; static locals are
+            # treated as ordinary persistent variables in the current translation
+            # unit so MicroCity's file-local counters/seed state still compiles.
+            pass
+
+        if isinstance(t, c_ast.ArrayDecl) and self.is_const_decl(node) and node.init is not None:
+            elem_bytes = self.type_size(t.type)
+            if isinstance(t.type, c_ast.PtrDecl):
+                if not isinstance(node.init, c_ast.InitList):
+                    raise NotImplementedError("const pointer arrays need a {...} initializer")
+                count = self.const_value(t.dim, "array size") if t.dim is not None else len(node.init.exprs)
+                if len(node.init.exprs) > count:
+                    raise NotImplementedError(f"const array '{node.name}' has too many initializers")
+                values = [0] * count
+                relocations = []
+                for index, value in enumerate(node.init.exprs):
+                    target = value
+                    if isinstance(target, c_ast.UnaryOp) and target.op == "&":
+                        target = target.expr
+                    if isinstance(target, c_ast.ID):
+                        relocations.append((index * elem_bytes, target.name))
+                    elif self.try_const(value) != 0:
+                        raise NotImplementedError(
+                            f"const pointer array '{node.name}' entries must refer to ROM arrays or be null")
+                self.add_const_array(node.name, elem_bytes, values, t, relocations)
+                return
+            if isinstance(node.init, c_ast.Constant) and node.init.type == "string":
+                if elem_bytes != TYPE_BYTES["char"]:
+                    raise NotImplementedError("string initializers require const char arrays")
+                values = self.string_bytes(node.init) + [0]
+            elif isinstance(node.init, c_ast.InitList):
+                values = self.flatten_const_values(node.init, t.type)
+            else:
+                raise NotImplementedError("const arrays need a {...} list or string initializer")
+            count = self.const_value(t.dim, "array size") if t.dim is not None else len(values)
+            if len(values) > count:
+                raise NotImplementedError(f"const array '{node.name}' has too many initializers")
+            values.extend([0] * (count - len(values)))
+            self.add_const_array(node.name, elem_bytes, values, t)
+            return
+
+        if isinstance(t, c_ast.TypeDecl) and self.is_const_decl(node) and node.init is not None:
+            value = self.try_const(node.init)
+            if value is not None:  # const scalar with a constant value: a compile-time constant
+                self.constants[node.name] = value
+                return
+
+        self.var_types[node.name] = t
+        meta = self.alloc_meta.get(node.name)
+        elem_for_array = None
+        ptr_pointee = None
+        if meta is not None:
+            # alloc<N> still specifies N in BITS for source compatibility;
+            # round up to whole bytes since sub-byte packing is gone.
+            elem_size = max(1, (meta["bits"] + 7) // 8)
+            if meta["kind"] == "scalar":
+                size = elem_size
+            else:
+                size = elem_size * meta["count"]
+                elem_for_array = elem_size
+        elif isinstance(t, c_ast.ArrayDecl):
+            elem_for_array = self.type_size(t.type)
+            size = elem_for_array * self.array_count(t, node.init)
+        elif isinstance(t, c_ast.PtrDecl):
+            size = INT_SIZE
+            ptr_pointee = self.ptr_pointee_size(t)
+        else:
+            size = self.type_size(t)
+
+        addr = self.alloc_var(node.name, size)
+        if elem_for_array is not None:
+            self.array_elem_bytes[node.name] = elem_for_array
+            self.array_by_addr[addr] = elem_for_array
+        if ptr_pointee is not None:
+            self.ptr_elem[addr] = ptr_pointee
+        if node.init is None:
+            return
+        after_alloc = self.next_addr  # temporaries used by the initializer are freed afterwards
+        if elem_for_array is not None:
+            self.gen_array_init(node, addr, elem_for_array, size // elem_for_array)
+            self.next_addr = after_alloc
+            return
+        if ptr_pointee is not None:
+            self.check_not_rom(node.init)
+        self.emit_copy(self.gen_expr(node.init), addr)
+        self.next_addr = after_alloc
+
+    def gen_loop_test(self, cond, end_label):
+        value = 1 if cond is None else self.try_const(cond)
+        if value is None:
+            bool_addr = self.gen_cond(cond)
+            self.emit_load(bool_addr, 1, RA)
+            self.emit("ifnotreg", RA, end_label)
+        elif value == 0:
+            self.emit("setpc", end_label)
+
     # -- statements --------------------------------------------------------------
     def gen_stmt(self, node):
+        """Compiles one statement, then frees the RAM its temporaries and block
+        locals used (they're dead once the statement ends), so RAM use is the
+        peak of any single statement rather than the sum of all of them.
+        Declarations keep their variables until the enclosing block ends."""
         if node is None:
             return
+        if isinstance(node, (c_ast.Decl, c_ast.DeclList, c_ast.Typedef, c_ast.EmptyStatement)):
+            self._gen_stmt(node)
+            return
+        mark = self.next_addr
+        self._gen_stmt(node)
+        self.next_addr = mark
+
+    def _gen_stmt(self, node):
+        if node is None:
+            return
+        if getattr(node, "coord", None):
+            self.cur_coord = node.coord
 
         if isinstance(node, c_ast.Compound):
             # Block-scope: variables declared inside this block must not
@@ -1466,63 +2323,14 @@ class Compiler:
             return
 
         if isinstance(node, c_ast.Decl):
-            if self.is_const_decl(node):
-                if not isinstance(node.type, c_ast.ArrayDecl):
-                    raise NotImplementedError("const currently supports initialized arrays only")
-                elem_bytes = self.type_size(node.type.type)
-                if isinstance(node.init, c_ast.Constant) and node.init.type == "string":
-                    if elem_bytes != TYPE_BYTES["char"]:
-                        raise NotImplementedError("string initializers require const char arrays")
-                    values = self.string_bytes(node.init) + [0]
-                elif isinstance(node.init, c_ast.InitList):
-                    values = [self.const_value(item) for item in node.init.exprs]
-                else:
-                    raise NotImplementedError("const currently supports initialized arrays only")
+            self.gen_decl(node)
+            return
 
-                if node.type.dim is None:
-                    count = len(values)
-                elif isinstance(node.type.dim, c_ast.Constant):
-                    count = int(node.type.dim.value, 0)
-                else:
-                    raise NotImplementedError("const array size must be a compile-time constant")
-                if len(values) > count:
-                    raise NotImplementedError(f"const array '{node.name}' has too many initializers")
-                values.extend([0] * (count - len(values)))
+        if isinstance(node, c_ast.Typedef):
+            self.register_typedef(node)
+            return
 
-                self.add_const_array(node.name, elem_bytes, values)
-                return
-
-            meta = self.alloc_meta.get(node.name)
-            if meta is not None:
-                # alloc<N> still specifies N in BITS for source compatibility;
-                # round up to whole bytes since sub-byte packing is gone.
-                elem_size = max(1, (meta["bits"] + 7) // 8)
-                if meta["kind"] == "scalar":
-                    size = elem_size
-                else:
-                    size = elem_size * meta["count"]
-                    self.array_elem_bytes[node.name] = elem_size
-            else:
-                size = self.type_size(node.type)
-                if isinstance(node.type, c_ast.ArrayDecl):
-                    self.array_elem_bytes[node.name] = self.type_size(node.type.type)
-            addr = self.alloc_var(node.name, size)
-            if isinstance(node.type, c_ast.ArrayDecl) or (meta is not None and meta["kind"] == "array"):
-                self.array_by_addr[addr] = self.array_elem_bytes[node.name]
-            if node.init is not None:
-                if isinstance(node.init, c_ast.InitList):
-                    if not isinstance(node.type, c_ast.ArrayDecl):
-                        raise NotImplementedError("initializer lists are only supported for 1D arrays")
-                    elem_bytes = self.type_size(node.type.type)
-                    for i, item in enumerate(node.init.exprs):
-                        if not isinstance(item, c_ast.Constant):
-                            raise NotImplementedError("array initializer values must be compile-time constants")
-                        elem_addr = addr + i * elem_bytes
-                        self.addr_sizes[elem_addr] = elem_bytes
-                        self.emit_store_const(elem_addr, elem_bytes, self.const_value(item))
-                else:
-                    rhs = self.gen_expr(node.init)
-                    self.emit_copy(rhs, addr)
+        if isinstance(node, c_ast.EmptyStatement):
             return
 
         if isinstance(node, c_ast.DeclList):
@@ -1531,23 +2339,38 @@ class Compiler:
             return
 
         if isinstance(node, c_ast.For):
+            saved_vars, saved_sizes = dict(self.vars), dict(self.var_sizes)  # C99: loop vars are loop-scoped
             if node.init:
                 self.gen_stmt(node.init)
             label_start = Label("forloop")
+            label_cont = Label("forcontinue")
             label_end = Label("endforloop")
             self.define_label(label_start)
-            if node.cond is not None:
-                bool_addr = self.gen_cond(node.cond)
-                self.emit_load(bool_addr, 1, RA)
-                self.emit("ifnotreg", RA, label_end)
+            self.gen_loop_test(node.cond, label_end)
+            self.break_stack.append(label_end)
+            self.continue_stack.append(label_cont)
             self.gen_stmt(node.stmt)
+            self.break_stack.pop()
+            self.continue_stack.pop()
+            self.define_label(label_cont)
             if node.next:
                 self.gen_stmt(node.next)
             self.emit("setpc", label_start)
             self.define_label(label_end)
+            self.vars, self.var_sizes = saved_vars, saved_sizes
             return
 
-        if isinstance(node, (c_ast.Assignment, c_ast.UnaryOp)):
+        if isinstance(node, c_ast.ExprList):
+            for item in node.exprs:
+                self.gen_stmt(item)
+            return
+
+        if isinstance(node, c_ast.UnaryOp) and node.op in ("p++", "++", "p--", "--"):
+            self.gen_incdec(node, want_value=False)
+            return
+
+        if isinstance(node, (c_ast.Assignment, c_ast.UnaryOp, c_ast.Cast, c_ast.TernaryOp,
+                             c_ast.BinaryOp, c_ast.ID, c_ast.Constant)):
             self.gen_expr(node)
             return
 
@@ -1560,16 +2383,26 @@ class Compiler:
             elif name == "flag":
                 self.uses_graphics = True
                 args = node.args.exprs
-                self.emit("flag", int(args[0].value, 0), int(args[1].value, 0))
+                self.emit("flag", self.const_value(args[0]), self.const_value(args[1]))
             elif name == "setpixel":
                 self.gen_setpixel(node)
             elif name == "sleep":
                 args = node.args.exprs if node.args else []
-                if len(args) != 1 or not isinstance(args[0], c_ast.Constant):
+                if len(args) != 1 or self.try_const(args[0]) is None:
                     raise NotImplementedError("sleep(ms) takes exactly 1 constant argument")
-                self.emit("sleep", int(args[0].value, 0))
+                self.emit("sleep", self.const_value(args[0]))
             elif name == "refreshscreen":
                 self.emit("refreshscreen")
+            elif name == "puts":
+                args = node.args.exprs if node.args else []
+                if len(args) != 1:
+                    raise NotImplementedError("puts(s) takes exactly one argument")
+                self.gen_print_str(args[0], newline=True)
+            elif name == "putchar":
+                args = node.args.exprs if node.args else []
+                if len(args) != 1:
+                    raise NotImplementedError("putchar(c) takes exactly one argument")
+                self.gen_print_char(args[0])
             elif name == "srand":
                 self.gen_srand(node)
             elif name == "drawchar":
@@ -1606,6 +2439,10 @@ class Compiler:
             return
 
         if isinstance(node, c_ast.If):
+            cond_value = self.try_const(node.cond)
+            if cond_value is not None:  # constant condition: compile only the branch that can run
+                self.gen_stmt(node.iftrue if cond_value else node.iffalse)
+                return
             bool_addr = self.gen_cond(node.cond)
             label_else = Label("else")
             label_end = Label("endif")
@@ -1623,12 +2460,77 @@ class Compiler:
             label_start = Label("loop")
             label_end = Label("endloop")
             self.define_label(label_start)
-            bool_addr = self.gen_cond(node.cond)
-            self.emit_load(bool_addr, 1, RA)
-            self.emit("ifnotreg", RA, label_end)
+            self.gen_loop_test(node.cond, label_end)
+            self.break_stack.append(label_end)
+            self.continue_stack.append(label_start)
             self.gen_stmt(node.stmt)
+            self.break_stack.pop()
+            self.continue_stack.pop()
             self.emit("setpc", label_start)
             self.define_label(label_end)
+            return
+
+        if isinstance(node, c_ast.DoWhile):
+            label_start = Label("dowhile")
+            label_cont = Label("docontinue")
+            label_end = Label("enddowhile")
+            self.define_label(label_start)
+            self.break_stack.append(label_end)
+            self.continue_stack.append(label_cont)
+            self.gen_stmt(node.stmt)
+            self.break_stack.pop()
+            self.continue_stack.pop()
+            self.define_label(label_cont)
+            value = self.try_const(node.cond)
+            if value is None:
+                bool_addr = self.gen_cond(node.cond)
+                self.emit_load(bool_addr, 1, RA)
+                self.emit("ifreg", RA, label_start)
+            elif value:
+                self.emit("setpc", label_start)
+            self.define_label(label_end)
+            return
+
+        if isinstance(node, c_ast.Break):
+            if not self.break_stack:
+                raise NotImplementedError("'break' outside a loop or switch")
+            self.emit("setpc", self.break_stack[-1])
+            return
+
+        if isinstance(node, c_ast.Continue):
+            if not self.continue_stack:
+                raise NotImplementedError("'continue' outside a loop")
+            self.emit("setpc", self.continue_stack[-1])
+            return
+
+        if isinstance(node, c_ast.Switch):
+            saved_vars, saved_sizes = dict(self.vars), dict(self.var_sizes)
+            cond = self.gen_expr(node.cond)
+            items = (node.stmt.block_items or []) if isinstance(node.stmt, c_ast.Compound) else [node.stmt]
+            end_label = Label("endswitch")
+            default_label = None
+            labels = []
+            self.emit_load(cond, self.addr_size(cond), RA)
+            for item in items:
+                if isinstance(item, c_ast.Case):
+                    lbl = Label("case")
+                    self.emit_set_const(RB, self.const_value(item.expr, "case label"))
+                    self.emit("eqreg", RA, RB, RB)
+                    self.emit("ifreg", RB, lbl)
+                elif isinstance(item, c_ast.Default):
+                    lbl = default_label = Label("default")
+                else:
+                    raise NotImplementedError("statements before the first case label in a switch are not supported")
+                labels.append(lbl)
+            self.emit("setpc", default_label or end_label)
+            self.break_stack.append(end_label)
+            for item, lbl in zip(items, labels):
+                self.define_label(lbl)
+                for stmt in item.stmts or []:
+                    self.gen_stmt(stmt)
+            self.break_stack.pop()
+            self.define_label(end_label)
+            self.vars, self.var_sizes = saved_vars, saved_sizes
             return
 
         if isinstance(node, c_ast.Return):
@@ -1638,26 +2540,28 @@ class Compiler:
                     rhs = self.gen_expr(node.expr)
                     self.emit_copy(rhs, ret_addr)
                 self.emit("setpc", end_label)
-            return  # main()'s return value is ignored; 'exit' is emitted at the end
+            else:
+                self.emit("exit")  # `return` inside main() ends the program
+            return
 
         raise NotImplementedError(f"unsupported statement '{type(node).__name__}'")
 
     # -- entry point ---------------------------------------------------------
-    def compile(self, source, filename="<input>"):
-        source = Preprocessor().process(source, filename)
+    def compile(self, source, filename="<input>", include_dirs=(), defines=None):
+        source = Preprocessor(include_dirs, defines).process(source, filename)
         clean_source, self.alloc_meta = self.rewrite_alloc_syntax(source)
         clean_source = self.rewrite_mem_syntax(clean_source)
-        clean_source = "\n".join(
-            line for line in clean_source.splitlines() if not line.strip().startswith("#")
-        )
-        builtin_typedefs = "\n".join(
-            f"typedef unsigned char {name};" for name in TYPE_BYTES if name != "char"
-        )
+        clean_source = self.rewrite_cpp_tag_typedefs(clean_source)
+        builtin_names = [n for n in TYPE_BYTES if n != "char"] + list(TYPE_ALIASES)
+        builtin_typedefs = "\n".join(f"typedef unsigned char {name};" for name in builtin_names)
         clean_source = builtin_typedefs + "\n" + clean_source
-        ast = pycparser.CParser().parse(clean_source)
+        ast = pycparser.CParser().parse(clean_source, filename=filename)
+
+        for n in ast.ext:
+            if isinstance(n, c_ast.Typedef):
+                self.register_typedef(n)
 
         func_defs = [n for n in ast.ext if isinstance(n, c_ast.FuncDef)]
-        global_decls = [n for n in ast.ext if isinstance(n, c_ast.Decl)]
         main_fn = next((f for f in func_defs if f.decl.name == "main"), None)
         other_fns = [f for f in func_defs if f.decl.name != "main"]
         if main_fn is None:
@@ -1669,8 +2573,11 @@ class Compiler:
             self.function_asts[fn.decl.name] = fn
 
         self.gen_prologue()
-        for decl in global_decls:
-            self.gen_stmt(decl)
+        self.at_global_scope = True  # globals start zeroed, so zero-fill is skipped
+        for n in ast.ext:
+            if isinstance(n, c_ast.Decl):
+                self.gen_stmt(n)
+        self.at_global_scope = False
         self.gen_stmt(main_fn.body)
         self.emit("exit")
 
@@ -1678,32 +2585,110 @@ class Compiler:
         # prologue's placeholder "required bytes" value. Graphics/keyboard no
         # longer share the addressable memory space (they have their own
         # dedicated VM-side buffers), so only the program's own variables count.
-        required_bytes = self.next_addr
+        required_bytes = self.max_addr
         pos = self.required_bytes_patch_pos
         self.buf[pos:pos + 4] = required_bytes.to_bytes(4, "big")
 
         return self.finalize()
 
 
+USAGE = "Usage: python compiler.py input.c|input_dir [input.c|input_dir ...] [-o output.ulc] [-I dir]... [-D NAME[=value]]..."
+
+
+def _collect_sources(paths):
+    seen = set()
+    sources = []
+    for path in paths:
+        if os.path.isfile(path):
+            entries = [path]
+        elif os.path.isdir(path):
+            entries = sorted(
+                os.path.join(path, name)
+                for name in os.listdir(path)
+                if name.lower().endswith((".c", ".cpp"))
+            )
+            if not entries:
+                raise FileNotFoundError(f"{path}: no .c/.cpp sources found")
+        else:
+            raise FileNotFoundError(path)
+        for entry in entries:
+            real = os.path.abspath(entry)
+            if real not in seen:
+                seen.add(real)
+                sources.append(real)
+    if not sources:
+        raise FileNotFoundError("no source files were specified")
+    return sources
+
+
+def _compile_sources(sources, include_dirs, defines):
+    pp = Preprocessor(include_dirs, defines)
+    parts = []
+    for src in sources:
+        with open(src, "r", encoding="utf-8-sig") as f:
+            text = f.read()
+        parts.append(pp.process(text, src))
+    return "\n".join(parts)
+
+
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python compiler.py input.uc [-o output.ulc]")
+    args = sys.argv[1:]
+    input_paths = []
+    out_path = None
+    include_dirs = [os.path.join(os.path.dirname(os.path.abspath(__file__)), "include")]
+    defines = {}
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a[:2] in ("-o", "-I", "-D"):
+            flag, value = a[:2], a[2:]
+            if not value:
+                i += 1
+                if i >= len(args):
+                    print(USAGE)
+                    sys.exit(1)
+                value = args[i]
+            if flag == "-o":
+                out_path = value
+            elif flag == "-I":
+                include_dirs.append(value)
+            else:
+                name, sep, val = value.partition("=")
+                defines[name] = val if sep else "1"
+        else:
+            input_paths.append(a)
+        i += 1
+    if not input_paths:
+        print(USAGE)
+        sys.exit(1)
+    try:
+        sources = _collect_sources(input_paths)
+        label = sources[0]
+        source = _compile_sources(sources, include_dirs, defines)
+    except (FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    in_path = sys.argv[1]
-    out_path = "out.ulc"
-    if "-o" in sys.argv:
-        out_path = sys.argv[sys.argv.index("-o") + 1]
+    if out_path is None:
+        if len(input_paths) == 1 and os.path.isdir(input_paths[0]):
+            out_path = os.path.join(input_paths[0], os.path.basename(os.path.normpath(input_paths[0])) + ".ulc")
+        elif len(sources) == 1:
+            out_path = os.path.splitext(sources[0])[0] + ".ulc"
+        else:
+            out_path = os.path.join(os.getcwd(), "combined.ulc")
 
-    with open(in_path, "r") as f:
-        source = f.read()
-
-    bytecode = Compiler().compile(source, in_path)
+    compiler = Compiler()
+    try:
+        bytecode = compiler.compile(source, label, include_dirs, defines)
+    except (PreprocessorError, NotImplementedError, pycparser.c_parser.ParseError) as e:
+        where = f"{compiler.cur_coord}: " if compiler.cur_coord else ""
+        print(f"{where}error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     with open(out_path, "wb") as f:
         f.write(bytecode)
 
-    print(f"Compiled {in_path} -> {out_path} ({len(bytecode)} bytes)")
+    print(f"Compiled {', '.join(input_paths)} -> {out_path} ({len(bytecode)} bytes)")
 
 
 if __name__ == "__main__":

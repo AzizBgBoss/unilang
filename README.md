@@ -6,14 +6,15 @@ emits bytecode for it, and a portable C header implementing the same ISA for
 embedded targets.
 
 - `main.py` — the Python reference VM (interprets compiled `.ulc` files)
-- `compiler.py` — the uniClang compiler (reads `.uc` source and emits `.ulc`)
+- `compiler.py` — the uniClang compiler (reads C source, `.c`, and emits `.ulc`)
+- `preprocessor.py` — the C preprocessor used by the compiler (`#include`, `#define`, `#if`...)
 - `C-interpreter/unilang.h` — a header-only C implementation of the VM, for
   Arduino/embedded targets; graphics, keyboard, timing, and I/O are all
   optional host callbacks (see Section 3)
 - `C-interpreter/main.c` — an SDL2 example host wiring `unilang.h` up to a
   desktop window
-- `examples/` — `.uc` sources and compiled `.ulc` bytecode (`game/`, `pong/`,
-  `test/`)
+- `examples/` — `.c` sources and compiled `.ulc` bytecode (`game/`, `pong/`,
+  `test/`, `microcity/`)
 
 ---
 
@@ -112,9 +113,13 @@ Run bytecode with the Python VM: `python main.py -f program.ulc`
 
 ```
 pip install pycparser
-python compiler.py input.uc -o output.ulc
+python compiler.py input.c -o output.ulc [-I dir] [-D NAME=value]
+python compiler.py examples/microcity -o examples/microcity/microcity.ulc
 python main.py -f output.ulc
 ```
+
+Directory and multi-file inputs are supported as well, so the MicroCity
+project can be compiled directly from its source folder.
 
 It parses a **deliberately small subset of C-like syntax** with `pycparser`
 and emits `.ulc` bytecode directly (no separate assembler step). Codegen
@@ -167,9 +172,34 @@ r0-r13 are unused by the compiler.
 - `exit();` — halts immediately (statement only, not an expression).
 - Comments: `// line` and `/* block */`, stripped before parsing
   (string/char literals containing `//`/`/*` are left alone).
-- `#define` macros, expanded textually: object-like (`#define WIDTH 64`)
-  and function-like (`#define addfour(x) (x + 4)`). Other preprocessor
-  directives are stripped/ignored — there's no real preprocessor.
+- **Preprocessor** (`preprocessor.py`): `#include "file"` (relative to the
+  including file, then `-I` dirs), `#include <file>` (`-I` dirs; standard
+  headers like `<stdint.h>`/`<stdbool.h>`/`<stdio.h>` are accepted and
+  ignored since their contents are built in), `#define`/`#undef` (object-like
+  and function-like, `#x`, `##`, `__VA_ARGS__`), `#if`/`#ifdef`/`#ifndef`/
+  `#elif`/`#else`/`#endif` with `defined()` and full integer expressions,
+  `#pragma once`, `#error`, `__LINE__`/`__FILE__`, and predefined `NULL`,
+  `RAND_MAX`, `UINT8_MAX`... Macros aren't expanded inside strings. A
+  function-like macro call must fit on one line.
+- **C compatibility**: standard type names (`int`, `unsigned`, `short`,
+  `long`, `uint8_t`..`uint32_t`, `size_t`, `_Bool`, `void`), `typedef`,
+  `enum`, `const` scalars (compile-time constants), pointers (`T *p`, `&x`,
+  `*p`, `p[i]`, scaled pointer arithmetic, arrays decaying to pointers,
+  pointer parameters), casts, `sizeof`, `?:`, unary `- + ! ~`, short-circuit
+  `&&`/`||`, compound assignment (`+= <<= ...`), `++`/`--` on any lvalue,
+  the comma operator, `do`/`while`, `switch`/`case`/`default`, `break`,
+  `continue`, function prototypes, `static` globals, early `return` from
+  `main`, array initializers of any constant expression (`{0}` zero-fills),
+  `char s[] = "text"`. Constant expressions are folded at compile time.
+- `printf` supports `%d %i %u %c %s %%` (no width/precision); also `puts`,
+  `putchar`, and C-style `rand()` (0..32767) besides `rand(min, max)`.
+- **Compatibility notes**: the compiler supports a broader C-like subset used
+  by the MicroCity project, including signed integer semantics, struct and
+  bitfield access, multi-file directory inputs, AVR-style `pgmspace` shims,
+  C++-style tag names, and constant ROM arrays. The compiler still keeps the
+  VM's simplified memory model: pointers are byte-addressed, `const` ROM data is
+  read-only, and functions are inlined instead of recursively called.
+  `alloc N x;` and `MEMORY[a:b]` remain legacy non-C extensions.
 - **Builtins** for hardware access:
   - `flag(index, value);` — raw `flag` opcode. Statement only.
   - `setpixel(x, y, val);` — plots a pixel via the native `setpixel` opcode.
@@ -273,7 +303,7 @@ uint32 main() {
 }
 ```
 
-See `examples/pong/pong.uc` and `examples/game/game.uc` for fuller programs
+See `examples/pong/pong.c` and `examples/game/game.c` for fuller programs
 using functions, graphics, and keyboard input together.
 
 ---
@@ -327,3 +357,22 @@ Arduino boards (Uno/Nano/Mega), keep bytecode `const` **and** `PROGMEM`, and
 read it back through `pgm_read_byte(&rom[addr])` — a plain `const` array
 still gets copied into RAM on those boards otherwise. ARM-based boards
 (Due, most ESP32/SAMD) don't need `PROGMEM`; a plain `const` array is fine.
+
+**Speed on weak devices.** Two optional calls make the VM much faster without
+using extra RAM beyond two small fields (a pointer and a length):
+
+- `ULVM_set_rom(&vm, rom, size)` hands the VM a directly addressable bytecode
+  array (RAM, or `PROGMEM` on AVR, read through `READ_FLASH_BYTE`), so
+  instruction fetch no longer calls your `readbyte` callback for every byte.
+  `ULVM_init` still needs a `readbyte` function; it is simply unused while a
+  flat ROM is set. Skip this call if your bytecode lives somewhere that can't
+  be addressed directly (SD card, external flash) and keep using `readbyte`.
+- `ULVM_run(&vm, budget)` executes up to `budget` instructions per call
+  (returns nonzero once the program has exited), keeping the program counter
+  in a local variable. Use it instead of looping on
+  `ULVM_handlenextinstruction` (which still works and runs one instruction),
+  and do your own housekeeping (event polling, watchdog) between calls.
+
+On a desktop test loop this made a compute-heavy program run about 2.2x
+faster. Everything uses 32-bit integer math only (no `uint64_t`) and plain
+`switch` dispatch, so it builds on 8-bit AVR and similar compilers unchanged.
