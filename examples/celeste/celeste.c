@@ -12,7 +12,7 @@
 #define KEY_DASH (1 << 5)
 #define KEY_START (1 << 7)
 
-#define FRAME_MS 100
+#define FRAME_MS 16
 #define SCREEN_W 128
 #define SCREEN_H 64
 #define WORLD_W 512
