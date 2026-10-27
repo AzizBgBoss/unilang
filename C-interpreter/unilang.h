@@ -1,6 +1,8 @@
 #pragma once
 #include <stdint.h>
 #include <string.h>
+#include <limits.h>
+#include <float.h>
 
 /*
 unilang bytecode VM by AzizBgBoss
@@ -21,10 +23,10 @@ Operand encoding conventions (all big-endian):
 - flag 0 (graphics) (this will consume the last n bits of memory):
 0 - disable graphics
 1 - enable monochrome graphics (64x64) (1 x 64 x 64 = 4096 bits = 512 bytes)
-2 - enable 4-shade grayscale graphics (64x64) (4 x 64 x 64 = 16384 bits = 2048 bytes)
+2 - enable 4-bit grayscale graphics (16 shades, 64x64) (4 x 64 x 64 = 16384 bits = 2048 bytes)
 3 - enable 8-bit color graphics (64x64) (8 x 64 x 64 = 32768 bits = 4096 bytes)
 4 - enable monochrome graphics (128x64) (1 x 128 x 64 = 8192 bits = 1024 bytes)
-5 - enable 4-shade grayscale graphics (128x64) (4 x 128 x 64 = 32768 bits = 4096 bytes)
+5 - enable 4-bit grayscale graphics (16 shades, 128x64) (4 x 128 x 64 = 32768 bits = 4096 bytes)
 6 - enable 8-bit color graphics (128x64) (8 x 128 x 64 = 65536 bits = 8192 bytes)
 
 - flag 1 (keyboard) (this will consume the last n bits of memory (after graphics if it's used)) (Only gets supported once graphics are supported and on):
@@ -191,6 +193,9 @@ enum OP_CODES
     OP_SRANDREG,        // set the unilang propriatary pseudo-random function seed to the value in the reg - parameters: reg(1)
     OP_DRAWSTRING,      // draw a set of characters from memory (RAM or ROM) at a certain position using the 4x6 font included with auto wrapping, returns the next glyph x and y - parameters: regx(1), regy(1), regcolor(1), regaddr(1), reglen(1), src(1) [0=ram,1=rom], regreturnx(1), regreturny(1)
     OP_NUMTOSTR,        // convert a number in a register to ASCII decimal digits written into RAM, result length into a register - parameters: reg(1), addr(4), reglen(1)
+    OP_FLOATOP,         // IEEE-754 float arithmetic/comparison - parameters: op(1), format(1), reg_left_addr(1), reg_right_addr(1), reg_dest_addr(1)
+    OP_FLOATCAST,       // numeric conversion/copy - parameters: src_format(1), dst_format(1), reg_src_addr(1), reg_dst_addr(1)
+    OP_ROMREAD64 = 0x23, // read 8 bytes from ROM into two registers - parameters: reg_addr(1), reg_hi(1), reg_lo(1)
 
     // Direct Register & Memory Operations
     OP_SETREG = 0x40, // reg = val - parameters: reg(1), val(4)
@@ -240,6 +245,10 @@ enum OP_CODES
     OP_LEREG,  // dst = r1 <= r2 - parameters: r1(1), r2(1), dst(1)
     OP_GEREG,  // dst = r1 >= r2 - parameters: r1(1), r2(1), dst(1)
     OP_OUTREG, // print a register's full numeric value - parameters: reg(1)
+    OP_SDIVREG = 0x6D, // signed 32-bit division
+    OP_SMODREG, // signed 32-bit remainder
+    OP_SSHRREG, // arithmetic right shift
+    OP_OUTREGSIGNED, // print a signed 32-bit register
 
     // Program Control
     OP_EXIT = 0xFF // exit the program - parameters: none
@@ -450,6 +459,19 @@ static inline void ulvm_print_uint(UnilangVM *vm, uint32_t v)
         vm->outputchar(buf[--n]);
 }
 
+static inline void ulvm_print_int(UnilangVM *vm, int32_t value)
+{
+    uint32_t magnitude;
+    if (value < 0)
+    {
+        vm->outputchar('-');
+        magnitude = 0u - (uint32_t)value;
+    }
+    else
+        magnitude = (uint32_t)value;
+    ulvm_print_uint(vm, magnitude);
+}
+
 static inline void ulvm_print_hex_nibble(UnilangVM *vm, uint8_t n)
 {
     vm->outputchar((char)(n < 10 ? '0' + n : 'a' + (n - 10)));
@@ -507,6 +529,143 @@ static inline void ulvm_store_memory(UnilangVM *vm, uint32_t addr, uint8_t size,
         vm->mem[addr + 1] = (uint8_t)(value >> 16);
         vm->mem[addr + 2] = (uint8_t)(value >> 8);
         vm->mem[addr + 3] = (uint8_t)value;
+        break;
+    default:
+        break;
+    }
+}
+
+static inline uint64_t ulvm_load_memory64(UnilangVM *vm, uint32_t addr)
+{
+    if (!ULVM_INBOUNDS(addr, 8))
+        return 0;
+    return ((uint64_t)ulvm_load_memory(vm, addr, 4) << 32)
+        | ulvm_load_memory(vm, addr + 4, 4);
+}
+
+static inline void ulvm_store_memory64(UnilangVM *vm, uint32_t addr, uint64_t value)
+{
+    if (!ULVM_INBOUNDS(addr, 8))
+        return;
+    ulvm_store_memory(vm, addr, 4, (uint32_t)(value >> 32));
+    ulvm_store_memory(vm, addr + 4, 4, (uint32_t)value);
+}
+
+static inline uint8_t ulvm_numeric_format_valid(uint8_t format)
+{
+    return format >= 1 && format <= 8;
+}
+
+static inline uint8_t ulvm_ieee_format_supported(uint8_t format)
+{
+    if (format == 7)
+        return FLT_RADIX == 2 && sizeof(float) == 4 && FLT_MANT_DIG == 24 && FLT_MAX_EXP == 128;
+    if (format == 8)
+        return FLT_RADIX == 2 && sizeof(double) == 8 && DBL_MANT_DIG == 53 && DBL_MAX_EXP == 1024;
+    return 1;
+}
+
+static inline void ulvm_cast_integer(UnilangVM *vm, uint32_t src, uint8_t src_format,
+                                     uint32_t dest, uint8_t dest_format)
+{
+    int64_t value = 0;
+    switch (src_format)
+    {
+    case 1: value = (int8_t)ulvm_load_memory(vm, src, 1); break;
+    case 2: value = ulvm_load_memory(vm, src, 1); break;
+    case 3: value = (int16_t)ulvm_load_memory(vm, src, 2); break;
+    case 4: value = ulvm_load_memory(vm, src, 2); break;
+    case 5: value = (int32_t)ulvm_load_memory(vm, src, 4); break;
+    case 6: value = ulvm_load_memory(vm, src, 4); break;
+    default: return;
+    }
+
+    switch (dest_format)
+    {
+    case 1:
+    case 2: ulvm_store_memory(vm, dest, 1, (uint8_t)value); break;
+    case 3:
+    case 4: ulvm_store_memory(vm, dest, 2, (uint16_t)value); break;
+    case 5:
+    case 6: ulvm_store_memory(vm, dest, 4, (uint32_t)value); break;
+    default: break;
+    }
+}
+
+static inline double ulvm_load_numeric(UnilangVM *vm, uint32_t addr, uint8_t format)
+{
+    uint32_t raw;
+    uint64_t raw64;
+    float f;
+    double d;
+    switch (format)
+    {
+    case 1: return (double)(int8_t)ulvm_load_memory(vm, addr, 1);
+    case 2: return (double)ulvm_load_memory(vm, addr, 1);
+    case 3: return (double)(int16_t)ulvm_load_memory(vm, addr, 2);
+    case 4: return (double)ulvm_load_memory(vm, addr, 2);
+    case 5: return (double)(int32_t)ulvm_load_memory(vm, addr, 4);
+    case 6: return (double)ulvm_load_memory(vm, addr, 4);
+    case 7:
+        raw = ulvm_load_memory(vm, addr, 4);
+        memcpy(&f, &raw, sizeof(f));
+        return (double)f;
+    case 8:
+        raw64 = ulvm_load_memory64(vm, addr);
+        memcpy(&d, &raw64, sizeof(d));
+        return d;
+    default:
+        return 0.0;
+    }
+}
+
+static inline void ulvm_store_numeric(UnilangVM *vm, uint32_t addr, uint8_t format, double value)
+{
+    uint32_t raw;
+    uint64_t raw64;
+    float f;
+    double d;
+    int32_t si32;
+    switch (format)
+    {
+    case 1:
+        ulvm_store_memory(vm, addr, 1,
+            (value > -129.0 && value < 128.0) ? (uint8_t)(int8_t)value : 0);
+        break;
+    case 2:
+        ulvm_store_memory(vm, addr, 1,
+            (value > -1.0 && value < 256.0) ? (uint8_t)value : 0);
+        break;
+    case 3:
+        ulvm_store_memory(vm, addr, 2,
+            (value > -32769.0 && value < 32768.0) ? (uint16_t)(int16_t)value : 0);
+        break;
+    case 4:
+        ulvm_store_memory(vm, addr, 2,
+            (value > -1.0 && value < 65536.0) ? (uint16_t)value : 0);
+        break;
+    case 5:
+        if (value > -2147483649.0 && value < 2147483648.0)
+        {
+            si32 = (int32_t)value;
+            ulvm_store_memory(vm, addr, 4, (uint32_t)si32);
+        }
+        else
+            ulvm_store_memory(vm, addr, 4, 0);
+        break;
+    case 6:
+        ulvm_store_memory(vm, addr, 4,
+            (value > -1.0 && value < 4294967296.0) ? (uint32_t)value : 0);
+        break;
+    case 7:
+        f = (float)value;
+        memcpy(&raw, &f, sizeof(raw));
+        ulvm_store_memory(vm, addr, 4, raw);
+        break;
+    case 8:
+        d = value;
+        memcpy(&raw64, &d, sizeof(raw64));
+        ulvm_store_memory64(vm, addr, raw64);
         break;
     default:
         break;
@@ -854,6 +1013,20 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
         break;
     }
 
+    case OP_ROMREAD64:
+    {
+        uint8_t ra = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rhi = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rlo = (uint8_t)ULVM_NEXTBYTE();
+        uint64_t value = 0;
+        uint32_t addr = ULVM_R(ra);
+        for (uint8_t i = 0; i < 8; i++)
+            value = (value << 8) | (uint64_t)ulvm_rom_byte(vm, addr + i);
+        ULVM_R(rhi) = (uint32_t)(value >> 32);
+        ULVM_R(rlo) = (uint32_t)value;
+        break;
+    }
+
     case OP_SETPIXEL:
     {
         uint8_t rx = (uint8_t)ULVM_NEXTBYTE();
@@ -948,6 +1121,94 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
         break;
     }
 
+    case OP_FLOATOP:
+    {
+        uint8_t operation = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t format = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rleft = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rright = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rdest = (uint8_t)ULVM_NEXTBYTE();
+        if ((format != 7 && format != 8) || operation < 1 || operation > 11
+            || !ulvm_ieee_format_supported(format))
+        {
+            vm->faulted = 1;
+            vm->fault_pc = instruction_pc;
+            vm->fault_opcode = opbyte;
+            vm->running = 0;
+            break;
+        }
+
+        double left = ulvm_load_numeric(vm, ULVM_R(rleft), format);
+        double right = ulvm_load_numeric(vm, ULVM_R(rright), format);
+        uint32_t dest = ULVM_R(rdest);
+        if (operation >= 6)
+        {
+            uint8_t result = operation == 6 ? left == right
+                : operation == 7 ? left != right
+                : operation == 8 ? left < right
+                : operation == 9 ? left > right
+                : operation == 10 ? left <= right
+                : left >= right;
+            ulvm_store_memory(vm, dest, 1, result);
+            break;
+        }
+
+        if (format == 7)
+        {
+            float a = (float)left, b = (float)right, result;
+            switch (operation)
+            {
+            case 1: result = a + b; break;
+            case 2: result = a - b; break;
+            case 3: result = a * b; break;
+            case 4: result = a / b; break;
+            case 5: result = -a; break;
+            default: result = 0.0f; break;
+            }
+            ulvm_store_numeric(vm, dest, 7, (double)result);
+        }
+        else
+        {
+            double result;
+            switch (operation)
+            {
+            case 1: result = left + right; break;
+            case 2: result = left - right; break;
+            case 3: result = left * right; break;
+            case 4: result = left / right; break;
+            case 5: result = -left; break;
+            default: result = 0.0; break;
+            }
+            ulvm_store_numeric(vm, dest, 8, result);
+        }
+        break;
+    }
+
+    case OP_FLOATCAST:
+    {
+        uint8_t src_format = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t dst_format = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rsrc = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rdst = (uint8_t)ULVM_NEXTBYTE();
+        if (!ulvm_numeric_format_valid(src_format) || !ulvm_numeric_format_valid(dst_format)
+            || !ulvm_ieee_format_supported(src_format) || !ulvm_ieee_format_supported(dst_format))
+        {
+            vm->faulted = 1;
+            vm->fault_pc = instruction_pc;
+            vm->fault_opcode = opbyte;
+            vm->running = 0;
+            break;
+        }
+        if (src_format <= 6 && dst_format <= 6)
+        {
+            ulvm_cast_integer(vm, ULVM_R(rsrc), src_format, ULVM_R(rdst), dst_format);
+            break;
+        }
+        double value = ulvm_load_numeric(vm, ULVM_R(rsrc), src_format);
+        ulvm_store_numeric(vm, ULVM_R(rdst), dst_format, value);
+        break;
+    }
+
     case OP_SETREG:
     {
         uint8_t r = (uint8_t)ULVM_NEXTBYTE();
@@ -1006,6 +1267,9 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
     case OP_GTREG:
     case OP_LEREG:
     case OP_GEREG:
+    case OP_SDIVREG:
+    case OP_SMODREG:
+    case OP_SSHRREG:
     {
         uint8_t r1 = (uint8_t)ULVM_NEXTBYTE();
         uint8_t r2 = (uint8_t)ULVM_NEXTBYTE();
@@ -1033,6 +1297,24 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
         case OP_GTREG: ULVM_R(dst) = (a > b) ? 1u : 0u; break;
         case OP_LEREG: ULVM_R(dst) = (a <= b) ? 1u : 0u; break;
         case OP_GEREG: ULVM_R(dst) = (a >= b) ? 1u : 0u; break;
+        case OP_SDIVREG:
+            if ((int32_t)b != 0)
+                ULVM_R(dst) = (a == 0x80000000u && (int32_t)b == -1)
+                    ? a : (uint32_t)((int32_t)a / (int32_t)b);
+            break;
+        case OP_SMODREG:
+            if ((int32_t)b != 0)
+                ULVM_R(dst) = (a == 0x80000000u && (int32_t)b == -1)
+                    ? 0u : (uint32_t)((int32_t)a % (int32_t)b);
+            break;
+        case OP_SSHRREG:
+            if (b >= 32)
+                ULVM_R(dst) = (a & 0x80000000u) ? UINT32_MAX : 0u;
+            else if (b == 0)
+                ULVM_R(dst) = a;
+            else
+                ULVM_R(dst) = (a >> b) | ((a & 0x80000000u) ? (UINT32_MAX << (32 - b)) : 0u);
+            break;
         default: break;
         }
         break;
@@ -1105,6 +1387,13 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
     {
         uint8_t r = (uint8_t)ULVM_NEXTBYTE();
         ulvm_print_uint(vm, ULVM_R(r));
+        break;
+    }
+
+    case OP_OUTREGSIGNED:
+    {
+        uint8_t r = (uint8_t)ULVM_NEXTBYTE();
+        ulvm_print_int(vm, (int32_t)ULVM_R(r));
         break;
     }
 

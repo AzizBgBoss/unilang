@@ -7,39 +7,39 @@
 #define KEY_SELECT (1 << 6)
 #define KEY_START (1 << 7)
 
-uint8 player_x = 30;
-uint8 player_y = 56;
-uint8 player_w = 3;
-uint8 player_h = 5;
-uint8 jumpTimer = 0;
+uint8_t player_x = 30;
+uint8_t player_y = 56;
+uint8_t player_w = 3;
+uint8_t player_h = 5;
+uint8_t jumpTimer = 0;
 
-uint32 score = 0;
-uint8 fallspeed = 1;
+uint32_t score = 0;
+uint8_t fallspeed = 1;
 char scorebuf[8];
 
-uint8 draw_player()
+uint8_t draw_player()
 {
     drawchar('I', player_x, player_y);
 }
 
 #define ENEMIES 5
-uint8 enemies[ENEMIES * 2];
+uint8_t enemies[ENEMIES * 2];
 #define ENEMY_X(e) enemies[e * 2]
 #define ENEMY_Y(e) enemies[e * 2 + 1]
 
-uint8 draw_enemies()
+uint8_t draw_enemies()
 {
-    for (uint8 i = 0; i < ENEMIES; i++)
+    for (uint8_t i = 0; i < ENEMIES; i++)
     {
         drawchar('A', ENEMY_X(i), ENEMY_Y(i));
     }
 }
 
-uint8 update_enemies()
+uint8_t update_enemies()
 {
-    for (uint8 i = 0; i < ENEMIES; i++)
+    for (uint8_t i = 0; i < ENEMIES; i++)
     {
-        uint8 ey = ENEMY_Y(i);
+        uint8_t ey = ENEMY_Y(i);
         ey = ey + fallspeed;
         if (ey >= 64)
         {
@@ -50,7 +50,7 @@ uint8 update_enemies()
     }
 }
 
-uint8 abs_diff(uint8 a, uint8 b)
+uint8_t abs_diff(uint8_t a, uint8_t b)
 {
     if (a > b)
     {
@@ -61,10 +61,10 @@ uint8 abs_diff(uint8 a, uint8 b)
 
 bool check_collision()
 {
-    for (uint8 i = 0; i < ENEMIES; i++)
+    for (uint8_t i = 0; i < ENEMIES; i++)
     {
-        uint8 dx = abs_diff(player_x, ENEMY_X(i));
-        uint8 dy = abs_diff(player_y, ENEMY_Y(i));
+        uint8_t dx = abs_diff(player_x, ENEMY_X(i));
+        uint8_t dy = abs_diff(player_y, ENEMY_Y(i));
         if (dx < 5)
         {
             if (dy < 7)
@@ -76,18 +76,18 @@ bool check_collision()
     return false;
 }
 
-uint8 draw_hud()
+uint8_t draw_hud()
 {
-    for (uint8 i = 0; i < 8; i++)
+    for (uint8_t i = 0; i < 8; i++)
     {
         scorebuf[i] = ' ';
     }
-    uint8 slen = numtostr(score, scorebuf);
+    uint8_t slen = numtostr(score, scorebuf);
     drawstring("SCORE", 0, 0);
     drawstring(scorebuf, 34, 0);
 }
 
-uint32 main()
+uint32_t main()
 {
     if (isflagsupported(0, 1))
     {
@@ -119,7 +119,7 @@ uint32 main()
         jumpTimer = 0;
         score = 0;
         fallspeed = 1;
-        for (uint8 i = 0; i < ENEMIES; i++)
+        for (uint8_t i = 0; i < ENEMIES; i++)
         {
             ENEMY_X(i) = rand(0, 60);
             ENEMY_Y(i) = (64 / ENEMIES) * i;
@@ -128,7 +128,7 @@ uint32 main()
         bool alive = true;
         while (alive)
         {
-            uint8 keys = getkey();
+            uint8_t keys = getkey();
 
             // Gravity
             if (jumpTimer > 0)
@@ -200,7 +200,7 @@ uint32 main()
             drawstring("GAME OVER", 8, 24);
             draw_hud();
             refreshscreen();
-            uint8 k = getkey();
+            uint8_t k = getkey();
             if (k & KEY_START)
             {
                 waiting = false;

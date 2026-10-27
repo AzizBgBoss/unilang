@@ -1,5 +1,8 @@
-// Celeste-style precision platformer for the uniClang VM (64x64, 1-bit graphics).
-// Controls: Left/Right walk, C jump, V + direction (Left/Right/Up) dash, Enter exits at the summit.
+// Celeste-style precision platformer for the uniClang VM (128x64, RGB332, 1:1 pixels).
+// Scrolling 512x128 world, subpixel physics, 8-way dash, variable jump, coyote time,
+// jump buffering, corner correction, parallax background.
+// Controls: Left/Right run, C jump (hold = higher), V + direction dash (8-way),
+//           Down while falling = fast fall, Enter exits at the summit.
 
 #define KEY_UP (1)
 #define KEY_DOWN (1 << 1)
@@ -9,143 +12,175 @@
 #define KEY_DASH (1 << 5)
 #define KEY_START (1 << 7)
 
-#define FRAME_MS 16
-#define MAX_PARTICLES 10
-#define NUM_PLATFORMS 6
-#define NUM_STARS 8
-#define NUM_SNOW 6
-#define SPIKE_X 28
-#define SPIKE_Y 47
-#define SPIKE_W 11
-#define CHECKPOINT_X 45
-#define CHECKPOINT_Y 25
+#define FRAME_MS 100
+#define SCREEN_W 128
+#define SCREEN_H 64
+#define WORLD_W 512
+#define WORLD_H 128
+#define NP 13
+#define NS 3
+#define NCP 3
+#define MAXP 16
 
-// ---- level data (lives in ROM) --------------------------------------------
-const uint8 plat_x[NUM_PLATFORMS] = {0, 7, 37, 5, 34, 7};
-const uint8 plat_y[NUM_PLATFORMS] = {50, 40, 31, 22, 14, 8};
-const uint8 plat_w[NUM_PLATFORMS] = {64, 17, 17, 16, 21, 18};
-const uint8 plat_h[NUM_PLATFORMS] = {4, 2, 2, 2, 2, 2};
+// physics, 8 fractional bits (256 = 1 px per frame)
+#define MAXRUN 384
+#define RUN_ACCEL 71
+#define RUN_REDUCE 28
+#define AIR_MULT 166
+#define GRAVITY 64
+#define MAXFALL 683
+#define FASTFALL 1024
+#define JUMP_SPEED 448
+#define HALF_GRAV_THRESH 170
+#define DASH_SPEED 1024
+#define DASH_DIAG 724
 
-const uint8 star_x[NUM_STARS] = {6, 22, 31, 47, 58, 14, 40, 27};
-const uint8 star_y[NUM_STARS] = {4, 9, 2, 12, 19, 6, 16, 25};
+// RGB332 palette
+#define C_SKY0 0x01
+#define C_SKY1 0x05
+#define C_SKY2 0x29
+#define C_SKY3 0x4A
+#define C_FAR 0x25
+#define C_NEAR 0x49
+#define C_SNOW 0x92
+#define C_AUR1 0x1E
+#define C_AUR2 0x0D
+#define C_ICE 0xBF
+#define C_ROCK 0x6E
+#define C_DARK 0x49
+#define C_RED 0xE0
+#define C_HAIR 0xE5
+#define C_HAIR_EMPTY 0x4F
+#define C_SKIN 0xF6
+#define C_DRESS 0x33
+#define C_PANTS 0x24
+#define C_GOLD 0xFC
+#define C_WHITE 0xFF
+#define C_CYAN 0x1F
 
-// 5x6 sprite, one byte per row (bit 4 = leftmost pixel)
-const uint8 hair_ready[2] = {0x0E, 0x1F};
-const uint8 hair_empty[2] = {0x0E, 0x11};  // hollow hair = no dash left
-const uint8 body[2] = {0x0E, 0x0E};
-const uint8 legs[8] = {0x0A, 0x1B,   // standing
-                       0x0A, 0x1A,   // walk A
-                       0x0A, 0x0B,   // walk B
-                       0x0A, 0x0A};  // in the air
+// ---- level data ----------------------------------------------------------------
+const uint16_t plat_x[NP] = {0, 128, 184, 240, 296, 376, 424, 472, 424, 368, 312, 256, 192};
+const uint8_t plat_y[NP] = {112, 104, 96, 88, 80, 72, 64, 56, 40, 32, 24, 16, 24};
+const uint16_t plat_w[NP] = {104, 32, 32, 24, 48, 24, 32, 40, 24, 24, 32, 24, 40};
+const uint8_t plat_h[NP] = {16, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8};
 
-const uint8 burst_dx[8] = {0, 1, 2, 0, 2, 0, 1, 2};  // 0/1/2 means -1/0/+1
-const uint8 burst_dy[8] = {0, 0, 0, 1, 1, 2, 2, 2};
+const uint16_t spk_x[NS] = {300, 436, 200};
+const uint8_t spk_y[NS] = {76, 60, 92};
+const uint8_t spk_w[NS] = {16, 12, 8};
 
-// ---- state ------------------------------------------------------------------
-uint8 player_x = 3;
-uint8 player_y = 44;
-uint8 previous_y = 44;
-uint8 grounded = 1;
-uint8 jump_left = 0;
-uint8 dash_left = 0;
-uint8 dash_ready = 1;
-uint8 dash_up = 0;
-uint8 dash_leftward = 0;
-uint8 checkpoint_x = 3;
-uint8 checkpoint_y = 44;
-uint8 facing = 1;
-uint8 leg_pose = 0;
-uint8 walking = 0;
-uint8 jump_buffer = 0;   // jump pressed shortly before landing still counts
-uint8 coyote = 0;        // jump still allowed shortly after leaving a ledge
-uint8 fall_time = 0;     // frames spent falling (gravity speeds up)
-uint8 dead_timer = 0;
-uint8 deaths = 0;
-uint8 blink = 0;
-uint8 refill_flash = 0;
-uint8 shake_x = 0;
-uint8 shake_y = 0;
-uint8 prev_keys = 0;
+const uint16_t cp_x[NCP] = {24, 330, 372};
+const uint8_t cp_y[NCP] = {105, 73, 25};
+
+const uint8_t star_x[8] = {6, 22, 31, 47, 58, 14, 40, 27};
+
+// ---- state ------------------------------------------------------------------------
+int px = 24 * 256;
+int py = 105 * 256;
+int vx = 0;
+int vy = 0;
+int cam_x = 0;
+int cam_y = 64;
+int shk_x = 0;
+int shk_y = 0;
+int shake = 0;
+uint8_t facing = 1;
+uint8_t grounded = 1;
+uint8_t dash_ready = 1;
+uint8_t dash_t = 0;
+int dash_dx = 1;
+int dash_dy = 0;
+uint8_t coyote = 0;
+uint8_t jbuf = 0;
+uint8_t var_jump = 0;
+uint8_t dead_timer = 0;
+uint8_t deaths = 0;
+uint8_t cp = 0;
+uint8_t blink = 0;
+uint8_t flash = 0;
+uint8_t prev_keys = 0;
 bool playing = true;
 
-uint16 frame = 0;
-uint32 frame_start = 0;
-uint32 fps_start = 0;
-uint16 fps_frames = 0;
-uint16 fps_shown = 0;
+uint16_t frame = 0;
+uint32_t frame_start = 0;
 
-uint8 part_next = 0;
-uint8 part_x[MAX_PARTICLES];
-uint8 part_y[MAX_PARTICLES];
-uint8 part_dx[MAX_PARTICLES];
-uint8 part_dy[MAX_PARTICLES];
-uint8 part_life[MAX_PARTICLES];
-uint8 snow_x[NUM_SNOW];
-uint8 snow_y[NUM_SNOW];
+uint8_t pn = 0;
+int pp_x[MAXP];
+int pp_y[MAXP];
+int pp_vx[MAXP];
+int pp_vy[MAXP];
+uint8_t pp_life[MAXP];
+uint8_t pp_col[MAXP];
 
-// ---- drawing helpers ----------------------------------------------------------
-// All world drawing goes through plot(): it clips to the screen and applies the
-// screen shake, so nothing ever writes outside the 64x64 framebuffer.
-void plot(uint8 x, uint8 y, uint8 c)
+// ---- drawing ------------------------------------------------------------------------
+// screen-space clipped filled rectangle
+void srect(int x, int y, int w, int h, uint8_t c)
 {
-    if (x + shake_x < 64 && y + shake_y < 64)
+    int x0 = x;
+    int y0 = y;
+    int x1 = x + w;
+    int y1 = y + h;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > SCREEN_W) x1 = SCREEN_W;
+    if (y1 > SCREEN_H) y1 = SCREEN_H;
+    int yy = y0;
+    while (yy < y1)
     {
-        setpixel(x + shake_x, y + shake_y, c);
+        int xx = x0;
+        while (xx < x1)
+        {
+            setpixel(xx, yy, c);
+            xx++;
+        }
+        yy++;
     }
 }
 
-void draw_num2(uint8 n, uint8 x, uint8 y)
+// world-space rectangle (camera + shake applied)
+void rect(int x, int y, int w, int h, uint8_t c)
 {
-    if (n > 99)
-    {
-        n = 99;
-    }
-    drawchar('0' + n / 10, x, y);
-    drawchar('0' + n % 10, x + 4, y);
+    srect(x - cam_x + shk_x, y - cam_y + shk_y, w, h, c);
 }
 
-// Particles live in a small ring buffer: spawning overwrites the oldest one,
-// so there's no slot search (keeps the code small).
-void spawn_particle(uint8 x, uint8 y, uint8 dx, uint8 dy, uint8 life)
+void spawn(int x, int y, int dx, int dy, uint8_t life, uint8_t col)
 {
-    part_x[part_next] = x;
-    part_y[part_next] = y;
-    part_dx[part_next] = dx;
-    part_dy[part_next] = dy;
-    part_life[part_next] = life;
-    part_next++;
-    if (part_next >= MAX_PARTICLES)
-    {
-        part_next = 0;
-    }
+    pp_x[pn] = x << 4;
+    pp_y[pn] = y << 4;
+    pp_vx[pn] = dx;
+    pp_vy[pn] = dy;
+    pp_life[pn] = life;
+    pp_col[pn] = col;
+    pn++;
+    if (pn >= MAXP) pn = 0;
 }
 
-void burst(uint8 x, uint8 y, uint8 life)
+void burst(int x, int y, uint8_t col)
 {
-    uint8 d = 0;
+    int d = 0;
     while (d < 8)
     {
-        spawn_particle(x, y, burst_dx[d], burst_dy[d], life + (d & 1) * 3);
+        int ax = (d & 1) ? 0 : ((d & 2) ? 14 : -14);
+        int ay = (d & 1) ? ((d & 2) ? 14 : -14) : 0;
+        if (d >= 4)
+        {
+            ax = (d & 1) ? 10 : -10;
+            ay = (d & 2) ? 10 : -10;
+        }
+        spawn(x, y, ax, ay, 14 + (d & 3), col);
         d++;
     }
 }
 
-void dust()
-{
-    spawn_particle(player_x, player_y + 5, 0, 0, 5);
-    spawn_particle(player_x + 4, player_y + 5, 2, 0, 5);
-}
-
 void update_particles()
 {
-    uint8 i = 0;
-    while (i < MAX_PARTICLES)
+    uint8_t i = 0;
+    while (i < MAXP)
     {
-        if (part_life[i] > 0)
+        if (pp_life[i] > 0)
         {
-            part_x[i] = part_x[i] + part_dx[i] - 1;
-            part_y[i] = part_y[i] + part_dy[i] - 1;
-            part_life[i]--;
+            pp_x[i] += pp_vx[i];
+            pp_y[i] += pp_vy[i];
+            pp_life[i]--;
         }
         i++;
     }
@@ -153,515 +188,433 @@ void update_particles()
 
 void draw_particles()
 {
-    uint8 i = 0;
-    while (i < MAX_PARTICLES)
+    uint8_t i = 0;
+    while (i < MAXP)
     {
-        // flicker while fading out
-        if (part_life[i] > 0 && (part_life[i] > 6 || (part_life[i] & 1)))
+        if (pp_life[i] > 0 && (pp_life[i] > 5 || (pp_life[i] & 1)))
         {
-            plot(part_x[i], part_y[i], 1);
+            rect(pp_x[i] >> 4, pp_y[i] >> 4, 1 + (pp_life[i] > 9), 1 + (pp_life[i] > 9), pp_col[i]);
         }
         i++;
     }
 }
 
-void update_snow()
+void draw_background()
 {
-    uint8 i = 0;
-    while (i < NUM_SNOW)
-    {
-        if (frame % (3 + (i & 1)) == 0)
-        {
-            snow_y[i]++;
-            if ((frame >> 5) & 1)
-            {
-                snow_x[i]++;
-            }
-            else
-            {
-                snow_x[i]--;
-            }
-        }
-        if (snow_x[i] >= 64 || snow_y[i] >= 50)
-        {
-            snow_x[i] = rand(0, 64);
-            snow_y[i] = 0;
-        }
-        i++;
-    }
-}
+    srect(0, 0, SCREEN_W, 16, C_SKY0);
+    srect(0, 16, SCREEN_W, 16, C_SKY1);
+    srect(0, 32, SCREEN_W, 16, C_SKY2);
+    srect(0, 48, SCREEN_W, 16, C_SKY3);
 
-void draw_sky()
-{
-    uint8 i = 0;
-    while (i < NUM_STARS)
+    int i = 0;
+    while (i < 8)
     {
-        if (((frame >> 4) + i * 5) % 7 != 0)  // each star twinkles off briefly
-        {
-            plot(star_x[i], star_y[i], 1);
-        }
+        int sxp = star_x[i] * 16 - (cam_x >> 4);
+        sxp = ((sxp % SCREEN_W) + SCREEN_W) % SCREEN_W;
+        if (((frame >> 4) + i * 5) % 7 != 0)
+            srect(sxp, 3 + i * 4, 1, 1, C_WHITE);
         i++;
     }
-    i = 0;
-    while (i < NUM_SNOW)
-    {
-        plot(snow_x[i], snow_y[i], 1);
-        i++;
-    }
-}
 
-// solid top edge, checkerboard underneath
-void draw_platform(uint8 x, uint8 y, uint8 w, uint8 h)
-{
-    uint8 r = 0;
-    while (r < h)
+    // aurora ribbons
+    int x = 0;
+    while (x < SCREEN_W)
     {
-        uint8 i = 0;
-        while (i < w)
-        {
-            if (r == 0 || ((x + i + r) & 1) == 0)
-            {
-                plot(x + i, y + r, 1);
-            }
-            i++;
-        }
-        r++;
+        int ph = (x * 2 + (cam_x >> 3) + frame) % 64;
+        if (ph > 32) ph = 64 - ph;
+        srect(x, 8 + ph / 3, 2, 3, C_AUR1);
+        srect(x, 11 + ph / 3, 2, 2, C_AUR2);
+        x += 2;
+    }
+
+    // parallax mountains
+    int base = 64 - (cam_y >> 2);
+    int sx = 0;
+    while (sx < SCREEN_W)
+    {
+        int wx = sx + (cam_x >> 2);
+        int p = wx % 96;
+        if (p > 48) p = 96 - p;
+        int top = base - 14 - p / 3;
+        srect(sx, top, 1, 64, C_FAR);
+        srect(sx, top, 1, 2, C_SNOW);
+        sx++;
     }
 }
 
 void draw_spikes()
 {
-    uint8 k = 0;
-    while (k < 3)
+    uint8_t i = 0;
+    while (i < NS)
     {
-        uint8 r = 0;
-        while (r < 3)
+        int k = 0;
+        while (k * 4 < spk_w[i])
         {
-            uint8 c = 0;
-            while (c < 3)
-            {
-                if (r > 0 || c == 1)
-                {
-                    plot(SPIKE_X + k * 4 + c, SPIKE_Y + r, 1);
-                }
-                c++;
-            }
-            r++;
+            rect(spk_x[i] + k * 4, spk_y[i] + 2, 4, 2, C_RED);
+            rect(spk_x[i] + k * 4 + 1, spk_y[i], 2, 2, C_RED);
+            k++;
         }
-        k++;
+        i++;
     }
 }
 
-void draw_flag(uint8 x, uint8 y, uint8 full)
+void draw_flag(int x, int y, uint8_t on)
 {
-    uint8 i = 0;
-    while (i < 6)
-    {
-        plot(x, y + i, 1);
-        i++;
-    }
-    uint8 rows = 1;
-    if (full)
-    {
-        rows = 3;
-    }
-    uint8 r = 0;
-    while (r < rows)
-    {
-        uint8 w = 3 - r;
-        if (!full)
-        {
-            w = 1;
-        }
-        else if (((frame >> 3) & 1) && w > 1)
-        {
-            w--;  // the pennant waves
-        }
-        uint8 c = 0;
-        while (c < w)
-        {
-            plot(x + 1 + c, y + r, 1);
-            c++;
-        }
-        r++;
-    }
+    rect(x, y - 10, 1, 10, C_GOLD);
+    uint8_t w = on ? 5 - ((frame >> 3) & 1) : 3;
+    rect(x + 1, y - 10, w, 3, on ? C_HAIR : C_DARK);
+    rect(x + 1, y - 7, w - 1, 2, on ? C_HAIR : C_DARK);
 }
 
 void draw_level()
 {
-    uint8 i = 0;
-    while (i < NUM_PLATFORMS)
+    uint8_t i = 0;
+    while (i < NP)
     {
-        draw_platform(plat_x[i], plat_y[i], plat_w[i], plat_h[i]);
+        rect(plat_x[i], plat_y[i], plat_w[i], plat_h[i], C_ROCK);
+        rect(plat_x[i], plat_y[i] + plat_h[i] - 2, plat_w[i], 2, C_DARK);
+        rect(plat_x[i], plat_y[i], plat_w[i], 2, C_ICE);
         i++;
     }
     draw_spikes();
-    draw_flag(50, 25, checkpoint_y == CHECKPOINT_Y);  // checkpoint
-    draw_flag(15, 2, 1);                              // summit
+    i = 1;
+    while (i < NCP)
+    {
+        draw_flag(cp_x[i] + 3, cp_y[i] + 7, cp >= i);
+        i++;
+    }
+    draw_flag(216, 24, 1);
 }
 
 void draw_player()
 {
-    uint8 row = 0;
-    while (row < 6)
-    {
-        uint8 bits;
-        if (row < 2)
-        {
-            if (dash_ready)
-            {
-                bits = hair_ready[row];
-            }
-            else
-            {
-                bits = hair_empty[row];
-            }
-        }
-        else if (row < 4)
-        {
-            bits = body[row - 2];
-        }
-        else
-        {
-            bits = legs[leg_pose * 2 + row - 4];
-        }
-        uint8 col = 0;
-        while (col < 5)
-        {
-            uint8 bit = col;
-            if (facing)
-            {
-                bit = 4 - col;
-            }
-            if ((bits >> bit) & 1)
-            {
-                plot(player_x + col, player_y + row, 1);
-            }
-            col++;
-        }
-        row++;
-    }
-    plot(player_x + 1 + facing * 2, player_y + 2, 0);  // eye
-    if (dash_ready)
-    {
-        plot(player_x + 5 - facing * 6, player_y + 1, 1);  // ponytail trails behind
-    }
+    int x = px >> 8;
+    int y = py >> 8;
+    uint8_t hair = dash_ready ? C_HAIR : C_HAIR_EMPTY;
+    uint8_t hc = dash_t > 0 ? C_WHITE : hair;
+    rect(x, y, 6, 3, hc);
+    rect(facing ? x - 1 : x + 6, y + 1 + (grounded ? 0 : 1), 1, 2, hc);
+    rect(x + 1, y + 2, 4, 2, C_SKIN);
+    rect(facing ? x + 4 : x + 1, y + 3, 1, 1, 0x02);
+    rect(x + 1, y + 4, 4, 2, dash_t > 0 ? C_WHITE : C_DRESS);
+    if (!grounded)
+        rect(x + 1, y + 6, 4, 1, C_PANTS);
+    else if (vx != 0)
+        rect(x + 1 + ((frame >> 2) & 1) * 2, y + 6, 2, 1, C_PANTS);
+    else
+        rect(x + 1, y + 6, 4, 1, C_PANTS);
 }
 
-void draw_hud()
+void draw_hud(uint8_t on)
 {
-    drawstring("FPS", 1, 57);
-    draw_num2(fps_shown, 14, 57);
-    drawchar('D', 26, 57);
-    draw_num2(deaths, 31, 57);
-    drawstring("DASH", 40, 57);
-    // dash pip: filled when ready, hollow when empty, blinks when it recharges
-    uint8 r = 0;
-    while (r < 5)
-    {
-        uint8 c = 0;
-        while (c < 5)
-        {
-            if (r == 0 || r == 4 || c == 0 || c == 4 || (dash_ready && (refill_flash & 2) == 0))
-            {
-                plot(57 + c, 58 + r, 1);
-            }
-            c++;
-        }
-        r++;
-    }
+    drawchar('D', 2, 2, C_HAIR);
+    drawchar('0' + deaths / 10, 8, 2, C_WHITE);
+    drawchar('0' + deaths % 10, 12, 2, C_WHITE);
+    srect(SCREEN_W - 9, 2, 7, 1, on ? C_GOLD : C_CYAN);
+    srect(SCREEN_W - 9, 8, 7, 1, on ? C_GOLD : C_CYAN);
+    srect(SCREEN_W - 9, 2, 1, 7, on ? C_GOLD : C_CYAN);
+    srect(SCREEN_W - 3, 2, 1, 7, on ? C_GOLD : C_CYAN);
+    if (on) srect(SCREEN_W - 8, 3, 5, 5, (flash & 2) ? C_WHITE : C_GOLD);
 }
 
-// ---- timing -------------------------------------------------------------------
-// Waits out the rest of the 16 ms frame (sleeping 1 ms at a time so a slow
-// device doesn't busy-spin) and keeps the FPS counter.
+// ---- timing ---------------------------------------------------------------------------
 void frame_wait()
 {
-    uint32 now = gettime();
+    uint32_t now = gettime();
     while (now - frame_start < FRAME_MS)
     {
         sleep(1);
         now = gettime();
     }
     if (now - frame_start > FRAME_MS * 4)
-    {
-        frame_start = now;  // fell far behind: resync instead of racing to catch up
-    }
+        frame_start = now;
     else
-    {
         frame_start = frame_start + FRAME_MS;
-    }
-    fps_frames++;
-    if (now - fps_start >= 1000)
-    {
-        fps_shown = fps_frames;
-        fps_frames = 0;
-        fps_start = now;
-    }
     frame++;
 }
 
-// ---- game logic ---------------------------------------------------------------
-bool overlaps(uint8 x, uint8 y, uint8 left, uint8 top, uint8 width, uint8 height)
+// ---- collision --------------------------------------------------------------------------
+// hitbox is 6 wide, 7 tall
+bool solid(int x, int y)
 {
-    return x + 5 > left && x < left + width && y + 6 > top && y < top + height;
+    if (x < 0 || x + 6 > WORLD_W) return true;
+    uint8_t i = 0;
+    while (i < NP)
+    {
+        if (x + 6 > (int)plat_x[i] && x < (int)plat_x[i] + (int)plat_w[i]
+            && y + 7 > (int)plat_y[i] && y < (int)plat_y[i] + (int)plat_h[i])
+            return true;
+        i++;
+    }
+    return false;
 }
 
-void try_land(uint8 left, uint8 top, uint8 width)
+bool hits(int x, int y, int l, int t, int w, int h)
 {
-    if (player_x + 5 > left && player_x < left + width
-        && previous_y + 6 <= top && player_y + 6 >= top)
+    return x + 6 > l && x < l + w && y + 7 > t && y < t + h;
+}
+
+int approach(int v, int t, int a)
+{
+    if (v < t)
     {
-        player_y = top - 6;
-        grounded = 1;
-        fall_time = 0;
-        if (!dash_ready)
-        {
-            refill_flash = 8;
-        }
-        dash_ready = 1;
+        v += a;
+        if (v > t) v = t;
     }
+    else
+    {
+        v -= a;
+        if (v < t) v = t;
+    }
+    return v;
+}
+
+void update_cam(uint8_t snap)
+{
+    int tx = (px >> 8) + 3 - 64 + (facing ? 14 : -14);
+    int ty = (py >> 8) + 3 - 32;
+    if (tx < 0) tx = 0;
+    if (tx > WORLD_W - SCREEN_W) tx = WORLD_W - SCREEN_W;
+    if (ty < 0) ty = 0;
+    if (ty > WORLD_H - SCREEN_H) ty = WORLD_H - SCREEN_H;
+    int dx = tx - cam_x;
+    int dy = ty - cam_y;
+    if (snap || (dx < 6 && dx > -6)) cam_x = tx; else cam_x += dx / 6;
+    if (snap || (dy < 6 && dy > -6)) cam_y = ty; else cam_y += dy / 5;
 }
 
 void respawn()
 {
-    player_x = checkpoint_x;
-    player_y = checkpoint_y;
-    previous_y = checkpoint_y;
-    jump_left = 0;
-    dash_left = 0;
-    dash_up = 0;
-    grounded = 1;
+    px = cp_x[cp] * 256;
+    py = cp_y[cp] * 256;
+    vx = 0;
+    vy = 0;
+    dash_t = 0;
     dash_ready = 1;
-    fall_time = 0;
+    var_jump = 0;
     coyote = 0;
-    jump_buffer = 0;
-    blink = 12;
+    jbuf = 0;
+    blink = 14;
+    update_cam(1);
 }
 
-void update_player(uint8 keys)
+void update_player(uint8_t keys)
 {
-    bool was_grounded = grounded;
-    previous_y = player_y;
+    int mx = 0;
+    if (keys & KEY_RIGHT) mx = 1;
+    if (keys & KEY_LEFT) mx = mx - 1;
+    if (mx > 0) facing = 1;
+    if (mx < 0) facing = 0;
 
-    if (keys & KEY_LEFT)
-    {
-        facing = 0;
-    }
-    else if (keys & KEY_RIGHT)
-    {
-        facing = 1;
-    }
+    if ((keys & KEY_JUMP) && !(prev_keys & KEY_JUMP)) jbuf = 5;
+    else if (jbuf > 0) jbuf--;
+    if (grounded) coyote = 6;
+    else if (coyote > 0) coyote--;
 
-    // jump with a short buffer (press a little early) and coyote time (a little late)
-    if ((keys & KEY_JUMP) && !(prev_keys & KEY_JUMP))
+    // dash
+    if ((keys & KEY_DASH) && !(prev_keys & KEY_DASH) && dash_ready && dash_t == 0)
     {
-        jump_buffer = 4;
-    }
-    else if (jump_buffer > 0)
-    {
-        jump_buffer--;
-    }
-    if (grounded)
-    {
-        coyote = 3;
-    }
-    else if (coyote > 0)
-    {
-        coyote--;
-    }
-    if (jump_buffer > 0 && coyote > 0 && dash_left == 0)
-    {
-        jump_left = 8;
-        grounded = 0;
-        coyote = 0;
-        jump_buffer = 0;
-        fall_time = 0;
-        dust();
-    }
-
-    if ((keys & KEY_DASH) && dash_ready && dash_left == 0
-        && (keys & (KEY_UP | KEY_LEFT | KEY_RIGHT)))
-    {
-        dash_left = 4;
+        int dx = mx;
+        int dy = 0;
+        if (keys & KEY_UP) dy = -1;
+        if (keys & KEY_DOWN) dy = 1;
+        if (dx == 0 && dy == 0) dx = facing ? 1 : -1;
+        int sp = (dx != 0 && dy != 0) ? DASH_DIAG : DASH_SPEED;
+        dash_dx = dx;
+        dash_dy = dy;
+        vx = dx * sp;
+        vy = dy * sp;
+        dash_t = 8;
         dash_ready = 0;
-        dash_up = (keys & KEY_UP) != 0;
-        dash_leftward = (keys & KEY_LEFT) != 0;
-        jump_left = 0;
-        grounded = 0;
+        var_jump = 0;
+        jbuf = 0;
+        shake = 3;
+        burst((px >> 8) + 3, (py >> 8) + 3, C_ICE);
     }
 
-    bool up_dashing = dash_left > 0 && dash_up;
-    walking = 0;
-    if (dash_left > 0)
+    if (dash_t > 0)
     {
-        spawn_particle(player_x + 2, player_y + 3, 1, 1, 4);  // afterimage
-        if (dash_up)
+        spawn((px >> 8) + 2, (py >> 8) + 3, 0, 0, 7, (dash_t & 1) ? C_HAIR : C_WHITE);
+        dash_t--;
+        if (dash_t == 0)
         {
-            if (player_y >= 3)
-            {
-                player_y = player_y - 3;
-            }
-            else
-            {
-                player_y = 0;
-            }
+            vx = vx / 2;
+            vy = vy / 2;
+            if (dash_dy == 0) vy = 0;
         }
-        else if (dash_leftward)
-        {
-            if (player_x >= 3)
-            {
-                player_x = player_x - 3;
-            }
-            else
-            {
-                player_x = 0;
-            }
-        }
-        else if (player_x <= 56)
-        {
-            player_x = player_x + 3;
-        }
-        else
-        {
-            player_x = 59;
-        }
-        dash_left--;
-    }
-    else if (keys & KEY_LEFT)
-    {
-        walking = 1;
-        if (player_x > 0)
-        {
-            player_x--;
-        }
-    }
-    else if (keys & KEY_RIGHT)
-    {
-        walking = 1;
-        if (player_x < 59)
-        {
-            player_x++;
-        }
-    }
-
-    if (up_dashing)
-    {
-        grounded = 0;
-        fall_time = 0;
-    }
-    else if (jump_left > 0)
-    {
-        if (player_y > 0)
-        {
-            player_y--;
-        }
-        jump_left--;
-        fall_time = 0;
-    }
-    else if (player_y < 44)
-    {
-        // gravity: one pixel per frame at first, two once the fall gets going
-        if (fall_time < 20)
-        {
-            fall_time++;
-        }
-        uint8 step = 1;
-        if (fall_time > 6)
-        {
-            step = 2;
-        }
-        if (player_y + step > 44)
-        {
-            player_y = 44;
-        }
-        else
-        {
-            player_y = player_y + step;
-        }
-    }
-
-    grounded = 0;
-    uint8 i = 0;
-    while (i < NUM_PLATFORMS)
-    {
-        try_land(plat_x[i], plat_y[i], plat_w[i]);
-        i++;
-    }
-    if (grounded && !was_grounded)
-    {
-        dust();
-    }
-
-    if (!grounded)
-    {
-        leg_pose = 3;
-    }
-    else if (walking)
-    {
-        leg_pose = 1 + ((frame >> 2) & 1);
     }
     else
     {
-        leg_pose = 0;
-    }
+        // horizontal: accelerate / decelerate, softer in the air
+        int mult = grounded ? 256 : AIR_MULT;
+        int target = mx * MAXRUN;
+        if (mx != 0 && ((vx > MAXRUN && mx > 0) || (vx < -MAXRUN && mx < 0)))
+            vx = approach(vx, target, RUN_REDUCE * mult / 256);
+        else
+            vx = approach(vx, target, RUN_ACCEL * mult / 256);
 
-    if (player_x >= 43 && player_x <= 51 && player_y >= 24 && player_y <= 28
-        && checkpoint_y != CHECKPOINT_Y)
-    {
-        checkpoint_x = CHECKPOINT_X;
-        checkpoint_y = CHECKPOINT_Y;
-        burst(51, 26, 8);
-    }
-
-    if (overlaps(player_x, player_y, SPIKE_X, SPIKE_Y, SPIKE_W, 3) || player_y >= 51)
-    {
-        burst(player_x + 2, player_y + 3, 10);
-        dead_timer = 16;
-        if (deaths < 99)
+        // jump
+        if (jbuf > 0 && coyote > 0)
         {
-            deaths++;
+            vy = -JUMP_SPEED;
+            var_jump = 12;
+            jbuf = 0;
+            coyote = 0;
+            grounded = 0;
+            spawn((px >> 8) + 1, (py >> 8) + 6, -6, -2, 6, C_ICE);
+            spawn((px >> 8) + 4, (py >> 8) + 6, 6, -2, 6, C_ICE);
+        }
+
+        // variable jump height: hold to keep full speed
+        if (var_jump > 0)
+        {
+            if (keys & KEY_JUMP)
+            {
+                if (vy > -JUMP_SPEED) vy = -JUMP_SPEED;
+                var_jump--;
+            }
+            else var_jump = 0;
+        }
+
+        // gravity (floaty at the apex while holding jump, fast fall on Down)
+        if (!grounded)
+        {
+            int g = GRAVITY;
+            if (vy < HALF_GRAV_THRESH && vy > -HALF_GRAV_THRESH && (keys & KEY_JUMP)) g = g / 2;
+            int mf = MAXFALL;
+            if (keys & KEY_DOWN) mf = FASTFALL;
+            vy = approach(vy, mf, g);
         }
     }
 
-    if (overlaps(player_x, player_y, 13, 1, 5, 4))
+    // move X with pixel-exact collision
+    int npx = px + vx;
+    int cur = px >> 8;
+    int ty = py >> 8;
+    int target = npx >> 8;
+    while (cur != target)
     {
-        playing = false;
+        int step = target > cur ? 1 : -1;
+        if (solid(cur + step, ty))
+        {
+            vx = 0;
+            npx = cur << 8;
+            break;
+        }
+        cur += step;
     }
+    px = npx;
+
+    // move Y with pixel-exact collision and head-bump corner correction
+    int npy = py + vy;
+    int cy = py >> 8;
+    int tx = px >> 8;
+    int targety = npy >> 8;
+    while (cy != targety)
+    {
+        int step = targety > cy ? 1 : -1;
+        if (solid(tx, cy + step))
+        {
+            bool fixed = false;
+            if (step < 0)
+            {
+                int k = 1;
+                while (k <= 3 && !fixed)
+                {
+                    if (!solid(tx - k, cy + step))
+                    {
+                        tx = tx - k;
+                        fixed = true;
+                    }
+                    else if (!solid(tx + k, cy + step))
+                    {
+                        tx = tx + k;
+                        fixed = true;
+                    }
+                    k++;
+                }
+            }
+            if (!fixed)
+            {
+                if (step > 0 && vy > 700)
+                {
+                    spawn(tx + 1, cy + 6, -8, -3, 6, C_ICE);
+                    spawn(tx + 4, cy + 6, 8, -3, 6, C_ICE);
+                }
+                vy = 0;
+                npy = cy << 8;
+                var_jump = 0;
+                break;
+            }
+            px = tx << 8;
+        }
+        cy += step;
+    }
+    py = npy;
+
+    grounded = solid(px >> 8, (py >> 8) + 1) && vy >= 0;
+    if (grounded && dash_t == 0 && !dash_ready)
+    {
+        dash_ready = 1;
+        flash = 8;
+    }
+
+    // checkpoints
+    uint8_t c = cp + 1;
+    if (c < NCP && hits(px >> 8, py >> 8, cp_x[c] - 4, cp_y[c] - 8, 14, 16))
+    {
+        cp = c;
+        burst(cp_x[c] + 3, cp_y[c], C_GOLD);
+    }
+
+    // death: spikes or falling out of the world
+    uint8_t i = 0;
+    bool dead = (py >> 8) > WORLD_H - 4;
+    while (i < NS)
+    {
+        if (hits(px >> 8, py >> 8, spk_x[i], spk_y[i] + 1, spk_w[i], 3)) dead = true;
+        i++;
+    }
+    if (dead)
+    {
+        burst((px >> 8) + 3, (py >> 8) + 3, C_HAIR);
+        burst((px >> 8) + 3, (py >> 8) + 3, C_WHITE);
+        dead_timer = 22;
+        shake = 6;
+        if (deaths < 99) deaths++;
+    }
+
+    if (hits(px >> 8, py >> 8, 210, 8, 14, 18)) playing = false;
     prev_keys = keys;
 }
 
-uint32 main()
+uint32_t main()
 {
-    if (!isflagsupported(0, 1) || !isflagsupported(1, 1))
+    if (!isflagsupported(0, 6) || !isflagsupported(1, 1))
     {
-        printf("Celeste needs 64x64 graphics and keyboard support.\n");
+        printf("Celeste needs 128x64 color graphics and keyboard support.\n");
         exit();
     }
-    flag(0, 1);
+    flag(0, 6);
     flag(1, 1);
     srand(gettime());
     frame_start = gettime();
-    fps_start = frame_start;
 
-    uint8 i = 0;
-    while (i < NUM_SNOW)
-    {
-        snow_x[i] = rand(0, 64);
-        snow_y[i] = rand(0, 50);
-        i++;
-    }
-
-    // One loop drives all three screens: 0 = title, 1 = playing, 2 = summit.
-    uint8 keys = 0;
-    uint8 state = 0;
-    player_x = 30;  // the title screen shows the climber in the middle
-    player_y = 38;
+    // 0 = title, 1 = playing, 2 = summit
+    uint8_t state = 0;
+    uint8_t keys = 0;
+    update_cam(1);
     while (true)
     {
         keys = getkey();
-        shake_x = 0;
-        shake_y = 0;
+        shk_x = 0;
+        shk_y = 0;
+        if (shake > 0)
+        {
+            shk_x = (shake & 1) ? 1 : -1;
+            shk_y = (shake & 2) ? 1 : -1;
+            shake--;
+        }
 
         if (state == 0)
         {
@@ -669,91 +622,56 @@ uint32 main()
             {
                 state = 1;
                 respawn();
-                prev_keys = keys;  // the key that started the game isn't also a jump
+                prev_keys = keys;
             }
         }
         else if (state == 1)
         {
             if (dead_timer > 0)
             {
-                if (dead_timer > 10)
-                {
-                    shake_x = dead_timer & 1;  // quick jolt when you die
-                    shake_y = (dead_timer >> 1) & 1;
-                }
                 dead_timer--;
-                if (dead_timer == 0)
-                {
-                    respawn();
-                }
+                if (dead_timer == 0) respawn();
             }
             else
             {
                 update_player(keys);
+                update_cam(0);
             }
-            if (!playing)
-            {
-                state = 2;
-            }
-            if (refill_flash > 0)
-            {
-                refill_flash--;
-            }
-        }
-        else if (keys & KEY_START)
-        {
-            exit();
-        }
-        if (state == 2 && frame % 24 == 0)
-        {
-            burst(rand(10, 54), rand(8, 30), 9);  // fireworks
-        }
-        update_particles();
-        update_snow();
-
-        draw_sky();
-        if (state == 1)
-        {
-            draw_level();
-        }
-        draw_particles();
-        if (state == 1)
-        {
-            if (dead_timer == 0 && (blink == 0 || (blink & 2) == 0))
-            {
-                draw_player();
-            }
-            if (blink > 0)
-            {
-                blink--;
-            }
-            shake_x = 0;
-            shake_y = 0;
-            draw_hud();
-        }
-        else if (state == 0)
-        {
-            drawstring("CELESTE", 18, 10);
-            i = 0;
-            while (i < 28)
-            {
-                plot(18 + i, 17, 1);
-                i++;
-            }
-            drawstring("C JUMP", 20, 24);
-            drawstring("V DASH", 20, 31);
-            draw_player();
-            if ((frame >> 4) & 1)
-            {
-                drawstring("PRESS C", 18, 52);
-            }
+            if (!playing) state = 2;
+            if (flash > 0) flash--;
+            if (blink > 0) blink--;
         }
         else
         {
-            drawstring("SUMMIT!", 18, 18);
-            drawstring("DEATHS", 14, 30);
-            draw_num2(deaths, 40, 30);
-            drawstring("ENTER EXIT", 12, 46);
+            if (keys & KEY_START) exit();
+            if (frame % 20 == 0)
+                burst(cam_x + rand(20, 108), cam_y + rand(8, 36), (frame & 32) ? C_GOLD : C_CYAN);
+        }
+        update_particles();
+
+        draw_background();
+        draw_level();
+        draw_particles();
+        if (state != 1 || (dead_timer == 0 && (blink & 2) == 0)) draw_player();
+
+        if (state == 1)
+        {
+            draw_hud(dash_ready);
+        }
+        else if (state == 0)
+        {
+            drawstring("CELESTE", 46, 8, C_GOLD);
+            srect(34, 16, 60, 1, C_CYAN);
+            drawstring("C JUMP  V DASH", 28, 20, C_ICE);
+            if ((frame >> 4) & 1) drawstring("PRESS C", 46, 50, C_WHITE);
+        }
+        else
+        {
+            drawstring("SUMMIT!", 46, 14, C_GOLD);
+            drawstring("DEATHS", 36, 26, C_ICE);
+            drawchar('0' + deaths / 10, 76, 26, C_WHITE);
+            drawchar('0' + deaths % 10, 80, 26, C_WHITE);
+            drawstring("ENTER EXIT", 38, 50, C_CYAN);
         }
         refreshscreen();
         frame_wait();

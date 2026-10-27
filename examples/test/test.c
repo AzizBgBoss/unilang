@@ -1,4 +1,4 @@
-uint32 main() {
+uint32_t main() {
     if (isflagsupported(0, 1))
     {
         flag(0, 1);
@@ -9,8 +9,8 @@ uint32 main() {
         exit();
     }
 
-    uint8 x = 0;
-    uint8 y = 0;
+    uint8_t x = 0;
+    uint8_t y = 0;
 
     while (true)
     {

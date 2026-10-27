@@ -24,9 +24,11 @@ static long romsize = 0;
 static SDL_Window *window = NULL;
 static SDL_Renderer *renderer = NULL;
 static SDL_Texture *screen_texture = NULL;
-static uint32_t framebuffer[FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT];
+static uint8_t framebuffer[FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT];
+static uint32_t display_buffer[FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT];
 static uint16_t graphics_width = 0;
 static uint16_t graphics_height = 0;
+static uint8_t graphics_colorsize = 0;
 static uint32_t presented_frames = 0;
 static uint32_t last_frame_time = 0;
 static uint8_t previous_keyboard_state = 0;
@@ -45,25 +47,67 @@ static uint8_t my_readbyte(uint32_t addr)
 
 static void my_setpixel(uint8_t x, uint8_t y, uint8_t color)
 {
-    if (x >= graphics_width || y >= graphics_height)
+    if (!graphics_colorsize || x >= graphics_width || y >= graphics_height)
         return;
-    framebuffer[(size_t)y * FRAMEBUFFER_WIDTH + x] =
-        color ? 0xFFFFFFFFu : 0xFF000000u;
+
+    if (graphics_colorsize == 1)
+        color = color ? 1 : 0;
+    else if (graphics_colorsize == 4)
+        color &= 0x0F;
+
+    framebuffer[(size_t)y * FRAMEBUFFER_WIDTH + x] = color;
 }
 
 static uint8_t my_getpixel(uint8_t x, uint8_t y)
 {
-    (void)x;
-    (void)y;
-    return 0;
+    if (!graphics_colorsize || x >= graphics_width || y >= graphics_height)
+        return 0;
+    return framebuffer[(size_t)y * FRAMEBUFFER_WIDTH + x];
+}
+
+static void my_disablegraphics(void);
+
+static uint32_t my_color_to_argb(uint8_t color)
+{
+    uint8_t red;
+    uint8_t green;
+    uint8_t blue;
+
+    if (graphics_colorsize == 1)
+    {
+        red = green = blue = color ? 255 : 0;
+    }
+    else if (graphics_colorsize == 4)
+    {
+        red = green = blue = (uint8_t)((color & 0x0F) * 17);
+    }
+    else
+    {
+        red = (uint8_t)(((color >> 5) & 0x07) * 255 / 7);
+        green = (uint8_t)(((color >> 2) & 0x07) * 255 / 7);
+        blue = (uint8_t)((color & 0x03) * 255 / 3);
+    }
+
+    return 0xFF000000u | ((uint32_t)red << 16) |
+           ((uint32_t)green << 8) | blue;
 }
 
 static void my_refreshscreen(void)
 {
     if (!renderer || !screen_texture)
         return;
-    SDL_UpdateTexture(screen_texture, NULL, framebuffer,
-                      FRAMEBUFFER_WIDTH * (int)sizeof(framebuffer[0]));
+
+    for (uint16_t y = 0; y < graphics_height; ++y)
+    {
+        for (uint16_t x = 0; x < graphics_width; ++x)
+        {
+            size_t index = (size_t)y * FRAMEBUFFER_WIDTH + x;
+            display_buffer[index] = my_color_to_argb(framebuffer[index]);
+        }
+    }
+
+    SDL_UpdateTexture(screen_texture, NULL, display_buffer,
+                      FRAMEBUFFER_WIDTH * (int)sizeof(display_buffer[0]));
     SDL_RenderClear(renderer);
     SDL_RenderCopy(renderer, screen_texture, NULL, NULL);
     SDL_RenderPresent(renderer);
@@ -79,16 +123,20 @@ static void my_refreshscreen(void)
 
 static void my_clearscreen(void)
 {
-    memset(framebuffer, 0x00, sizeof(framebuffer));
-    for (size_t i = 0; i < FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT; ++i)
-        framebuffer[i] = 0xFF000000u;
+    memset(framebuffer, 0, sizeof(framebuffer));
 }
 
 static void my_enablegraphics(uint16_t wx, uint16_t wy, uint8_t colorsize)
 {
-    (void)colorsize;
-    if (window)
+    if ((wx != 64 && wx != 128) || wy != 64 ||
+        (colorsize != 1 && colorsize != 4 && colorsize != 8))
+    {
+        DEBUG_ERROR("[debug] unsupported graphics mode: %ux%u, %u bits per pixel\n",
+                    wx, wy, colorsize);
         return;
+    }
+
+    my_disablegraphics();
     DEBUG_PRINT("[debug] enabling graphics: %ux%u, scale=%d\n", wx, wy, SCALE);
     window = SDL_CreateWindow("unilang", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                wx * SCALE, wy * SCALE, 0);
@@ -99,7 +147,7 @@ static void my_enablegraphics(uint16_t wx, uint16_t wy, uint8_t colorsize)
     }
     graphics_width = wx;
     graphics_height = wy;
-    memset(framebuffer, 0xFF, sizeof(framebuffer));
+    graphics_colorsize = colorsize;
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     if (!renderer)
     {
@@ -110,8 +158,7 @@ static void my_enablegraphics(uint16_t wx, uint16_t wy, uint8_t colorsize)
     if (!renderer)
     {
         DEBUG_ERROR("[debug] SDL_CreateRenderer failed: %s\n", SDL_GetError());
-        SDL_DestroyWindow(window);
-        window = NULL;
+        my_disablegraphics();
         return;
     }
     screen_texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
@@ -119,10 +166,7 @@ static void my_enablegraphics(uint16_t wx, uint16_t wy, uint8_t colorsize)
     if (!screen_texture)
     {
         DEBUG_ERROR("[debug] SDL_CreateTexture failed: %s\n", SDL_GetError());
-        SDL_DestroyRenderer(renderer);
-        renderer = NULL;
-        SDL_DestroyWindow(window);
-        window = NULL;
+        my_disablegraphics();
         return;
     }
     DEBUG_PRINT("[debug] graphics window created\n");
@@ -149,6 +193,7 @@ static void my_disablegraphics(void)
     }
     graphics_width = 0;
     graphics_height = 0;
+    graphics_colorsize = 0;
 }
 
 static uint8_t my_getkeyboard(void)
@@ -188,7 +233,7 @@ static int my_isflagsupported(uint8_t flag, uint8_t val)
     int supported = 0;
     if (flag == 0)
     {
-        supported = val == 1 || val == 4;
+        supported = val >= 1 && val <= 6;
     }
     else if (flag == 1)
     {

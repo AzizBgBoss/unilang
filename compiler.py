@@ -10,8 +10,8 @@ See README.md for full documentation of the supported C subset and the .ulc byte
 C-closeness summary (details in README.md):
   - a real preprocessor (preprocessor.py): #include, #define/#undef, #if/#ifdef/
     #elif/#else/#endif, #pragma once, -I and -D command line options
-  - standard type names (int, unsigned, short, long, uint8_t..uint32_t, size_t,
-    _Bool, void), user typedefs, enums, const scalars
+  - standard type names (signed/unsigned integers, uint8_t..uint32_t, size_t,
+    float/double, _Bool, void), user typedefs, enums, const scalars
   - pointers (T *p, &x, *p, p[i], pointer arithmetic, array-to-pointer decay,
     pointer parameters), casts, sizeof, compile-time constant folding
   - operators: unary - + ! ~, ?:, && and || with short-circuit evaluation,
@@ -49,16 +49,14 @@ REGISTER/BYTE-ONLY REWRITE (matches main.py's clean ISA):
     The old sub-byte bit-packing (e.g. eight uint1's sharing one byte) is
     GONE -- uint1..uint4 are now identical to uint8 in storage (1 byte each).
     This trades some memory density for a much simpler, faster codegen.
-  - All arithmetic/logic/comparison happens by loading operands into two
-    scratch registers (r14, r15), doing the op, and storing the result back
-    to memory -- registers are never allocated to persist across statements,
-    since this compiler's model (inline everything, no real stack) doesn't
-    need that yet. r0-r13 are unused by the compiler and free for hand-written
-    inline register-asm blocks in the future if that's ever added.
+  - Integer arithmetic uses scratch registers r14/r15; floating-point
+    operations use address registers r13-r15. Registers are never allocated
+    to persist across statements, since this compiler's model (inline
+    everything, no real stack) doesn't need that yet.
   - Pointer dereferencing and array-element access with a runtime index now
     compile to `loadregi*/storeregi*` (address held in a register), replacing
     the old `setmem` double-indirection opcode.
-  - `romread(pos, size)`'s `size` argument is now a BYTE count (1, 2, or 4),
+  - `romread(pos, size)`'s `size` argument is now a BYTE count (1, 2, 4, or 8),
     not a bit count -- same for __mem_load/__mem_store's size argument.
   - `alloc <N> name;` still takes N in bits for source-compatibility, but now
     rounds up to ceil(N/8) bytes -- `alloc 4 x;` and `alloc 8 x;` both now
@@ -67,6 +65,7 @@ REGISTER/BYTE-ONLY REWRITE (matches main.py's clean ISA):
 
 import os
 import re
+import struct
 import sys
 import pycparser
 from pycparser import c_ast
@@ -107,6 +106,9 @@ OPS = {
     "srandreg":        (0x1E, [1]),                   # reg
     "drawstring":      (0x1F, [1, 1, 1, 1, 1, 1, 1, 1]),  # regx, regy, regcolor, regaddr, reglen, src(0=ram,1=rom), regreturnx, regreturny
     "numtostr":        (0x20, [1, 4, 1]),             # reg, addr, reglen
+    "floatop":         (0x21, [1, 1, 1, 1, 1]),       # op, format, reg_left_addr, reg_right_addr, reg_dest_addr
+    "floatcast":       (0x22, [1, 1, 1, 1]),          # src_format, dst_format, reg_src_addr, reg_dst_addr
+    "romread64":       (0x23, [1, 1, 1]),             # reg_addr, reg_hi, reg_lo
 
     "setreg":          (0x40, [1, 4]),                # reg, val
     "movreg":          (0x41, [1, 1]),                # dst, src
@@ -151,6 +153,10 @@ OPS = {
     "lereg":           (0x6A, [1, 1, 1]),
     "gereg":           (0x6B, [1, 1, 1]),
     "outreg":          (0x6C, [1]),                   # reg -- print full numeric value
+    "sdivreg":         (0x6D, [1, 1, 1]),
+    "smodreg":         (0x6E, [1, 1, 1]),
+    "sshrreg":         (0x6F, [1, 1, 1]),
+    "outregsigned":    (0x70, [1]),
 
     "exit":            (0xFF, []),
 }
@@ -177,8 +183,8 @@ INT_SIZE = TYPE_BYTES[DEFAULT_TYPE]  # width used by VM pointers and compiler sc
 VARS_START = 0          # byte address where user variables start
 
 # Standard C type names accepted as aliases: name -> (bytes, is_signed).
-# The VM is unsigned-only, so signed types are stored like their unsigned
-# twins (see README: +, -, * wrap correctly; <, /, %, >> and printing don't).
+# Signed integers use two's-complement storage and explicit signed operations;
+# float/double values use IEEE-754 binary32/binary64 bit layouts.
 TYPE_ALIASES = {
     "uint8_t": (1, False), "uint16_t": (2, False), "uint32_t": (4, False),
     "int8_t": (1, True), "int16_t": (2, True), "int32_t": (4, True),
@@ -206,6 +212,7 @@ class Compiler:
         self.vars = {}              # name -> byte address (current scope view)
         self.var_sizes = {}         # name -> byte width (current scope view)
         self.addr_sizes = {}        # allocated address -> byte width
+        self.addr_formats = {}      # allocated scalar address -> numeric format
         self.alloc_meta = {}        # name -> {"kind": "scalar"|"array", "bits":..., "count":...}
         self.next_addr = VARS_START
         self.next_temp = 0
@@ -224,6 +231,7 @@ class Compiler:
         self.rom_data = []           # {"patch_pos", "data"}
 
         self.typedefs = {}           # user typedef name -> byte size
+        self.typedef_formats = {}    # user scalar typedef name -> numeric format
         self.structs = {}            # struct tag or typedef name -> {"size": n, "fields": {name: {"offset": o, "size": s}}}
         self.struct_defs = {}        # struct tag or typedef name -> original Struct AST node
         self.constants = {}          # enum constants and const scalars -> int value
@@ -296,7 +304,7 @@ class Compiler:
         return source
 
     # -- memory allocation ---------------------------------------------------
-    def alloc_var(self, name, size=INT_SIZE):
+    def alloc_var(self, name, size=INT_SIZE, fmt=None):
         addr = self.next_addr
         self.constants.pop(name, None)  # a variable shadows a same-named constant
         self.next_addr += size
@@ -305,15 +313,18 @@ class Compiler:
         # this address may have held something else before it was freed
         self.ptr_elem.pop(addr, None)
         self.array_by_addr.pop(addr, None)
+        self.addr_formats.pop(addr, None)
         self.vars[name] = addr
         self.var_sizes[name] = size
         self.addr_sizes[addr] = size
+        if fmt is not None:
+            self.addr_formats[addr] = fmt
         return addr
 
-    def alloc_temp(self, size=INT_SIZE):
+    def alloc_temp(self, size=INT_SIZE, fmt=None):
         name = f"__t{self.next_temp}"
         self.next_temp += 1
-        return self.alloc_var(name, size)
+        return self.alloc_var(name, size, fmt)
 
     def var_addr(self, name):
         if name not in self.vars:
@@ -345,12 +356,153 @@ class Compiler:
         self.emit_store(RA, addr, size)
 
     def emit_copy(self, src, dest):
+        src_fmt = self.addr_formats.get(src, self.format_for_size(self.addr_size(src)))
+        dest_fmt = self.addr_formats.get(dest, self.format_for_size(self.addr_size(dest)))
+        if src_fmt != dest_fmt or self.addr_size(src) == 8 or self.addr_size(dest) == 8:
+            self.emit_set_const(RA, src)
+            self.emit_set_const(RB, dest)
+            self.emit("floatcast", src_fmt, dest_fmt, RA, RB)
+            return
         # loadreg zero-extends into a full 32-bit register and storereg
         # truncates back down, so narrowing/widening between different-sized
         # variables just falls out of an ordinary load+store -- no special
         # casing needed (unlike the old bit-field right-justification model).
         self.emit_load(src, self.addr_size(src), RA)
         self.emit_store(RA, dest, self.addr_size(dest))
+
+    @staticmethod
+    def format_for_size(size):
+        return {1: 2, 2: 4, 4: 6, 8: 8}.get(size, 6)
+
+    def type_format(self, type_node):
+        if self.is_void_type(type_node):
+            return 6
+        if isinstance(type_node, c_ast.PtrDecl):
+            return 6
+        if isinstance(type_node, c_ast.ArrayDecl):
+            return self.type_format(type_node.type)
+        if isinstance(type_node, c_ast.IdentifierType):
+            type_node = c_ast.TypeDecl(declname=None, quals=[], align=None, type=type_node)
+        if isinstance(type_node, c_ast.TypeDecl):
+            if isinstance(type_node.type, c_ast.IdentifierType):
+                words = list(type_node.type.names)
+                if "float" in words:
+                    return 7
+                if "double" in words:
+                    return 8
+                for word in words:
+                    if word in TYPE_ALIASES:
+                        size, signed = TYPE_ALIASES[word]
+                        return self.integer_format(size, signed)
+                    if word in self.typedef_formats:
+                        return self.typedef_formats[word]
+                if "char" in words:
+                    return 1 if "unsigned" not in words and "signed" in words else 2
+                size = self.scalar_size(type_node)
+                return self.integer_format(size, self.scalar_type_signed(type_node))
+            if isinstance(type_node.type, c_ast.Enum):
+                return 5
+        return self.format_for_size(self.type_size(type_node)) if type_node is not None else 6
+
+    @staticmethod
+    def integer_format(size, signed):
+        return {(1, True): 1, (1, False): 2, (2, True): 3,
+                (2, False): 4, (4, True): 5, (4, False): 6}.get(
+                    (size, signed), 6)
+
+    def expr_format(self, node):
+        float_size = self.expr_float_size(node)
+        if float_size:
+            return 8 if float_size == 8 else 7
+        if isinstance(node, c_ast.BinaryOp) and node.op in (
+                "+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>"):
+            left_type, right_type = self.expr_type(node.left), self.expr_type(node.right)
+            unsigned = ((left_type is not None and not self.scalar_type_signed(left_type))
+                        or (right_type is not None and not self.scalar_type_signed(right_type)))
+            return 6 if unsigned else 5
+        if isinstance(node, c_ast.UnaryOp) and node.op in ("-", "~"):
+            operand_type = self.expr_type(node.expr)
+            if operand_type is not None and self.type_size(operand_type) >= INT_SIZE:
+                return 5 if self.scalar_type_signed(operand_type) else 6
+            return 5
+        if isinstance(node, c_ast.BinaryOp) and node.op in (
+                "==", "!=", "<", ">", "<=", ">=", "&&", "||"):
+            return 2
+        if isinstance(node, c_ast.UnaryOp) and node.op == "!":
+            return 2
+        typ = self.expr_type(node)
+        return self.type_format(typ) if typ is not None else 6
+
+    def expr_storage_size(self, node):
+        fmt = self.expr_format(node)
+        if fmt == 8:
+            return 8
+        if fmt in (5, 6, 7):
+            return 4
+        typ = self.expr_type(node)
+        return self.type_size(typ) if typ is not None else INT_SIZE
+
+    def expr_float_size(self, node):
+        if isinstance(node, c_ast.Constant):
+            return 8 if node.type == "double" else 4 if node.type == "float" else 0
+        if isinstance(node, c_ast.Cast):
+            target = node.to_type.type
+            target_size = INT_SIZE if isinstance(target, c_ast.PtrDecl) else self.type_size(target)
+            target_fmt = self.type_format(target)
+            return target_size if target_fmt in (7, 8) else 0
+        if isinstance(node, c_ast.UnaryOp):
+            return self.expr_float_size(node.expr)
+        if isinstance(node, c_ast.BinaryOp) and node.op not in (
+                "==", "!=", "<", ">", "<=", ">=", "&&", "||"):
+            return max(self.expr_float_size(node.left), self.expr_float_size(node.right))
+        if isinstance(node, c_ast.TernaryOp):
+            return max(self.expr_float_size(node.iftrue), self.expr_float_size(node.iffalse))
+        typ = self.expr_type(node)
+        if typ is not None:
+            fmt = self.type_format(typ)
+            return 8 if fmt == 8 else 4 if fmt == 7 else 0
+        return 0
+
+    def emit_floatcast(self, src, src_fmt, dest, dest_fmt):
+        self.emit_set_const(RA, src)
+        self.emit_set_const(RB, dest)
+        self.emit("floatcast", src_fmt, dest_fmt, RA, RB)
+
+    def gen_float_value(self, node, target_fmt=None):
+        src = self.gen_expr(node)
+        src_fmt = self.addr_formats.get(src, self.expr_format(node))
+        fmt = target_fmt or src_fmt
+        if fmt == src_fmt:
+            return src
+        dest = self.alloc_temp(4 if fmt == 7 else 8, fmt)
+        self.emit_floatcast(src, src_fmt, dest, fmt)
+        return dest
+
+    def gen_float_binary(self, node):
+        fmt = 8 if max(self.expr_float_size(node.left), self.expr_float_size(node.right)) == 8 else 7
+        left = self.gen_float_value(node.left, fmt)
+        right = self.gen_float_value(node.right, fmt)
+        dest = self.alloc_temp(4 if fmt == 7 else 8, fmt)
+        self.emit_set_const(RA, left)
+        self.emit_set_const(RB, right)
+        self.emit_set_const(RC, dest)
+        op = {"+": 1, "-": 2, "*": 3, "/": 4}.get(node.op)
+        if op is None:
+            raise NotImplementedError(f"operator '{node.op}' is not supported for floating-point values")
+        self.emit("floatop", op, fmt, RA, RB, RC)
+        return dest
+
+    def gen_float_compare(self, left_node, right_node, op):
+        fmt = 8 if max(self.expr_float_size(left_node), self.expr_float_size(right_node)) == 8 else 7
+        left = self.gen_float_value(left_node, fmt)
+        right = self.gen_float_value(right_node, fmt)
+        dest = self.alloc_temp(1, 2)
+        self.emit_set_const(RA, left)
+        self.emit_set_const(RB, right)
+        self.emit_set_const(RC, dest)
+        opcode = {"==": 6, "!=": 7, "<": 8, ">": 9, "<=": 10, ">=": 11}[op]
+        self.emit("floatop", opcode, fmt, RA, RB, RC)
+        return dest
 
     def to_bool(self, addr):
         # Normalizes any value to a 1-byte 0/1 address (true iff addr != 0).
@@ -401,6 +553,8 @@ class Compiler:
             return self.gen_expr(node)
         if isinstance(node, c_ast.UnaryOp) and node.op == "!":
             return self.gen_expr(node)
+        if self.expr_float_size(node):
+            return self.gen_float_compare(node, c_ast.Constant(type="double" if self.expr_float_size(node) == 8 else "float", value="0.0"), "!=")
         return self.to_bool(self.gen_expr(node))
 
     @staticmethod
@@ -475,8 +629,12 @@ class Compiler:
                 return size
             if w in self.typedefs:
                 return self.typedefs[w]
+        if words == ["float"]:
+            return 4
+        if words == ["double"]:
+            return 8
         if "float" in words or "double" in words:
-            raise NotImplementedError("floating point types are not supported")
+            raise NotImplementedError(f"unsupported floating-point type '{' '.join(words)}'")
         if "void" in words:
             raise NotImplementedError("'void' is only valid as a function return type, a (void) parameter list, or a pointer target")
         if words.count("long") > 1:
@@ -737,9 +895,21 @@ class Compiler:
             if expr.op in ("==", "!=", "<", ">", "<=", ">=", "&&", "||"):
                 return c_ast.TypeDecl(declname=None, quals=[], align=None,
                                      type=c_ast.IdentifierType(names=["bool"]))
+            float_size = max(self.expr_float_size(expr.left), self.expr_float_size(expr.right))
+            if float_size:
+                return c_ast.TypeDecl(declname=None, quals=[], align=None,
+                                     type=c_ast.IdentifierType(names=["double" if float_size == 8 else "float"]))
             return self.expr_type(expr.left) or self.expr_type(expr.right)
         if isinstance(expr, c_ast.TernaryOp):
+            float_size = max(self.expr_float_size(expr.iftrue), self.expr_float_size(expr.iffalse))
+            if float_size:
+                return c_ast.TypeDecl(declname=None, quals=[], align=None,
+                                     type=c_ast.IdentifierType(names=["double" if float_size == 8 else "float"]))
             return self.expr_type(expr.iftrue) or self.expr_type(expr.iffalse)
+        if isinstance(expr, c_ast.FuncCall) and isinstance(expr.name, c_ast.ID):
+            fn = self.function_asts.get(expr.name.name)
+            if fn is not None:
+                return fn.decl.type.type
         return None
 
     def scalar_type_signed(self, type_node):
@@ -754,6 +924,8 @@ class Compiler:
         words = list(type_node.names)
         if len(words) == 1 and words[0] in TYPE_ALIASES:
             return TYPE_ALIASES[words[0]][1]
+        if len(words) == 1 and words[0] in self.typedef_formats:
+            return self.typedef_formats[words[0]] in (1, 3, 5)
         return "unsigned" not in words and (
             any(word in ("signed", "int", "short", "long") for word in words)
         )
@@ -1224,6 +1396,42 @@ class Compiler:
         increment = "+" in node.op
         post = node.op.startswith("p")
         target = node.expr
+        target_type = self.resolve_type_for_expr(target)
+        fmt = self.type_format(target_type)
+        if fmt in (7, 8):
+            size = 4 if fmt == 7 else 8
+            indirect = not isinstance(target, c_ast.ID)
+            if indirect:
+                elem = self.emit_addr_in_ra(target)
+                if elem != size:
+                    raise NotImplementedError("floating-point increment requires a float or double lvalue")
+                pointer = self.alloc_temp(INT_SIZE, 6)
+                self.emit_store(RA, pointer, INT_SIZE)
+                current = self.alloc_temp(size, fmt)
+                self.emit_set_const(RB, current)
+                self.emit("floatcast", fmt, fmt, RA, RB)
+            else:
+                current = self.var_addr(target.name)
+
+            old = None
+            if want_value and post:
+                old = self.alloc_temp(size, fmt)
+                self.emit_copy(current, old)
+            one = self.gen_expr(c_ast.Constant(
+                type="float" if fmt == 7 else "double", value="1.0"))
+            result = self.alloc_temp(size, fmt)
+            self.emit_set_const(RA, current)
+            self.emit_set_const(RB, one)
+            self.emit_set_const(RC, result)
+            self.emit("floatop", 1 if increment else 2, fmt, RA, RB, RC)
+            if indirect:
+                self.emit_load(pointer, INT_SIZE, RA)
+                self.emit_set_const(RB, result)
+                self.emit("floatcast", fmt, fmt, RB, RA)
+            else:
+                self.emit_copy(result, current)
+            return old if post else result
+
         step = self.expr_ptr_elem(target) or 1
         opname = "addregv" if increment else "subregv"
         if isinstance(target, c_ast.ID):
@@ -1255,6 +1463,21 @@ class Compiler:
 
     def gen_unary(self, node):
         op = node.op
+        if op in ("+", "-") and self.expr_float_size(node.expr):
+            operand = self.gen_expr(node.expr)
+            if op == "+":
+                return operand
+            fmt = self.addr_formats.get(operand, self.expr_format(node.expr))
+            dest = self.alloc_temp(4 if fmt == 7 else 8, fmt)
+            self.emit_set_const(RA, operand)
+            self.emit_set_const(RB, operand)
+            self.emit_set_const(RC, dest)
+            self.emit("floatop", 5, fmt, RA, RB, RC)
+            return dest
+        if op == "!" and self.expr_float_size(node.expr):
+            zero_type = "double" if self.expr_float_size(node.expr) == 8 else "float"
+            return self.gen_float_compare(
+                node.expr, c_ast.Constant(type=zero_type, value="0.0"), "==")
         if op == "&":
             target = node.expr
             if isinstance(target, c_ast.ID):
@@ -1264,7 +1487,7 @@ class Compiler:
                 # location holding the address, not the address itself
                 # misread as a location).
                 addr_val = self.var_addr(target.name)
-                out = self.alloc_temp(INT_SIZE)
+                out = self.alloc_temp(INT_SIZE, 6)
                 self.emit_store_const(out, INT_SIZE, addr_val)
                 return out
             self.emit_addr_in_ra(target)
@@ -1275,8 +1498,15 @@ class Compiler:
             return self.gen_incdec(node, want_value=True)
         if op == "*":
             elem = self.emit_addr_in_ra(node)
+            if elem == 8:
+                fmt = self.type_format(self.resolve_type_for_expr(node))
+                result = self.alloc_temp(8, fmt)
+                self.emit("movreg", RC, RA)
+                self.emit_set_const(RA, result)
+                self.emit("floatcast", fmt, fmt, RC, RA)
+                return result
             self.emit(f"loadregi{self._reg_width(elem)}", RA, RB)
-            result = self.alloc_temp(elem)
+            result = self.alloc_temp(elem, self.type_format(self.resolve_type_for_expr(node)))
             self.emit_store(RB, result, elem)
             return result
         if op == "+":
@@ -1284,16 +1514,16 @@ class Compiler:
         if op == "-":
             operand = self.resolve_operand(node.expr)
             self.emit_set_const(RA, 0)
-            self.load_resolved(operand, RB)
+            self.load_comparison_operand(node.expr, operand, RB)
             self.emit("subreg", RA, RB, RA)
-            dest = self.alloc_temp(INT_SIZE)
+            dest = self.alloc_temp(INT_SIZE, self.expr_format(node))
             self.emit_store(RA, dest, INT_SIZE)
             return dest
         if op == "~":
             operand = self.resolve_operand(node.expr)
-            self.load_resolved(operand, RA)
+            self.load_comparison_operand(node.expr, operand, RA)
             self.emit("notreg", RA, RA)
-            dest = self.alloc_temp(INT_SIZE)
+            dest = self.alloc_temp(INT_SIZE, self.expr_format(node))
             self.emit_store(RA, dest, INT_SIZE)
             return dest
         if op == "!":
@@ -1316,12 +1546,12 @@ class Compiler:
             left_r = self.resolve_operand(node.left)
             right_r = self.resolve_operand(node.right)
             self.load_resolved(left_r, RA)
-            self.load_resolved(right_r, RB)
+            self.load_comparison_operand(node.right, right_r, RB)
             self.emit("subreg", RA, RB, RA)
             if left_elem != 1:
                 self.emit_set_const(RB, left_elem)
                 self.emit("divreg", RA, RB, RA)  # distance in elements, like C
-            dest = self.alloc_temp(INT_SIZE)
+            dest = self.alloc_temp(INT_SIZE, self.expr_format(node))
             self.emit_store(RA, dest, INT_SIZE)
             return dest
         if left_elem is not None:
@@ -1343,20 +1573,34 @@ class Compiler:
 
     # -- expressions: returns the byte-address holding the result --------------
     def gen_expr(self, node):
-        if isinstance(node, (c_ast.UnaryOp, c_ast.BinaryOp, c_ast.TernaryOp, c_ast.Cast)):
+        if isinstance(node, (c_ast.UnaryOp, c_ast.BinaryOp, c_ast.TernaryOp, c_ast.Cast)) and not self.expr_float_size(node):
             value = self.try_const(node)  # constant folding
             if value is not None:
-                dest = self.alloc_temp(INT_SIZE)
-                self.emit_store_const(dest, INT_SIZE, value)
+                size = self.expr_storage_size(node)
+                dest = self.alloc_temp(size, self.expr_format(node))
+                self.emit_store_const(dest, size, value)
                 return dest
 
         if isinstance(node, c_ast.Constant):
             if node.type == "string":
                 name = f"__str{len(self.rom_data)}"
                 return self.add_const_array(name, TYPE_BYTES["char"], self.string_bytes(node) + [0])
+            if node.type in ("float", "double"):
+                fmt = 7 if node.type == "float" else 8
+                size = 4 if fmt == 7 else 8
+                text = node.value.rstrip("fFlL")
+                value = float.fromhex(text) if text.lower().startswith("0x") else float(text)
+                raw = struct.pack(">f" if fmt == 7 else ">d", value)
+                dest = self.alloc_temp(size, fmt)
+                self.emit_set_const(RA, int.from_bytes(raw[:4], "big"))
+                self.emit_store(RA, dest, 4)
+                if size == 8:
+                    self.emit_set_const(RA, int.from_bytes(raw[4:], "big"))
+                    self.emit_store(RA, dest + 4, 4)
+                return dest
             if node.type != "char" and not node.type.endswith("int"):
                 raise NotImplementedError(f"unsupported constant type '{node.type}'")
-            dest = self.alloc_temp(INT_SIZE)
+            dest = self.alloc_temp(INT_SIZE, self.expr_format(node))
             self.emit_store_const(dest, INT_SIZE, self.const_value(node))
             return dest
 
@@ -1407,8 +1651,15 @@ class Compiler:
             else:
                 self.load_resolved(self.resolve_operand(base), RA)
                 self.emit("addregv", RA, self.struct_field_info(struct_type, field_name)["offset"], RA)
+            if field_size == 8:
+                fmt = self.type_format(field_decl.type) if field_decl is not None else 8
+                result = self.alloc_temp(8, fmt)
+                self.emit("movreg", RC, RA)
+                self.emit_set_const(RA, result)
+                self.emit("floatcast", fmt, fmt, RC, RA)
+                return result
             self.emit(f"loadregi{self._reg_width(field_size)}", RA, RB)
-            result = self.alloc_temp(field_size)
+            result = self.alloc_temp(field_size, self.type_format(field_decl.type) if field_decl is not None else None)
             self.emit_store(RB, result, field_size)
             return result
 
@@ -1423,14 +1674,26 @@ class Compiler:
                 elem_bytes = self.type_size(result_type) if result_type is not None else self.const_arrays[
                     self.const_array_access(node)[0]]["elem_bytes"]
                 self.emit_load(offset, INT_SIZE, RA)
+                result = self.alloc_temp(elem_bytes, self.type_format(result_type) if result_type is not None else None)
+                if elem_bytes == 8:
+                    self.emit("romread64", RA, RB, RC)
+                    self.emit_store(RB, result, 4)
+                    self.emit_store(RC, result + 4, 4)
+                    return result
                 self.emit(f"romread{elem_bytes * 8}", RA, RB)
-                result = self.alloc_temp(elem_bytes)
                 self.emit_store(RB, result, elem_bytes)
                 return result
 
             elem_bytes = self.emit_addr_in_ra(node)
+            if elem_bytes == 8:
+                fmt = self.type_format(self.resolve_type_for_expr(node))
+                result = self.alloc_temp(8, fmt)
+                self.emit("movreg", RC, RA)
+                self.emit_set_const(RA, result)
+                self.emit("floatcast", fmt, fmt, RC, RA)
+                return result
             self.emit(f"loadregi{self._reg_width(elem_bytes)}", RA, RB)
-            result = self.alloc_temp(elem_bytes)
+            result = self.alloc_temp(elem_bytes, self.type_format(self.resolve_type_for_expr(node)))
             self.emit_store(RB, result, elem_bytes)
             return result
 
@@ -1463,13 +1726,27 @@ class Compiler:
 
             # array element, pointer subscript or *pointer: the address goes
             # in RA only after rhs is already evaluated into a temp
-            elem_bytes = self.emit_addr_in_ra(node.lvalue)
+            elem_bytes = self.lvalue_elem_size(node.lvalue)
+            dest_type = self.resolve_type_for_expr(node.lvalue)
+            dest_fmt = self.type_format(dest_type)
+            src_fmt = self.addr_formats.get(rhs, self.expr_format(node.rvalue))
+            if src_fmt != dest_fmt or elem_bytes == 8:
+                converted = self.alloc_temp(elem_bytes, dest_fmt)
+                self.emit_copy(rhs, converted)
+                self.emit_addr_in_ra(node.lvalue)
+                self.emit("movreg", RC, RA)
+                self.emit_set_const(RA, converted)
+                self.emit("floatcast", dest_fmt, dest_fmt, RA, RC)
+                return converted
+            self.emit_addr_in_ra(node.lvalue)
             self.emit_load(rhs, self.addr_size(rhs), RB)
             self.emit(f"storeregi{self._reg_width(elem_bytes)}", RA, RB)
             return rhs
 
         if isinstance(node, c_ast.TernaryOp):
-            dest = self.alloc_temp(INT_SIZE)
+            result_type = self.expr_type(node)
+            result_size = self.type_size(result_type) if result_type is not None else INT_SIZE
+            dest = self.alloc_temp(result_size, self.expr_format(node))
             else_label = Label("ternary_else")
             end_label = Label("ternary_end")
             cond = self.gen_cond(node.cond)
@@ -1491,9 +1768,14 @@ class Compiler:
                 raise NotImplementedError("cannot cast to an array type")
             size = INT_SIZE if isinstance(target, c_ast.PtrDecl) else self.scalar_size(target)
             src = self.gen_expr(node.expr)
-            dest = self.alloc_temp(size)
-            self.emit_load(src, self.addr_size(src), RA)  # zero-extend / truncate through the register
-            self.emit_store(RA, dest, size)
+            fmt = self.type_format(target)
+            dest = self.alloc_temp(size, fmt)
+            src_fmt = self.addr_formats.get(src, self.expr_format(node.expr))
+            if src_fmt != fmt or size == 8 or self.addr_size(src) == 8:
+                self.emit_floatcast(src, src_fmt, dest, fmt)
+            else:
+                self.emit_load(src, self.addr_size(src), RA)
+                self.emit_store(RA, dest, size)
             return dest
 
         if isinstance(node, c_ast.ExprList):
@@ -1509,6 +1791,9 @@ class Compiler:
                 # condition for if/while -- gen_cond already builds exactly
                 # that, so reuse it here.
                 return self.gen_cond(node)
+
+            if self.expr_float_size(node):
+                return self.gen_float_binary(node)
 
             if node.op in ("&&", "||"):
                 # short-circuit like C: the right operand is only evaluated
@@ -1532,10 +1817,16 @@ class Compiler:
             if node.op in bitwise_ops:
                 left_r = self.resolve_operand(node.left)
                 right_r = self.resolve_operand(node.right)
-                self.load_resolved(left_r, RA)
+                self.load_comparison_operand(node.left, left_r, RA)
                 self.load_resolved(right_r, RB)
-                self.emit(bitwise_ops[node.op], RA, RB, RA)
-                dest = self.alloc_temp(INT_SIZE)
+                if node.op == ">>" and self.comparison_is_signed(
+                        node.left, node.right,
+                        INT_SIZE if left_r[0] == "const" else left_r[2],
+                        INT_SIZE if right_r[0] == "const" else right_r[2]):
+                    self.emit("sshrreg", RA, RB, RA)
+                else:
+                    self.emit(bitwise_ops[node.op], RA, RB, RA)
+                dest = self.alloc_temp(INT_SIZE, self.expr_format(node))
                 self.emit_store(RA, dest, INT_SIZE)
                 return dest
 
@@ -1548,22 +1839,30 @@ class Compiler:
                 right_elem = self.expr_ptr_elem(node.right)
                 if left_elem is not None or right_elem is not None:
                     return self.gen_pointer_arith(node, left_elem, right_elem)
+            left_r = self.resolve_operand(node.left)
+            right_r = self.resolve_operand(node.right)
+            left_size = INT_SIZE if left_r[0] == "const" else left_r[2]
+            right_size = INT_SIZE if right_r[0] == "const" else right_r[2]
+            signed_op = self.comparison_is_signed(
+                node.left, node.right, left_size, right_size)
             right_const = self.try_const(node.right)
             left_const = self.try_const(node.left)
-            if right_const is not None and node.op in const_ops:
+            if right_const is not None and node.op in const_ops and not (
+                    signed_op and left_size < INT_SIZE):
                 self.load_operand(node.left, RA)
                 self.emit(const_ops[node.op], RA, right_const, RA)
-            elif left_const is not None and node.op in ("+", "*"):
+            elif left_const is not None and node.op in ("+", "*") and not (
+                    signed_op and right_size < INT_SIZE):
                 # commutative -- swap so the constant still uses the cheaper *v opcode
                 self.load_operand(node.right, RA)
                 self.emit(const_ops[node.op], RA, left_const, RA)
             else:
-                left_r = self.resolve_operand(node.left)
-                right_r = self.resolve_operand(node.right)
-                self.load_resolved(left_r, RA)
-                self.load_resolved(right_r, RB)
-                self.emit(reg_ops[node.op], RA, RB, RA)
-            dest = self.alloc_temp(INT_SIZE)
+                self.load_comparison_operand(node.left, left_r, RA)
+                self.load_comparison_operand(node.right, right_r, RB)
+                operation = "sdivreg" if node.op == "/" and signed_op else (
+                    "smodreg" if node.op == "%" and signed_op else reg_ops[node.op])
+                self.emit(operation, RA, RB, RA)
+            dest = self.alloc_temp(INT_SIZE, self.expr_format(node))
             self.emit_store(RA, dest, INT_SIZE)
             return dest
 
@@ -1572,10 +1871,16 @@ class Compiler:
             if name == "romread":
                 args = node.args.exprs if node.args else []
                 if len(args) != 2 or not isinstance(args[1], c_ast.Constant):
-                    raise NotImplementedError("romread(pos, size) takes a ROM byte-position expression and a constant size (1, 2, or 4 bytes)")
+                    raise NotImplementedError("romread(pos, size) takes a ROM byte-position expression and a constant size (1, 2, 4, or 8 bytes)")
                 pos = self.gen_expr(args[0])
                 size = int(args[1].value, 0)
                 self.emit_load(pos, self.addr_size(pos), RA)
+                if size == 8:
+                    self.emit("romread64", RA, RB, RC)
+                    dest = self.alloc_temp(8, 8)
+                    self.emit_store(RB, dest, 4)
+                    self.emit_store(RC, dest + 4, 4)
+                    return dest
                 self.emit(f"romread{self._reg_width(size)}", RA, RB)
                 dest = self.alloc_temp(size)
                 self.emit_store(RB, dest, size)
@@ -1637,6 +1942,8 @@ class Compiler:
         comparisons = ("==", "!=", "<", ">", "<=", ">=")
         opmap = {"==": "eqreg", "!=": "neqreg", "<": "ltreg", ">": "gtreg", "<=": "lereg", ">=": "gereg"}
         if isinstance(node, c_ast.BinaryOp) and node.op in comparisons:
+            if self.expr_float_size(node.left) or self.expr_float_size(node.right):
+                return self.gen_float_compare(node.left, node.right, node.op)
             left_r = self.resolve_operand(node.left)
             right_r = self.resolve_operand(node.right)
             left_size = INT_SIZE if left_r[0] == "const" else left_r[2]
@@ -1711,8 +2018,13 @@ class Compiler:
             arg_i += 1
             if val in "diu":
                 addr = self.gen_expr(arg)
-                self.emit_load(addr, self.addr_size(addr), RA)
-                self.emit("outreg", RA)  # prints the register's full numeric value, any width
+                if val in "di":
+                    self.load_comparison_operand(
+                        arg, ("addr", addr, self.addr_size(addr)), RA)
+                    self.emit("outregsigned", RA)
+                else:
+                    self.emit_load(addr, self.addr_size(addr), RA)
+                    self.emit("outreg", RA)
             elif val == "c":
                 self.gen_print_char(arg)
             else:
@@ -1764,11 +2076,7 @@ class Compiler:
 
         x_addr = self.gen_expr(x_node)
         y_addr = self.gen_expr(y_node)
-        if isinstance(val_node, c_ast.Constant):
-            val_addr = self.alloc_temp(1)
-            self.emit_store_const(val_addr, 1, 1 if self.const_value(val_node) != 0 else 0)
-        else:
-            val_addr = self.gen_cond(val_node)
+        val_addr = self.gen_expr(val_node)
 
         self.emit_load(x_addr, self.addr_size(x_addr), 10)
         self.emit_load(y_addr, self.addr_size(y_addr), 11)
@@ -1868,12 +2176,16 @@ class Compiler:
     # loaded immediately before emitting "drawstring", and the two output
     # registers (14, 15) are discarded right after -- no value needs to
     # survive across separate emit() calls the way arithmetic temps do.
-    def gen_draw_common(self, x_node, y_node, addr_kind, addr_val, length, src, color=1):
+    def gen_draw_common(self, x_node, y_node, addr_kind, addr_val, length, src, color_node=None):
         x_r = self.resolve_operand(x_node)
         y_r = self.resolve_operand(y_node)
         self.load_resolved(x_r, 8)
         self.load_resolved(y_r, 9)
-        self.emit_set_const(10, color)
+        if color_node is None:
+            self.emit_set_const(10, 1)
+        else:
+            color_r = self.resolve_operand(color_node)
+            self.load_resolved(color_r, 10)
         if addr_kind == "const":
             self.emit_set_const(11, addr_val)
         else:  # "load" -- addr_val is a RAM address whose runtime VALUE is the actual address/ROM offset
@@ -1884,28 +2196,30 @@ class Compiler:
     def gen_drawchar(self, call):
         self.uses_graphics = True
         args = call.args.exprs if call.args else []
-        if len(args) != 3:
-            raise NotImplementedError("drawchar(c, x, y) takes exactly 3 arguments")
-        c_node, x_node, y_node = args
+        if len(args) not in (3, 4):
+            raise NotImplementedError("drawchar(c, x, y[, color]) takes 3 or 4 arguments")
+        c_node, x_node, y_node = args[:3]
         c_r = self.resolve_operand(c_node)
         self.load_resolved(c_r, RA)
         char_addr = self.alloc_temp(1)
         self.emit_store(RA, char_addr, 1)
-        self.gen_draw_common(x_node, y_node, "const", char_addr, 1, 0)
+        color_node = args[3] if len(args) == 4 else None
+        self.gen_draw_common(x_node, y_node, "const", char_addr, 1, 0, color_node)
 
     def gen_drawstring(self, call):
         self.uses_graphics = True
         args = call.args.exprs if call.args else []
-        if len(args) != 3:
-            raise NotImplementedError("drawstring(str, x, y) takes exactly 3 arguments")
-        str_node, x_node, y_node = args
+        if len(args) not in (3, 4):
+            raise NotImplementedError("drawstring(str, x, y[, color]) takes 3 or 4 arguments")
+        str_node, x_node, y_node = args[:3]
+        color_node = args[3] if len(args) == 4 else None
         if isinstance(str_node, c_ast.Constant) and str_node.type == "string":
             # String literal -- lives in ROM (rom_data), src=1. gen_expr() on a
             # string constant allocates the const array and returns a RAM temp
             # whose runtime VALUE is the ROM byte offset (patched in finalize()).
             chars = self.string_bytes(str_node)
             rom_offset_temp = self.gen_expr(str_node)
-            self.gen_draw_common(x_node, y_node, "load", rom_offset_temp, len(chars), 1)
+            self.gen_draw_common(x_node, y_node, "load", rom_offset_temp, len(chars), 1, color_node)
         elif isinstance(str_node, c_ast.ID) and str_node.name in self.array_elem_bytes:
             # Plain char[] variable -- lives in RAM, src=0. Its address is a
             # compile-time constant, so it's used directly (no load needed).
@@ -1914,7 +2228,7 @@ class Compiler:
                 raise NotImplementedError("drawstring() requires a char[] array")
             base_addr = self.var_addr(name)
             total_bytes = self.var_sizes[name]
-            self.gen_draw_common(x_node, y_node, "const", base_addr, total_bytes, 0)
+            self.gen_draw_common(x_node, y_node, "const", base_addr, total_bytes, 0, color_node)
         else:
             raise NotImplementedError("drawstring() requires a string literal or a char[] variable")
 
@@ -1952,7 +2266,8 @@ class Compiler:
         NO_PREV = object()
         for p, val in zip(params, arg_vals):
             param_size = self.param_size(p)
-            addr = self.alloc_var(prefix + p.name, param_size)
+            param_fmt = self.type_format(p.type)
+            addr = self.alloc_var(prefix + p.name, param_size, param_fmt)
             pointee = self.param_pointee(p)
             if pointee is not None:
                 self.ptr_elem[addr] = pointee
@@ -1966,7 +2281,9 @@ class Compiler:
             self.var_sizes[p.name] = param_size
             self.var_types[p.name] = p.type
 
-        ret_addr = self.alloc_var(prefix + "__ret", self.function_return_size(fn))
+        ret_type = fn.decl.type.type
+        ret_fmt = self.type_format(ret_type)
+        ret_addr = self.alloc_var(prefix + "__ret", self.function_return_size(fn), ret_fmt)
         end_label = Label(f"end_{prefix}")
 
         self.inlining_stack.append(name)
@@ -2023,6 +2340,7 @@ class Compiler:
         if not isinstance(ty, c_ast.TypeDecl):
             raise NotImplementedError("only typedefs of integer, enum and struct types are supported")
         self.typedefs[node.name] = self.scalar_size(ty)
+        self.typedef_formats[node.name] = self.type_format(ty)
 
     def array_count(self, t, init):
         if t.dim is not None:
@@ -2061,13 +2379,35 @@ class Compiler:
         return bytes(out)
 
     def const_scalar_bytes(self, expr, type_node, forced_size=None):
-        value = self.const_value(expr, "const initializer")
         size = forced_size if forced_size is not None else self.type_size(type_node)
         if size == 0:
             return b""
+        fmt = self.type_format(type_node)
+        if fmt in (7, 8):
+            value = self.const_float_value(expr)
+            return struct.pack(">f" if fmt == 7 else ">d", value)
+        value = self.const_value(expr, "const initializer")
         if value < 0:
             value &= (1 << (size * 8)) - 1
         return value.to_bytes(size, "big")
+
+    def const_float_value(self, node):
+        if isinstance(node, c_ast.Constant) and node.type in ("float", "double"):
+            text = node.value.rstrip("fFlL")
+            return float.fromhex(text) if text.lower().startswith("0x") else float(text)
+        if isinstance(node, c_ast.Constant) and node.type.endswith("int"):
+            return float(self.const_value(node, "const initializer"))
+        if isinstance(node, c_ast.UnaryOp) and node.op in ("+", "-"):
+            value = self.const_float_value(node.expr)
+            return value if node.op == "+" else -value
+        if isinstance(node, c_ast.BinaryOp) and node.op in ("+", "-", "*", "/"):
+            left = self.const_float_value(node.left)
+            right = self.const_float_value(node.right)
+            return {"+": lambda: left + right, "-": lambda: left - right,
+                    "*": lambda: left * right, "/": lambda: left / right}[node.op]()
+        if isinstance(node, c_ast.Cast):
+            return float(self.const_value(node.expr, "const initializer"))
+        raise NotImplementedError("floating-point array initializers must be constant expressions")
 
     def const_array_element_bytes(self, init, type_node):
         if isinstance(type_node, c_ast.ArrayDecl):
@@ -2101,9 +2441,11 @@ class Compiler:
                         raw = self.const_array_element_bytes(item, type_node.type)
                         values.append(int.from_bytes(raw, "big"))
                     else:
-                        values.append(self.const_value(item, "const array value"))
+                        raw = self.const_scalar_bytes(item, type_node.type)
+                        values.append(int.from_bytes(raw, "big"))
                 return values
-            return [self.const_value(init, "const array value")]
+            raw = self.const_scalar_bytes(init, type_node.type)
+            return [int.from_bytes(raw, "big")]
         if isinstance(type_node, c_ast.TypeDecl) and isinstance(type_node.type, c_ast.Struct):
             raw = self.const_struct_bytes(init, type_node.type)
             return [int.from_bytes(raw, "big")]
@@ -2124,6 +2466,8 @@ class Compiler:
             for item in init.exprs:
                 values.extend(self.flatten_const_values(item, type_node))
             return values
+        if self.type_format(type_node) in (7, 8):
+            return [int.from_bytes(self.const_scalar_bytes(init, type_node), "big")]
         return [self.const_value(init, "const array value")]
 
     def gen_array_init(self, node, addr, elem, count):
@@ -2264,9 +2608,14 @@ class Compiler:
             size = self.type_size(t)
 
         addr = self.alloc_var(node.name, size)
+        if elem_for_array is None and ptr_pointee is None:
+            self.addr_formats[addr] = self.type_format(t)
         if elem_for_array is not None:
             self.array_elem_bytes[node.name] = elem_for_array
             self.array_by_addr[addr] = elem_for_array
+            element_fmt = self.type_format(t.type)
+            for index in range(size // elem_for_array):
+                self.addr_formats[addr + index * elem_for_array] = element_fmt
         if ptr_pointee is not None:
             self.ptr_elem[addr] = ptr_pointee
         if node.init is None:

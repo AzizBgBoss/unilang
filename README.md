@@ -14,7 +14,7 @@ embedded targets.
 - `C-interpreter/main.c` — an SDL2 example host wiring `unilang.h` up to a
   desktop window
 - `examples/` — `.c` sources and compiled `.ulc` bytecode (`game/`, `pong/`,
-  `test/`, `microcity/`)
+  `test/`, `microcity/`, `flag6/`)
 
 ---
 
@@ -25,17 +25,18 @@ embedded targets.
   (`loadreg8/16/32`, `storereg8/16/32`, etc.) rather than a generic
   variable-width `mem` operand. Out-of-bounds addresses raise a hard error
   (Python VM) or are bounds-checked and ignored (C VM) — they do not wrap.
-- **16 general-purpose 32-bit registers** (`r0`-`r15`) do all arithmetic,
-  logic, and comparison. Memory is only touched to move a single byte
-  (`setbyte`/`out`/`outc`/`write`/`printv`) or to load/store a register as
-  8/16/32 bits.
+- **16 general-purpose 32-bit registers** (`r0`-`r15`) do integer arithmetic,
+  logic, and comparison. Floating-point opcodes operate on typed values in
+  memory. Memory is byte-addressed, with integer load/store widths of 8/16/32
+  bits and 64-bit double values handled by the float/copy opcodes.
 - **Memory size** is set via `memsize` in `main.py` (Python VM) or the
   `ULVM_MEM_SIZE` macro, defined before `#include "unilang.h"` (C VM).
 - **Flags** (separate from `mem`) configure hardware capabilities, packed as
   4-bit fields:
-  - **Flag 0 — graphics**: `0` disabled, `1` mono 64x64, `2` 4-shade 64x64,
-    `3` 8-bit color 64x64, `4` mono 128x64, `5` 4-shade 128x64, `6` 8-bit
-    color 128x64.
+  - **Flag 0 — graphics**: `0` disabled, `1` mono 64x64, `2` 4-bit grayscale
+    64x64, `3` 8-bit color 64x64, `4` mono 128x64, `5` 4-bit grayscale
+    128x64, `6` 8-bit color 128x64. The SDL host interprets grayscale values
+    as 16 shades and 8-bit color as RGB332.
   - **Flag 1 — keyboard**: `0` disabled, `1` NES-style
     (Up/Down/Left/Right/A/B/Select/Start, 8 bits). Only meaningful once
     graphics are enabled. Bit layout: Up=`1`, Down=`2`, Left=`4`, Right=`8`,
@@ -81,7 +82,7 @@ raw bytes.
 | 0x11 | `return` | — | return from a subroutine |
 | 0x12 | `sleep` | ms | sleep (literal ms, not a memory address) |
 | 0x13 | `refreshscreen` | — | flip the display, then clear the framebuffer |
-| 0x14-0x16 | `romread8/16/32` | reg_addr, reg_dst | read from program bytecode/ROM at the address in reg[reg_addr] |
+| 0x14-0x16 | `romread8/16/32` | reg_addr, reg_dst | read 1, 2, or 4 bytes from program bytecode/ROM |
 | 0x17 | `setpixel` | regx, regy, regc | plot a pixel using x/y/color from registers |
 | 0x18 | `getpixel` | regx, regy, regdst | read a pixel's value into a register |
 | 0x19 | `getkeyboard` | reg | keyboard state → reg |
@@ -89,6 +90,10 @@ raw bytes.
 | 0x1B | `getmemsize` | reg | total memory size (bytes) → reg |
 | 0x1C | `getflag` | flag, reg | flag's current value → reg |
 | 0x1D | `randreg` | min, max, reg | random value in `[min, max)` → reg |
+| 0x20 | `numtostr` | reg, addr, reglen | convert a register value to decimal text |
+| 0x21 | `floatop` | op, format, rleft, rright, rdest | binary32/binary64 arithmetic and comparisons |
+| 0x22 | `floatcast` | src_format, dst_format, rsrc, rdst | typed numeric conversion or 64-bit copy |
+| 0x23 | `romread64` | reg_addr, reg_hi, reg_lo | read 8 bytes from program bytecode/ROM |
 | 0x40 | `setreg` | reg, val | reg = val |
 | 0x41 | `movreg` | dst, src | dst = src |
 | 0x42-0x44 | `loadreg8/16/32` | reg, addr | reg = mem at addr (zero-extended) |
@@ -103,7 +108,16 @@ raw bytes.
 | 0x63-0x65 | `storeregi8/16/32` | reg_addr, reg_val | mem at address reg[reg_addr] = reg[reg_val] |
 | 0x66-0x6B | `eqreg`/`neqreg`/`ltreg`/`gtreg`/`lereg`/`gereg` | r1, r2, dst | dst = 1 if comparison holds, else 0 |
 | 0x6C | `outreg` | reg | print a register's full numeric value |
+| 0x6D-0x6F | `sdivreg`/`smodreg`/`sshrreg` | r1, r2, dst | signed division/remainder and arithmetic right shift |
+| 0x70 | `outregsigned` | reg | print signed 32-bit register value |
 | 0xFF | `exit` | — | halt |
+
+`floatop` formats are `7` for IEEE-754 binary32 and `8` for binary64. Its
+operation selectors are `1` add, `2` subtract, `3` multiply, `4` divide,
+`5` negate, and `6` through `11` for `==`, `!=`, `<`, `>`, `<=`, and `>=`.
+`floatcast` format selectors are `1` signed 8-bit, `2` unsigned 8-bit,
+`3` signed 16-bit, `4` unsigned 16-bit, `5` signed 32-bit, `6` unsigned
+32-bit, `7` float, and `8` double.
 
 Run bytecode with the Python VM: `python main.py -f program.ulc`
 
@@ -126,13 +140,25 @@ and emits `.ulc` bytecode directly (no separate assembler step). Codegen
 targets the register ISA above: every arithmetic/logic/comparison op
 compiles to load-into-register → op → store-back, using two scratch
 registers (r14/r15) that are never assumed to persist across statements.
-r0-r13 are unused by the compiler.
+Floating-point opcodes use address registers r13-r15; registers are not kept
+live across statements.
 
 ### Types and memory sizing
 
-- Fixed-width unsigned types: `bool`, `char`, `uint1`, `uint2`, `uint4`,
-  `uint8`, `uint16`, `uint32`. `bool`/`char`/`uint1`-`uint8` all occupy a
-  full byte (no sub-byte bit-packing); `uint16` is 2 bytes, `uint32` is 4.
+- Integer values support signed and unsigned 8-, 16-, and 32-bit widths.
+  `int`, `long`, and `uint32_t` are 32-bit; `short`/`int16_t` are 16-bit;
+  `char`/`int8_t`/`uint8_t` are 8-bit. Narrow integer expressions are
+  promoted to 32 bits for arithmetic. Signed division, remainder, comparisons,
+  arithmetic right shift, casts, and `%d`/`%i` output use signed semantics.
+- `float` is IEEE-754 binary32 (4 bytes); `double` is IEEE-754 binary64
+  (8 bytes). Arithmetic, comparisons, assignments, casts, arrays, function
+  arguments/returns, and increment/decrement are supported. The C VM host must
+  provide IEEE binary32 and binary64; unsupported host formats fault rather
+  than silently misinterpret values. Float-to-integer conversions outside the
+  representable range produce zero; such conversions are undefined in C.
+- Legacy unsigned types `uint1`, `uint2`, and `uint4` remain accepted. `bool`,
+  `char`, and 8-bit integers occupy a full byte; 16-bit integers occupy 2 bytes,
+  32-bit integers and `float` occupy 4 bytes, and `double` occupies 8.
   `true`/`false` are `1`/`0`.
 - The compiler doesn't hardcode the VM's memory size. Every compiled program
   starts with a prologue that calls `getmemsize` at runtime and compares it
@@ -146,29 +172,30 @@ r0-r13 are unused by the compiler.
   variables can end up sharing an address. Graphics/keyboard have their own
   dedicated buffers on both VMs, so only the program's own variables count
   toward this check.
-- Declarations may have an initializer: `uint8 x;` or `uint16 x = 5;`
+- Declarations may have an initializer: `uint8_t x;` or `uint16_t x = 5;`
 - `const` arrays with literal initializers are stored in ROM, not RAM:
-  `const uint8 rows[6] = { 6, 9, 15, 9, 9, 9 };`
+  `const uint8_t rows[6] = { 6, 9, 15, 9, 9, 9 };`
 - Const strings are null-terminated ROM arrays:
   `const char msg[] = "Hello!";`
 - Character constants such as `'a'`, `'0'`, `'\n'` work as 8-bit values.
 
 ### Supported
 
-- `uint32 main() { ... }` — the entry point; its body is compiled last,
+- `uint32_t main() { ... }` — the entry point; its body is compiled last,
   followed by an implicit `exit`.
 - Assignment: `x = expr;`
 - Arithmetic: `+ - * / %` (binary), `x++` / `x--`
 - Bitwise: `& | ^ << >>`
 - Logical: `&& ||`
 - Comparisons: `== != < > <= >=` — usable directly in `if`/`while`
-  conditions, and also as expressions (`uint8 b = a < c;` works).
+  conditions, and also as expressions (`uint8_t b = a < c;` works).
 - Control flow: `if (...) { } else { }`, `while (...) { }`, `for (...) { }`
-- Functions: `uint32 add(uint32 a, uint32 b) { return a + b; }` — see
+- Functions: `uint32_t add(uint32_t a, uint32_t b) { return a + b; }` — see
   caveats below.
-- `printf("literal text\n");` and `printf("...%d...\n", expr);` — one or
-  more `%d`, matched left-to-right against extra arguments; no other format
-  specifiers.
+- `printf("literal text\n");` and `printf("...%d...\n", expr);` — `%d`, `%i`,
+  `%u`, `%c`, `%s`, and `%%` are supported without width/precision modifiers.
+  `%d`/`%i` print signed values; floating-point values can be cast to an
+  integer for output (direct `%f` formatting is not implemented).
 - `exit();` — halts immediately (statement only, not an expression).
 - Comments: `// line` and `/* block */`, stripped before parsing
   (string/char literals containing `//`/`/*` are left alone).
@@ -194,7 +221,7 @@ r0-r13 are unused by the compiler.
 - `printf` supports `%d %i %u %c %s %%` (no width/precision); also `puts`,
   `putchar`, and C-style `rand()` (0..32767) besides `rand(min, max)`.
 - **Compatibility notes**: the compiler supports a broader C-like subset used
-  by the MicroCity project, including signed integer semantics, struct and
+  by the MicroCity project, including struct and
   bitfield access, multi-file directory inputs, AVR-style `pgmspace` shims,
   C++-style tag names, and constant ROM arrays. The compiler still keeps the
   VM's simplified memory model: pointers are byte-addressed, `const` ROM data is
@@ -203,8 +230,13 @@ r0-r13 are unused by the compiler.
 - **Builtins** for hardware access:
   - `flag(index, value);` — raw `flag` opcode. Statement only.
   - `setpixel(x, y, val);` — plots a pixel via the native `setpixel` opcode.
-    `x`/`y` may be any supported integer width; `val` is treated as boolean.
+    `x`/`y` may be any supported integer width; `val` is passed as an 8-bit
+    pixel value, which carries the RGB332 color in 8-bit graphics mode.
     Statement only.
+  - `drawchar(c, x, y[, color])` and
+    `drawstring(text, x, y[, color])` — draw glyphs with the optional pixel
+    color; the default color is `1` for existing programs.
+    In flag 6, colors use the same RGB332 byte values as `setpixel`.
   - `getpixel(x, y)` — reads a pixel back. Returns a value.
   - `getkey()` — reads the 8-bit NES-style keyboard state. Assumes
     `flag(0, ...)` and `flag(1, 1)` were already set. Returns a value.
@@ -214,8 +246,8 @@ r0-r13 are unused by the compiler.
   - `refreshscreen();` — flips the display and clears the framebuffer for
     the next frame. Call once per frame, after your `setpixel` calls.
   - `input(&name);` — reads external input into a variable.
-  - `romread(pos, size)` — expression form of `romread8/16/32`. `pos` is a
-    ROM byte offset expression; `size` must be a constant `1`, `2`, or `4`.
+  - `romread(pos, size)` — expression form of `romread8/16/32/64`. `pos` is a
+    ROM byte offset expression; `size` must be a constant `1`, `2`, `4`, or `8`.
 
 ### How functions work (and their limits)
 
@@ -242,9 +274,8 @@ copy." This sidesteps the ISA's limited call-stack support entirely, so:
 
 ### Other limitations
 
-- Only fixed-width unsigned types: no pointers as a first-class type (`&x`
-  works for taking an address into a `uint32`, but there's no pointer
-  arithmetic/dereference syntax beyond that), no structs, no floats.
+- 64-bit integer types (`long long`, `int64_t`, and `uint64_t`), `long double`,
+  unions, and direct `printf("%f", value)` formatting are not supported.
 - **Variables are never freed.** Every declaration (globals, function-call
   locals, compiler-generated temporaries) permanently owns its address for
   the program's whole lifetime.
@@ -260,18 +291,18 @@ copy." This sidesteps the ISA's limited call-stack support entirely, so:
 #define MAX_ITERS 5
 #define addfour(x) (x + 4)
 
-uint32 add(uint32 a, uint32 b) {
+uint32_t add(uint32_t a, uint32_t b) {
     return a + b;
 }
 
-uint32 main() {
+uint32_t main() {
     if (isflagsupported(0, 1)) {
         flag(0, 1);   // mono 64x64 graphics on
         flag(1, 1);   // NES keyboard on
     }
 
-    uint32 i = 0;
-    uint32 sum = 0;
+    uint32_t i = 0;
+    uint32_t sum = 0;
 
     while (i < MAX_ITERS) {
         i = i + 1;
@@ -290,7 +321,7 @@ uint32 main() {
     setpixel(i, 0, 1);
     refreshscreen();
 
-    uint8 key = getkey();
+    uint8_t key = getkey();
     if (key != 0) {
         printf("key: %d\n", key);
     }
@@ -333,7 +364,7 @@ while (!ULVM_handlenextinstruction(&vm)) { /* runs until OP_EXIT */ }
 ```
 
 - `outputchar`/`readbyte` are the only required callbacks (text output,
-  bytecode/ROM fetch). `readbyte` is also reused for `romread8/16/32`
+  bytecode/ROM fetch).   `readbyte` is also reused for `romread8/16/32/64`
   (absolute-address reads into the program's own bytecode), since on
   ROM-paged targets that isn't necessarily a flat pointer into RAM.
 - Any other callback left `NULL` makes that opcode a safe no-op / return-0
@@ -343,6 +374,8 @@ while (!ULVM_handlenextinstruction(&vm)) { /* runs until OP_EXIT */ }
   this is how the host knows when to create/destroy a window (or turn on a
   physical display) and at what size, rather than polling. `colorsize` is
   bits-per-pixel (1/4/8) matching the flag-0 mode table.
+- The SDL host supports all six graphics modes: 1-bit monochrome, 4-bit
+  grayscale, and 8-bit RGB332 color at 64x64 or 128x64.
 - **`clearscreen()`** is called automatically right after `refreshscreen()`
   fires, matching the VM's "flip then clear" framebuffer semantics from
   Section 1 — the host doesn't need to remember to clear manually.
@@ -374,5 +407,7 @@ using extra RAM beyond two small fields (a pointer and a length):
   and do your own housekeeping (event polling, watchdog) between calls.
 
 On a desktop test loop this made a compute-heavy program run about 2.2x
-faster. Everything uses 32-bit integer math only (no `uint64_t`) and plain
-`switch` dispatch, so it builds on 8-bit AVR and similar compilers unchanged.
+faster. Integer arithmetic remains 32-bit; floating-point operations use the
+host's IEEE binary32/binary64 arithmetic. A target without binary64 support
+can still run integer and `float` programs, but bytecode requiring `double`
+will fault.
