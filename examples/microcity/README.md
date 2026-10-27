@@ -1,6 +1,17 @@
 # MicroCity
 
-Build with `python compiler.py examples/microcity -o examples/microcity/microcity.ulc`.
-Run under the VM with `python main.py -f examples/microcity/microcity.ulc`.
-Controls: Up/Down/Left/Right move the cursor; A/B select/build actions; save/load is RAM-only fake state, not EEPROM-backed.
-The project is the VM-compatible port of the Arduboy city-builder, using the same ROM-backed tiles and UI layout.
+## Current status
+
+The source is an experimental multi-file, VM-compatible port of an Arduboy
+city-builder. It uses ROM-backed tiles and keeps save data in RAM for the
+duration of a run; the VM does not provide EEPROM persistence.
+
+The current compiler fails while generating a struct-member lvalue in this
+project, so the source does not compile yet. The checked-in
+`microcity.ulc` is retained as a reference artifact and may not match the
+current sources.
+
+Controls in the game: Up/Down/Left/Right move the cursor; A and B select or
+build.
+
+See the root [README](../../README.md#quick-start) for compiler and VM setup.

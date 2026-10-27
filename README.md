@@ -1,20 +1,40 @@
 # unilang
 
 A custom low-level bytecode ISA (`uniClang`) targeting NDS/GBA-class and
-Arduino-class hardware, a Python reference VM, a small C-like compiler that
-emits bytecode for it, and a portable C header implementing the same ISA for
-embedded targets.
+Arduino-class hardware, a small C-like compiler that emits bytecode, and a
+portable C VM with an SDL2 desktop host and embedded-target callbacks.
 
-- `main.py` — the Python reference VM (interprets compiled `.ulc` files)
-- `compiler.py` — the uniClang compiler (reads C source, `.c`, and emits `.ulc`)
-- `preprocessor.py` — the C preprocessor used by the compiler (`#include`, `#define`, `#if`...)
+- `compiler.py` — compiles supported C-like source into `.ulc` bytecode
+- `preprocessor.py` — handles source preprocessing (`#include`, `#define`,
+  conditional compilation, and related directives)
 - `C-interpreter/unilang.h` — a header-only C implementation of the VM, for
   Arduino/embedded targets; graphics, keyboard, timing, and I/O are all
   optional host callbacks (see Section 3)
 - `C-interpreter/main.c` — an SDL2 example host wiring `unilang.h` up to a
   desktop window
-- `examples/` — `.c` sources and compiled `.ulc` bytecode (`game/`, `pong/`,
-  `test/`, `microcity/`, `flag6/`)
+- `examples/` — programs demonstrating games, graphics, numeric types, and
+  multi-file projects; see [the examples index](examples/README.md)
+
+## Quick start
+
+Install Python and `pycparser`, then compile an example:
+
+```sh
+python -m pip install pycparser
+python compiler.py examples/cube3d/cube3d.c -o examples/cube3d/cube3d.ulc
+```
+
+To run it on a desktop, install an SDL2 development package and a C compiler,
+build the SDL host, and launch the bytecode:
+
+```sh
+cc -std=c11 -O2 C-interpreter/main.c -o C-interpreter/main \
+  $(pkg-config --cflags --libs sdl2) -lm
+C-interpreter/main examples/cube3d/cube3d.ulc
+```
+
+The same commands work in WSL/Linux. Rebuild the SDL host whenever VM or
+interpreter source changes; the checked-in executable may be out of date.
 
 ---
 
@@ -23,14 +43,14 @@ embedded targets.
 - **Byte-addressable memory.** Every address is a byte offset. Loads/stores
   come in fixed widths (1, 2, or 4 bytes) via dedicated opcodes
   (`loadreg8/16/32`, `storereg8/16/32`, etc.) rather than a generic
-  variable-width `mem` operand. Out-of-bounds addresses raise a hard error
-  (Python VM) or are bounds-checked and ignored (C VM) — they do not wrap.
+  variable-width `mem` operand. The C VM bounds-checks memory access; addresses
+  do not wrap.
 - **16 general-purpose 32-bit registers** (`r0`-`r15`) do integer arithmetic,
   logic, and comparison. Floating-point opcodes operate on typed values in
   memory. Memory is byte-addressed, with integer load/store widths of 8/16/32
   bits and 64-bit double values handled by the float/copy opcodes.
-- **Memory size** is set via `memsize` in `main.py` (Python VM) or the
-  `ULVM_MEM_SIZE` macro, defined before `#include "unilang.h"` (C VM).
+- **Memory size** is set with the `ULVM_MEM_SIZE` macro, defined before
+  `#include "unilang.h"`.
 - **Flags** (separate from `mem`) configure hardware capabilities, packed as
   4-bit fields:
   - **Flag 0 — graphics**: `0` disabled, `1` mono 64x64, `2` 4-bit grayscale
@@ -41,15 +61,12 @@ embedded targets.
     (Up/Down/Left/Right/A/B/Select/Start, 8 bits). Only meaningful once
     graphics are enabled. Bit layout: Up=`1`, Down=`2`, Left=`4`, Right=`8`,
     C=`16`, V=`32`, Backspace=`64`, Enter=`128`.
-- **No VM-owned framebuffer in the C interpreter.** `setpixel`/`getpixel`
-  forward straight to host callbacks — the host owns however (or whether) it
-  stores pixels. The Python VM still keeps its own framebuffer + pygame
-  window internally.
-- **Call stack**: the Python VM uses a single global return-address
-  register (`subroutine`/`return` cannot nest); the C VM (`unilang.h`) has a
-  real bounded call stack (`ULVM_CALLSTACK_SIZE`, default 16), so nested
-  subroutine calls work there. The compiler avoids relying on either — see
-  Section 2.
+- **Host-owned graphics.** `setpixel`/`getpixel` forward to callbacks; the
+  SDL host owns a framebuffer and window, while embedded hosts can use their
+  own display implementation.
+- **Call stack**: the C VM (`unilang.h`) has a bounded call stack
+  (`ULVM_CALLSTACK_SIZE`, default 16). The compiler avoids depending on it by
+  inlining function calls — see Section 2.
 - **Screen redraw is explicit.** The VM only flips/clears the display when
   the bytecode executes `refreshscreen`; draw a complete frame with
   `setpixel` calls, then call `refreshscreen` once per frame.
@@ -119,21 +136,20 @@ operation selectors are `1` add, `2` subtract, `3` multiply, `4` divide,
 `3` signed 16-bit, `4` unsigned 16-bit, `5` signed 32-bit, `6` unsigned
 32-bit, `7` float, and `8` double.
 
-Run bytecode with the Python VM: `python main.py -f program.ulc`
-
 ---
 
 ## 2. The C-to-ULC compiler (`compiler.py`)
 
 ```
-pip install pycparser
+python -m pip install pycparser
 python compiler.py input.c -o output.ulc [-I dir] [-D NAME=value]
 python compiler.py examples/microcity -o examples/microcity/microcity.ulc
-python main.py -f output.ulc
 ```
 
-Directory and multi-file inputs are supported as well, so the MicroCity
-project can be compiled directly from its source folder.
+Directory and multi-file inputs are supported. MicroCity is an experimental
+port; its current source hits a compiler limitation while generating a struct
+member lvalue and does not compile yet. The regression script reports it as a
+known skip.
 
 It parses a **deliberately small subset of C-like syntax** with `pycparser`
 and emits `.ulc` bytecode directly (no separate assembler step). Codegen
@@ -166,12 +182,11 @@ live across statements.
   compile time), printing a warning if there isn't enough room:
   ```
   WARNING: this program needs at least 5344 bytes of memory, but only 4096
-  are available. Increase 'memsize' in main.py.
+  are available. Increase ULVM_MEM_SIZE in the VM host.
   ```
   The program still runs after the warning — it just may misbehave, since
-  variables can end up sharing an address. Graphics/keyboard have their own
-  dedicated buffers on both VMs, so only the program's own variables count
-  toward this check.
+  variables can end up sharing an address. Host-owned graphics buffers are
+  separate from VM RAM and do not count toward this check.
 - Declarations may have an initializer: `uint8_t x;` or `uint16_t x = 5;`
 - `const` arrays with literal initializers are stored in ROM, not RAM:
   `const uint8_t rows[6] = { 6, 9, 15, 9, 9, 9 };`
@@ -221,11 +236,12 @@ live across statements.
 - `printf` supports `%d %i %u %c %s %%` (no width/precision); also `puts`,
   `putchar`, and C-style `rand()` (0..32767) besides `rand(min, max)`.
 - **Compatibility notes**: the compiler supports a broader C-like subset used
-  by the MicroCity project, including struct and
-  bitfield access, multi-file directory inputs, AVR-style `pgmspace` shims,
-  C++-style tag names, and constant ROM arrays. The compiler still keeps the
-  VM's simplified memory model: pointers are byte-addressed, `const` ROM data is
-  read-only, and functions are inlined instead of recursively called.
+  by the MicroCity project, including struct and bitfield access, multi-file
+  directory inputs, AVR-style `pgmspace` shims, C++-style tag names, and
+  constant ROM arrays. MicroCity currently has a compiler limitation noted
+  above. The compiler still keeps the VM's simplified memory model: pointers
+  are byte-addressed, `const` ROM data is read-only, and functions are inlined
+  instead of recursively called.
   `alloc N x;` and `MEMORY[a:b]` remain legacy non-C extensions.
 - **Builtins** for hardware access:
   - `flag(index, value);` — raw `flag` opcode. Statement only.
@@ -279,11 +295,6 @@ copy." This sidesteps the ISA's limited call-stack support entirely, so:
 - **Variables are never freed.** Every declaration (globals, function-call
   locals, compiler-generated temporaries) permanently owns its address for
   the program's whole lifetime.
-- **No `rand`/randomness builtin.** The VM opcode `randreg` (0x1D) exists on
-  both interpreters, but `compiler.py` has no `OPS` entry or builtin
-  wrapping it, so it's currently unreachable from uniClang source. Use the
-  raw opcode directly if you need it (hand-assemble, or add a builtin
-  following the pattern of `getkey`/`isflagsupported` in `compiler.py`).
 
 ### Example
 

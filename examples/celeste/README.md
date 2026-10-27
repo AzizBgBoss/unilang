@@ -20,17 +20,16 @@ dash over it. Controls and dash readiness stay in the bottom bar.
 
 Compile from the repository root:
 
-```powershell
-python .\compiler.py .\examples\celeste\celeste.c -o .\examples\celeste\celeste.ulc
+```sh
+python compiler.py examples/celeste/celeste.c -o examples/celeste/celeste.ulc
 ```
 
-Run the resulting bytecode with a compatible uniClang VM. When using the SDL
-interpreter in WSL/Linux, rebuild it after VM or opcode changes, then run:
+Build the SDL interpreter once, then run the bytecode:
 
 ```sh
-gcc -Wall -Wextra -std=c11 C-interpreter/main.c -o C-interpreter/main \
+cc -std=c11 -O2 C-interpreter/main.c -o C-interpreter/main \
   $(pkg-config --cflags --libs sdl2) -lm
 ./C-interpreter/main examples/celeste/celeste.ulc
 ```
 
-The Python VM mentioned in the root README is not included in this workspace.
+See the root [README](../../README.md#quick-start) for setup details.

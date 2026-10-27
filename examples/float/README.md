@@ -11,6 +11,8 @@ python compiler.py examples/float/float.c -o examples/float/float.ulc
 C-interpreter/main examples/float/float.ulc
 ```
 
+See the root [README](../../README.md#quick-start) for SDL host setup.
+
 Expected output:
 
 ```text
