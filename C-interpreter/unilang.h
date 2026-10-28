@@ -22,12 +22,14 @@ Operand encoding conventions (all big-endian):
 
 - flag 0 (graphics) (this will consume the last n bits of memory):
 0 - disable graphics
-1 - enable monochrome graphics (64x64) (1 x 64 x 64 = 4096 bits = 512 bytes)
-2 - enable 4-bit grayscale graphics (16 shades, 64x64) (4 x 64 x 64 = 16384 bits = 2048 bytes)
-3 - enable 8-bit color graphics (64x64) (8 x 64 x 64 = 32768 bits = 4096 bytes)
-4 - enable monochrome graphics (128x64) (1 x 128 x 64 = 8192 bits = 1024 bytes)
-5 - enable 4-bit grayscale graphics (16 shades, 128x64) (4 x 128 x 64 = 32768 bits = 4096 bytes)
-6 - enable 8-bit color graphics (128x64) (8 x 128 x 64 = 65536 bits = 8192 bytes)
+1 - enable monochrome graphics (64x64) (1 x 64 x 64 = 4096 bits = 512 bytes = 0.5 KB)
+2 - enable 2-bit grayscale graphics (4 shades, 64x64) (2 x 64 x 64 = 8192 bits = 1024 bytes = 1 KB)
+3 - enable 8-bit color graphics (64x64) (8 x 64 x 64 = 32768 bits = 4096 bytes = 4 KB)
+4 - enable monochrome graphics (128x64) (1 x 128 x 64 = 8192 bits = 1024 bytes = 1 KB)
+5 - enable 2-bit grayscale graphics (4 shades, 128x64) (2 x 128 x 64 = 16384 bits = 2048 bytes = 2 KB)
+6 - enable 8-bit color graphics (128x64) (8 x 128 x 64 = 65536 bits = 8192 bytes = 8 KB)
+7 - enable 16-bit RGB555 color graphics (128x128) (16 x 128 x 128 = 262144 bits = 32768 bytes = 32 KB)
+8 - enable 16-bit RGB555 color graphics (256x128) (16 x 256 x 128 = 524288 bits = 65536 bytes = 64 KB)
 
 - flag 1 (keyboard) (this will consume the last n bits of memory (after graphics if it's used)) (Only gets supported once graphics are supported and on):
 0 - disable keyboard
@@ -259,8 +261,8 @@ typedef struct UnilangVM UnilangVM;
 typedef void     (*vm_outputchar)(char c);
 typedef uint8_t  (*vm_readbyte)(uint32_t addr);
 typedef int      (*vm_isflagsupported)(uint8_t flag, uint8_t val);
-typedef void     (*vm_setpixel)(uint8_t x, uint8_t y, uint8_t color);
-typedef uint8_t  (*vm_getpixel)(uint8_t x, uint8_t y);
+typedef void     (*vm_setpixel)(uint8_t x, uint8_t y, uint16_t color);
+typedef uint16_t (*vm_getpixel)(uint8_t x, uint8_t y);
 typedef uint8_t  (*vm_getkeyboard)(void);
 typedef uint32_t (*vm_gettime)(void);
 typedef void     (*vm_sleep)(uint32_t ms);
@@ -682,11 +684,13 @@ static inline void ulvm_graphics_dims(uint8_t val, uint16_t *wx, uint16_t *wy, u
     case 4: *wx = 128; *wy = 64; *colorsize = 1; break;
     case 5: *wx = 128; *wy = 64; *colorsize = 4; break;
     case 6: *wx = 128; *wy = 64; *colorsize = 8; break;
+    case 7: *wx = 128; *wy = 128; *colorsize = 16; break;
+    case 8: *wx = 256; *wy = 128; *colorsize = 16; break;
     default: *wx = 0; *wy = 0; *colorsize = 0; break;
     }
 }
 
-static inline void ulvm_drawchar(UnilangVM *vm, uint16_t x, uint16_t y, uint8_t color, uint8_t c)
+static inline void ulvm_drawchar(UnilangVM *vm, uint16_t x, uint16_t y, uint16_t color, uint8_t c)
 {
     if (!vm->setpixel)
         return;
@@ -705,7 +709,7 @@ static inline void ulvm_drawchar(UnilangVM *vm, uint16_t x, uint16_t y, uint8_t 
     }
 }
 
-static inline void ulvm_drawstring(UnilangVM *vm, uint8_t color, char c)
+static inline void ulvm_drawstring(UnilangVM *vm, uint16_t color, char c)
 {
     if (c == '\n')
     {
@@ -729,7 +733,7 @@ static inline void ulvm_drawstring(UnilangVM *vm, uint8_t color, char c)
     }
 }
 
-static inline void ulvm_drawstring_mem(UnilangVM *vm, uint16_t x, uint16_t y, uint8_t color,
+static inline void ulvm_drawstring_mem(UnilangVM *vm, uint16_t x, uint16_t y, uint16_t color,
                                         uint32_t addr, uint32_t len, uint8_t rom,
                                         uint16_t *retx, uint16_t *rety)
 {
@@ -1033,7 +1037,7 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
         uint8_t ry = (uint8_t)ULVM_NEXTBYTE();
         uint8_t rc = (uint8_t)ULVM_NEXTBYTE();
         if (vm->setpixel)
-            vm->setpixel((uint8_t)ULVM_R(rx), (uint8_t)ULVM_R(ry), (uint8_t)ULVM_R(rc));
+            vm->setpixel((uint8_t)ULVM_R(rx), (uint8_t)ULVM_R(ry), (uint16_t)ULVM_R(rc));
         break;
     }
 
@@ -1105,7 +1109,7 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
         uint8_t regreturnx = (uint8_t)ULVM_NEXTBYTE();
         uint8_t regreturny = (uint8_t)ULVM_NEXTBYTE();
         uint16_t retx, rety;
-        ulvm_drawstring_mem(vm, (uint16_t)ULVM_R(regx), (uint16_t)ULVM_R(regy), (uint8_t)ULVM_R(regcolor),
+        ulvm_drawstring_mem(vm, (uint16_t)ULVM_R(regx), (uint16_t)ULVM_R(regy), (uint16_t)ULVM_R(regcolor),
                             ULVM_R(regaddr), ULVM_R(reglen), src, &retx, &rety);
         ULVM_R(regreturnx) = retx;
         ULVM_R(regreturny) = rety;

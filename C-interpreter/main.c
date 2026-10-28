@@ -15,8 +15,8 @@ static int debug_enabled = 0;
 #define DEBUG_ERROR(...) \
     do { if (debug_enabled) fprintf(stderr, __VA_ARGS__); } while (0)
 
-#define FRAMEBUFFER_WIDTH 128
-#define FRAMEBUFFER_HEIGHT 64
+#define FRAMEBUFFER_WIDTH 256
+#define FRAMEBUFFER_HEIGHT 128
 
 static uint8_t *rom = NULL;
 static long romsize = 0;
@@ -24,11 +24,12 @@ static long romsize = 0;
 static SDL_Window *window = NULL;
 static SDL_Renderer *renderer = NULL;
 static SDL_Texture *screen_texture = NULL;
-static uint8_t framebuffer[FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT];
+static uint16_t framebuffer[FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT];
 static uint32_t display_buffer[FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT];
 static uint16_t graphics_width = 0;
 static uint16_t graphics_height = 0;
 static uint8_t graphics_colorsize = 0;
+static int scale = SCALE;
 static uint32_t presented_frames = 0;
 static uint32_t last_frame_time = 0;
 static uint8_t previous_keyboard_state = 0;
@@ -45,7 +46,7 @@ static uint8_t my_readbyte(uint32_t addr)
     return 0;
 }
 
-static void my_setpixel(uint8_t x, uint8_t y, uint8_t color)
+static void my_setpixel(uint8_t x, uint8_t y, uint16_t color)
 {
     if (!graphics_colorsize || x >= graphics_width || y >= graphics_height)
         return;
@@ -53,12 +54,16 @@ static void my_setpixel(uint8_t x, uint8_t y, uint8_t color)
     if (graphics_colorsize == 1)
         color = color ? 1 : 0;
     else if (graphics_colorsize == 4)
-        color &= 0x0F;
+        color &= 0x03;
+    else if (graphics_colorsize == 8)
+        color &= 0xFF;
+    else if (graphics_colorsize == 16)
+        color &= 0x7FFF;
 
     framebuffer[(size_t)y * FRAMEBUFFER_WIDTH + x] = color;
 }
 
-static uint8_t my_getpixel(uint8_t x, uint8_t y)
+static uint16_t my_getpixel(uint8_t x, uint8_t y)
 {
     if (!graphics_colorsize || x >= graphics_width || y >= graphics_height)
         return 0;
@@ -67,7 +72,7 @@ static uint8_t my_getpixel(uint8_t x, uint8_t y)
 
 static void my_disablegraphics(void);
 
-static uint32_t my_color_to_argb(uint8_t color)
+static uint32_t my_color_to_argb(uint16_t color)
 {
     uint8_t red;
     uint8_t green;
@@ -79,7 +84,13 @@ static uint32_t my_color_to_argb(uint8_t color)
     }
     else if (graphics_colorsize == 4)
     {
-        red = green = blue = (uint8_t)((color & 0x0F) * 17);
+        red = green = blue = (uint8_t)((color & 0x03) * 85);
+    }
+    else if (graphics_colorsize == 16)
+    {
+        red = (uint8_t)(((color >> 10) & 0x1F) * 255 / 31);
+        green = (uint8_t)(((color >> 5) & 0x1F) * 255 / 31);
+        blue = (uint8_t)((color & 0x1F) * 255 / 31);
     }
     else
     {
@@ -128,8 +139,8 @@ static void my_clearscreen(void)
 
 static void my_enablegraphics(uint16_t wx, uint16_t wy, uint8_t colorsize)
 {
-    if ((wx != 64 && wx != 128) || wy != 64 ||
-        (colorsize != 1 && colorsize != 4 && colorsize != 8))
+    if ((wx != 64 && wx != 128 && wx != 256) || (wy != 64 && wy != 128) ||
+        (colorsize != 1 && colorsize != 4 && colorsize != 8 && colorsize != 16))
     {
         DEBUG_ERROR("[debug] unsupported graphics mode: %ux%u, %u bits per pixel\n",
                     wx, wy, colorsize);
@@ -137,9 +148,10 @@ static void my_enablegraphics(uint16_t wx, uint16_t wy, uint8_t colorsize)
     }
 
     my_disablegraphics();
-    DEBUG_PRINT("[debug] enabling graphics: %ux%u, scale=%d\n", wx, wy, SCALE);
+    scale = (wx <= 128 && wy <= 64) ? SCALE : 5;
+    DEBUG_PRINT("[debug] enabling graphics: %ux%u, scale=%d\n", wx, wy, scale);
     window = SDL_CreateWindow("unilang", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                               wx * SCALE, wy * SCALE, 0);
+                               wx * scale, wy * scale, 0);
     if (!window)
     {
         DEBUG_ERROR("[debug] SDL_CreateWindow failed: %s\n", SDL_GetError());
@@ -233,7 +245,7 @@ static int my_isflagsupported(uint8_t flag, uint8_t val)
     int supported = 0;
     if (flag == 0)
     {
-        supported = val >= 1 && val <= 6;
+        supported = val >= 1 && val <= 8;
     }
     else if (flag == 1)
     {

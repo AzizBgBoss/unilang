@@ -99,6 +99,7 @@ uint32_t main() {
         draw_rect(paddle_x, paddle_y, paddle_w, paddle_h, 1);
         draw_rect(ball_x, ball_y, 2, 2, 1);
         refreshscreen();
+        sleep(16);
     }
 
     return 0;
