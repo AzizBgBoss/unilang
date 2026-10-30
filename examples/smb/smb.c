@@ -11,9 +11,12 @@
 #define KEY_RUN (1 << 5)
 #define KEY_DOWN (1 << 1)
 #define FRAME_MS 16
-#define MAXE 10
+#define MAXE 12
+#define POLE_X 1584
+#define START_X 24
 
-// entity types: 1 mario, 2 goomba, 3 mushroom, 4 coin pop, 5 squished goomba
+// entity types: 1 mario, 2 goomba, 3 mushroom, 4 coin pop, 5 squished goomba, 6 koopa, 7 shell,
+// 8 fireball, 9 fire flower, 10 star, 11 1up
 int ex[MAXE];
 int ey[MAXE];
 int edx[MAXE];
@@ -48,6 +51,18 @@ int xflip = 0;
 int crouch = 0;
 int timeleft = 400;
 int won = 0;
+int star_t = 0;
+int pole = 0;
+int pole_t = 0;
+int flag_y = 16;
+int lives = 3;
+int bump_t = 0;
+int bump_x = 0;
+int bump_y = 0;
+int bump_tile = 0;
+int bump_item = 0;
+int bump_final = 3;
+int cbhits = 0;
 
 // ---- helpers ------------------------------------------------------------------------------
 int tileat(int px, int py)
@@ -81,7 +96,9 @@ void spawn(uint8_t type, int x, int y, int dx, int dy)
             etm[i] = 0;
             ew[i] = 7;
             eh[i] = 7;
-            if (type == 3) { ew[i] = 6; eh[i] = 8; etm[i] = 35; }
+            if (type == 3 || type == 9 || type == 10 || type == 11) { ew[i] = 6; eh[i] = 8; etm[i] = 35; }
+            if (type == 6 || type == 7) { ew[i] = 6; }
+            if (type == 8) { ew[i] = 4; eh[i] = 4; etm[i] = 256; }
             if (type == 4) { etm[i] = 24; }
             return;
         }
@@ -92,6 +109,7 @@ void spawn(uint8_t type, int x, int y, int dx, int dy)
 // block hit from below (Mario moving up)
 void bump(int px, int py)
 {
+    if (bump_t > 0) return;
     int cx = px >> 3;
     int cy = py >> 3;
     int idx = cy * LVL_W + cx;
@@ -109,22 +127,36 @@ void bump(int px, int py)
         {
             lvl[idx] = 0;
             score = score + 50;
+            return;
         }
-        return;
     }
     if (t == 2 || t == 6 || t == 174)
     {
-        lvl[idx] = 3;
-        if (v == 1 || v == 2 || v == 4 || v == 9 || v == 11 || v == 0)
+        bump_x = cx;
+        bump_y = cy;
+        bump_t = 8;
+        bump_tile = t;
+        bump_final = 3;
+        bump_item = 0;
+        if (t == 6 && v == 0) bump_final = 6;
+        if (v == 1 || v == 2 || v == 4 || v == 9 || v == 11 || (v == 0 && t != 6))
         {
             spawn(4, cx * 8 + 4, cy * 8 - 4, 0, 0 - 614);
             coins = coins + 1;
             score = score + 200;
+            if (v == 4)
+            {
+                cbhits = cbhits + 1;
+                if (cbhits < 10) bump_final = 6;
+            }
         }
-        else
+        if (v == 3 || v == 5)
         {
-            spawn(3, cx * 8 + 4, cy * 8 + 4, 0, 0 - 51);
+            bump_item = 1;
+            if (hp >= 2) bump_item = 2;
         }
+        if (v == 6) bump_item = 3;
+        if (v == 7 || v == 8 || v == 10) bump_item = 4;
     }
 }
 
@@ -238,6 +270,22 @@ void draw_world()
         }
         y = y + 1;
     }
+    uint8_t q = 1;
+    while (q < MAXE)
+    {
+        if ((et[q] == 3 || et[q] == 9 || et[q] == 10 || et[q] == 11) && etm[q] > 0)
+        {
+            if (et[q] == 3) set_lut(8, 2, 3, 4, 5);
+            if (et[q] == 9) set_lut(1, 2, 3, 4, 5);
+            if (et[q] == 10) set_lut(1, 2, 3, 4, 5);
+            if (et[q] == 11) set_lut(12, 2, 3, 4, 5);
+            int s0 = 139;
+            if (et[q] == 9) s0 = 140;
+            if (et[q] == 10) s0 = 141;
+            draw8(s0, (ex[q] >> 8) - 4 - camx, (ey[q] >> 8) - 4 - camy, 0);
+        }
+        q = q + 1;
+    }
     // tiles use the world-1 draw palette (1->4, 2->15, 8->12) and the cart's animated colour 10
     uint8_t i = 0;
     while (i < 16)
@@ -260,11 +308,19 @@ void draw_world()
         while (tx <= ((camx + 127) >> 3) && tx < LVL_W)
         {
             int t = lvl[ty * LVL_W + tx];
-            if (t != 0) draw8(t, tx * 8 - camx, ty * 8 - camy, 0);
+            if (t != 0 && !(bump_t > 0 && tx == bump_x && ty == bump_y)) draw8(t, tx * 8 - camx, ty * 8 - camy, 0);
             tx = tx + 1;
         }
         ty = ty + 1;
     }
+    if (bump_t > 0)
+    {
+        int off = bump_t;
+        if (bump_t > 4) off = 9 - bump_t;
+        draw8(bump_tile, bump_x * 8 - camx, bump_y * 8 - camy - off, 0);
+    }
+    // flagpole pennant
+    draw8(172, POLE_X - 4 - camx, flag_y - camy, 0);
 }
 
 void draw_entities()
@@ -276,33 +332,78 @@ void draw_entities()
         {
             int sx = (ex[i] >> 8) - 4 - camx;
             int sy = (ey[i] >> 8) - 4 - camy;
-            if (et[i] == 2)
+            int tt = et[i];
+            if (tt == 2)
             {
                 set_lut(0, 4, 15, 9, 5);
                 draw8(107, sx, sy, (frame >> 3) & 1);
             }
-            if (et[i] == 5)
+            if (tt == 5)
             {
                 set_lut(0, 4, 15, 9, 5);
                 draw8(123, sx, sy, 0);
             }
-            if (et[i] == 3)
+            if (tt == 6)
             {
-                set_lut(8, 2, 3, 4, 5);
-                draw8(139, sx, sy, 0);
+                set_lut(1, 9, 3, 4, 5);
+                int fl = 0;
+                if (edx[i] > 0) fl = 1;
+                draw8(91 + ((frame >> 3) & 1), sx, sy, fl);
+                draw8(75 + ((frame >> 3) & 1), sx, sy - 8, fl);
             }
-            if (et[i] == 4)
+            if (tt == 7)
+            {
+                set_lut(1, 9, 3, 4, 5);
+                draw8(93, sx, sy, 0);
+            }
+            if (etm[i] <= 0 || tt == 2 || tt == 5 || tt == 6 || tt == 7 || tt == 8)
+            {
+                if (tt == 3)
+                {
+                    set_lut(8, 2, 3, 4, 5);
+                    draw8(139, sx, sy, 0);
+                }
+                if (tt == 9)
+                {
+                    set_lut(1, 2, 3, 4, 5);
+                    draw8(140, sx, sy, 0);
+                }
+                if (tt == 10)
+                {
+                    set_lut(1, 2, 3, 4, 5);
+                    draw8(141, sx, sy, 0);
+                }
+                if (tt == 11)
+                {
+                    set_lut(12, 2, 3, 4, 5);
+                    draw8(139, sx, sy, 0);
+                }
+            }
+            if (tt == 4)
             {
                 set_lut(1, 2, 3, 4, 5);
                 draw8(192 + ((frame / 3) & 3), sx, sy, 0);
+            }
+            if (tt == 8)
+            {
+                set_lut(1, 2, 3, 4, 5);
+                draw8(136, sx, sy, 0);
             }
         }
         i = i + 1;
     }
     // Mario
-    if (dead_t > 0 || (hit_t % 2) == 0)
+    if (won == 0 && (dead_t > 0 || (hit_t % 2) == 0))
     {
         set_lut(4, 8, 9, 10, 5);
+        if (hp == 3) set_lut(8, 15, 9, 10, 4);
+        if (star_t > 0)
+        {
+            int ph = (frame >> 1) % 3;
+            if (ph == 0) set_lut(9, 3, 7, 9, 5);
+            if (ph == 1) set_lut(9, 4, 7, 9, 5);
+            if (ph == 2) set_lut(4, 1, 9, 9, 5);
+        }
         int sx = (ex[0] >> 8) - 4 - camx;
         int yy = ey[0] >> 8;
         if (hp >= 2 && crouch == 0)
@@ -347,6 +448,12 @@ void draw_hud()
     drawchar('0' + (timeleft / 10) % 10, 104, 1, 255);
     drawchar('0' + timeleft % 10, 108, 1, 255);
     if (won == 1) drawstring("COURSE CLEAR", 38, 28, 255);
+    if (dead_t > 0 && lives_out() == 1) drawstring("GAME OVER", 44, 28, 224);
+}
+
+int lives_out()
+{
+    return 0;
 }
 
 // ---- game state --------------------------------------------------------------------------
@@ -371,7 +478,7 @@ void reset_level()
         e = e + 1;
     }
     et[0] = 1;
-    ex[0] = 24 * 256;
+    ex[0] = START_X * 256;
     ey[0] = 92 * 256;
     edx[0] = 0;
     edy[0] = 0;
@@ -386,6 +493,11 @@ void reset_level()
     crouch = 0;
     timeleft = 400;
     won = 0;
+    star_t = 0;
+    pole = 0;
+    flag_y = 16;
+    bump_t = 0;
+    cbhits = 0;
 }
 
 void die()
@@ -408,10 +520,57 @@ void update_mario(uint8_t keys)
         if (dead_t > 150) reset_level();
         return;
     }
+    if (won == 1) return;
+    if (pole == 1)
+    {
+        ex[0] = (POLE_X) * 256;
+        ey[0] = ey[0] + 256;
+        flag_y = flag_y + 2;
+        if (flag_y > 76) flag_y = 76;
+        nv = 5;
+        if (ey[0] + eh[0] * 128 >= 88 * 256)
+        {
+            pole = 2;
+            pole_t = 0;
+            ex[0] = (POLE_X + 6) * 256;
+            xflip = 1;
+        }
+        return;
+    }
+    if (pole == 2)
+    {
+        flag_y = flag_y + 2;
+        if (flag_y > 76) flag_y = 76;
+        pole_t = pole_t + 1;
+        if (pole_t > 25)
+        {
+            pole = 3;
+            xflip = 0;
+            edx[0] = 0;
+        }
+        return;
+    }
     int nb = 0;
     if ((keys & KEY_RIGHT) != 0) nb = nb + 1;
     if ((keys & KEY_LEFT) != 0) nb = nb - 1;
-    if (won == 1) nb = 1;
+    if (pole == 3) nb = 1;
+    if (star_t > 0) star_t = star_t - 1;
+    if (hp == 3 && crouch == 0 && (keys & KEY_RUN) != 0 && (prev_keys & KEY_RUN) == 0)
+    {
+        int nfb = 0;
+        uint8_t f = 1;
+        while (f < MAXE)
+        {
+            if (et[f] == 8) nfb = nfb + 1;
+            f = f + 1;
+        }
+        if (nfb < 2)
+        {
+            int dir = 1;
+            if (xflip == 1) dir = 0 - 1;
+            spawn(8, (ex[0] >> 8) + dir * 5, (ey[0] >> 8), dir * 410, 0);
+        }
+    }
     if (hp >= 2 && eg[0] == 1)
     {
         if ((keys & KEY_DOWN) != 0 && crouch == 0)
@@ -441,7 +600,7 @@ void update_mario(uint8_t keys)
         dd = 205;
         if ((keys & KEY_RUN) != 0) dd = 336;
     }
-    if ((keys & KEY_JUMP) != 0 && (prev_keys & KEY_JUMP) == 0 && eg[0] == 1)
+    if (pole == 0 && (keys & KEY_JUMP) != 0 && (prev_keys & KEY_JUMP) == 0 && eg[0] == 1)
     {
         int extra = 0;
         if (iabs(edx[0]) >= 307) extra = 85;
@@ -497,87 +656,176 @@ void update_mario(uint8_t keys)
     if (ex[0] < (camx + 4) * 256) ex[0] = (camx + 4) * 256;
     if (ex[0] > (LVL_W * 8 - 4) * 256) ex[0] = (LVL_W * 8 - 4) * 256;
     if ((ey[0] >> 8) > 140) die();
-    if ((ex[0] >> 8) > 1600) won = 1;
+    if (pole == 0 && (ex[0] >> 8) + 3 >= POLE_X + 2 && (ex[0] >> 8) < POLE_X + 12 && (ey[0] >> 8) < 86)
+    {
+        pole = 1;
+        edx[0] = 0;
+        edy[0] = 0;
+        score = score + 2000;
+        flag_y = 16;
+    }
+    if (pole == 3 && (ex[0] >> 8) >= 1632) won = 1;
 }
 
 void update_entities()
 {
+    if (bump_t > 0)
+    {
+        bump_t = bump_t - 1;
+        if (bump_t == 0)
+        {
+            lvl[bump_y * LVL_W + bump_x] = bump_final;
+            if (bump_item == 1) spawn(3, bump_x * 8 + 4, bump_y * 8 + 4, 0, 0 - 51);
+            if (bump_item == 2) spawn(9, bump_x * 8 + 4, bump_y * 8 + 4, 0, 0 - 51);
+            if (bump_item == 3) spawn(10, bump_x * 8 + 4, bump_y * 8 + 4, 0, 0 - 51);
+            if (bump_item == 4) spawn(11, bump_x * 8 + 4, bump_y * 8 + 4, 0, 0 - 51);
+            bump_item = 0;
+        }
+    }
     uint8_t i = 1;
     while (i < MAXE)
     {
-        if (et[i] != 0)
+        int tt = et[i];
+        if (tt != 0)
         {
             int gone = 0;
-            if (et[i] == 2 || et[i] == 3)
+            int hurt = 0;
+            if (tt == 2 || tt == 3 || tt == 6 || tt == 7 || tt == 8 || tt == 9 || tt == 10 || tt == 11)
             {
                 eg[i] = 0;
-                if (et[i] == 3 && etm[i] > 0)
+                int isitem = 0;
+                if (tt == 3 || tt == 9 || tt == 10 || tt == 11) isitem = 1;
+                if (isitem == 1 && etm[i] > 0)
                 {
                     etm[i] = etm[i] - 1;
                     ey[i] = ey[i] + edy[i];
-                    if (etm[i] == 0) edx[i] = 128;
+                    if (etm[i] == 0)
+                    {
+                        if (tt == 3 || tt == 11) edx[i] = 128;
+                        if (tt == 10) edx[i] = 154;
+                    }
                 }
                 else
                 {
-                    if (et[i] == 2 && edx[i] == 0) edx[i] = 0 - 64;
-                    edy[i] = edy[i] + 51;
-                    if (edy[i] > 576) edy[i] = 576;
-                    collide(i);
-                    ex[i] = ex[i] + edx[i];
-                    ey[i] = ey[i] + edy[i];
+                    if ((tt == 2 || tt == 6) && edx[i] == 0) edx[i] = 0 - 64;
+                    if (tt == 7 && etm[i] > 0) etm[i] = etm[i] - 1;
+                    if (tt != 9)
+                    {
+                        edy[i] = edy[i] + 51;
+                        if (edy[i] > 576) edy[i] = 576;
+                        int odx = edx[i];
+                        collide(i);
+                        if (tt == 8)
+                        {
+                            if (eg[i] == 1) edy[i] = 0 - 294;
+                            if (odx * edx[i] < 0) gone = 1;
+                            etm[i] = etm[i] - 1;
+                            if (etm[i] <= 0) gone = 1;
+                        }
+                        if (tt == 10 && eg[i] == 1) edy[i] = 0 - 614;
+                        ex[i] = ex[i] + edx[i];
+                        ey[i] = ey[i] + edy[i];
+                    }
+                }
+                // enemies hit by fireballs / sliding shells
+                if (tt == 8 || (tt == 7 && iabs(edx[i]) > 256))
+                {
+                    uint8_t j = 1;
+                    while (j < MAXE)
+                    {
+                        if (j != i && (et[j] == 2 || et[j] == 6 || (et[j] == 7 && tt == 8)))
+                        {
+                            if (iabs(ex[j] - ex[i]) * 2 < (ew[j] + ew[i]) * 256 && iabs(ey[j] - ey[i]) * 2 < (eh[j] + eh[i]) * 256)
+                            {
+                                et[j] = 0;
+                                score = score + 100;
+                                if (tt == 8) gone = 1;
+                            }
+                        }
+                        j = j + 1;
+                    }
                 }
                 // contact with Mario
-                if (dead_t == 0 && iabs(ex[0] - ex[i]) * 2 < (ew[0] + ew[i]) * 256 && iabs(ey[0] + edy[0] - ey[i]) * 2 < (eh[0] + eh[i]) * 256)
+                if (dead_t == 0 && pole == 0 && iabs(ex[0] - ex[i]) * 2 < (ew[0] + ew[i]) * 256 && iabs(ey[0] + edy[0] - ey[i]) * 2 < (eh[0] + eh[i]) * 256)
                 {
-                    if (et[i] == 3 && etm[i] == 0)
+                    if (isitem == 1 && etm[i] == 0)
                     {
                         gone = 1;
                         score = score + 1000;
-                        if (hp == 1)
+                        if (tt == 11) lives = lives + 1;
+                        if (tt == 10) star_t = 600;
+                        if ((tt == 3 || tt == 9) && hp == 1)
                         {
                             hp = 2;
                             ey[0] = ey[0] - 1024;
                             eh[0] = 15;
                         }
+                        else if (tt == 9 && hp == 2) hp = 3;
                     }
-                    if (et[i] == 2)
+                    if (tt == 2 || tt == 6 || tt == 7)
                     {
-                        if (edy[0] > 0 && ey[0] + eh[0] * 128 < ey[i] + 512)
+                        int stomp = 0;
+                        if (edy[0] > 0 && ey[0] + eh[0] * 128 < ey[i] + 512) stomp = 1;
+                        if (star_t > 0)
                         {
-                            et[i] = 5;
-                            etm[i] = 48;
-                            edx[i] = 0;
-                            edy[0] = 0 - 384;
+                            gone = 1;
                             score = score + 100;
                         }
-                        else if (hit_t == 0)
+                        else if (tt == 7 && edx[i] == 0)
                         {
-                            if (hp >= 2)
-                            {
-                                hp = 1;
-                                eh[0] = 7;
-                                ey[0] = ey[0] + 1024;
-                                hit_t = 60;
-                                crouch = 0;
-                            }
-                            else die();
+                            edx[i] = 512;
+                            if (ex[i] < ex[0]) edx[i] = 0 - 512;
+                            etm[i] = 12;
+                            if (stomp == 1) edy[0] = 0 - 384;
+                            score = score + 400;
                         }
+                        else if (stomp == 1)
+                        {
+                            edy[0] = 0 - 384;
+                            score = score + 100;
+                            if (tt == 2)
+                            {
+                                et[i] = 5;
+                                etm[i] = 48;
+                                edx[i] = 0;
+                            }
+                            if (tt == 6)
+                            {
+                                et[i] = 7;
+                                edx[i] = 0;
+                                etm[i] = 0;
+                            }
+                            if (tt == 7) edx[i] = 0;
+                        }
+                        else if (hit_t == 0 && etm[i] == 0 || (hit_t == 0 && tt != 7)) hurt = 1;
                     }
                 }
             }
-            if (et[i] == 4)
+            if (tt == 4)
             {
                 edy[i] = edy[i] + 51;
                 ey[i] = ey[i] + edy[i];
                 etm[i] = etm[i] - 1;
                 if (etm[i] <= 0) gone = 1;
             }
-            if (et[i] == 5)
+            if (tt == 5)
             {
                 etm[i] = etm[i] - 1;
                 if (etm[i] <= 0) gone = 1;
             }
-            if (ex[i] < (camx - 40) * 256 || (ey[i] >> 8) > 140) gone = 1;
+            if (hurt == 1)
+            {
+                if (hp >= 2)
+                {
+                    hp = 1;
+                    eh[0] = 7;
+                    ey[0] = ey[0] + 1024;
+                    hit_t = 60;
+                    crouch = 0;
+                }
+                else die();
+            }
+            if (ex[i] < (camx - 40) * 256 || ex[i] > (camx + 200) * 256 || (ey[i] >> 8) > 140) gone = 1;
             if (gone == 1) et[i] = 0;
         }
         i = i + 1;
@@ -589,11 +837,18 @@ void update_entities()
         if (spawned[e] == 0 && ent_x[e] < camx + 136)
         {
             spawned[e] = 1;
-            if (ent_type[e] == 1) spawn(2, ent_x[e] + 4, ent_y[e] + 4, 0 - 64, 0);
-            if (ent_type[e] == 2)
+            int nt = ent_type[e];
+            if (nt >= 1 && nt <= 3)
             {
                 spawn(2, ent_x[e] + 4, ent_y[e] + 4, 0 - 64, 0);
-                spawn(2, ent_x[e] + 16, ent_y[e] + 4, 0 - 64, 0);
+                if (nt >= 2) spawn(2, ent_x[e] + 16, ent_y[e] + 4, 0 - 64, 0);
+                if (nt == 3) spawn(2, ent_x[e] + 28, ent_y[e] + 4, 0 - 64, 0);
+            }
+            if (nt >= 4 && nt <= 6)
+            {
+                spawn(6, ent_x[e] + 4, ent_y[e] + 12, 0 - 64, 0);
+                if (nt >= 5) spawn(6, ent_x[e] + 16, ent_y[e] + 12, 0 - 64, 0);
+                if (nt == 6) spawn(6, ent_x[e] + 28, ent_y[e] + 12, 0 - 64, 0);
             }
         }
         e = e + 1;
@@ -643,7 +898,7 @@ uint32_t main()
         update_mario(keys);
         update_entities();
         update_camera();
-        if (frame % 25 == 0 && dead_t == 0 && won == 0)
+        if (frame % 25 == 0 && dead_t == 0 && won == 0 && pole == 0)
         {
             timeleft = timeleft - 1;
             if (timeleft <= 0) die();
