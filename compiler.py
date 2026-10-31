@@ -109,6 +109,9 @@ OPS = {
     "floatop":         (0x21, [1, 1, 1, 1, 1]),       # op, format, reg_left_addr, reg_right_addr, reg_dest_addr
     "floatcast":       (0x22, [1, 1, 1, 1]),          # src_format, dst_format, reg_src_addr, reg_dst_addr
     "romread64":       (0x23, [1, 1, 1]),             # reg_addr, reg_hi, reg_lo
+    "fillrect":        (0x24, [1, 1, 1, 1, 1]),       # regx, regy, regw, regh, regc
+    "drawline":        (0x25, [1, 1, 1, 1, 1]),       # regx0, regy0, regx1, regy1, regc
+    "blit":            (0x26, [4]),                   # desc_addr (11 words in RAM, see ulvm_blit)
 
     "setreg":          (0x40, [1, 4]),                # reg, val
     "movreg":          (0x41, [1, 1]),                # dst, src
@@ -157,9 +160,26 @@ OPS = {
     "smodreg":         (0x6E, [1, 1, 1]),
     "sshrreg":         (0x6F, [1, 1, 1]),
     "outregsigned":    (0x70, [1]),
+    "sltreg":          (0x71, [1, 1, 1]),             # signed compares
+    "sgtreg":          (0x72, [1, 1, 1]),
+    "slereg":          (0x73, [1, 1, 1]),
+    "sgereg":          (0x74, [1, 1, 1]),
+    "andregv":         (0x75, [1, 4, 1]),             # r1, const, dst
+    "orregv":          (0x76, [1, 4, 1]),
+    "xorregv":         (0x77, [1, 4, 1]),
+    "shlregv":         (0x78, [1, 1, 1]),             # r1, imm8, dst
+    "shrregv":         (0x79, [1, 1, 1]),
+    "sshrregv":        (0x7A, [1, 1, 1]),
+    "cmpregv":         (0x7B, [1, 4, 1, 1]),          # r1, const, dst, cond
+    "jcmp":            (0x7C, [1, 1, 1, 4]),          # r1, r2, cond, pos
+    "jcmpv":           (0x7D, [1, 4, 1, 4]),          # r1, const, cond, pos
 
     "exit":            (0xFF, []),
 }
+
+# comparison -> fused/immediate compare condition code (+4 selects the signed variant)
+COND_CODES = {"==": 0, "!=": 1, "<": 2, ">": 3, "<=": 4, ">=": 5}
+COND_INVERT = {0: 1, 1: 0, 2: 5, 3: 4, 4: 3, 5: 2, 6: 9, 7: 8, 8: 7, 9: 6}
 
 # Two scratch registers used for every arithmetic/logic/comparison emission.
 # They're never left "live" across other emit() calls -- each helper below
@@ -1818,6 +1838,24 @@ class Compiler:
                 left_r = self.resolve_operand(node.left)
                 right_r = self.resolve_operand(node.right)
                 self.load_comparison_operand(node.left, left_r, RA)
+                imm = self.try_const(node.right)
+                if imm is not None and node.op in ("&", "|", "^"):
+                    self.emit({"&": "andregv", "|": "orregv", "^": "xorregv"}[node.op], RA, imm, RA)
+                    dest = self.alloc_temp(INT_SIZE, self.expr_format(node))
+                    self.emit_store(RA, dest, INT_SIZE)
+                    return dest
+                if imm is not None and node.op in ("<<", ">>") and 0 <= imm < 32:
+                    if node.op == "<<":
+                        opn = "shlregv"
+                    elif self.comparison_is_signed(node.left, node.right,
+                                                   INT_SIZE if left_r[0] == "const" else left_r[2], INT_SIZE):
+                        opn = "sshrregv"
+                    else:
+                        opn = "shrregv"
+                    self.emit(opn, RA, imm, RA)
+                    dest = self.alloc_temp(INT_SIZE, self.expr_format(node))
+                    self.emit_store(RA, dest, INT_SIZE)
+                    return dest
                 self.load_resolved(right_r, RB)
                 if node.op == ">>" and self.comparison_is_signed(
                         node.left, node.right,
@@ -1931,13 +1969,53 @@ class Compiler:
                 if not isinstance(args[1], c_ast.Constant):
                     raise NotImplementedError("__mem_ptr() size must be a compile-time constant")
                 return self.gen_expr(args[0])
-            if name in ("flag", "setpixel", "exit", "srand", "drawchar", "drawstring"):
+            if name in ("flag", "setpixel", "exit", "srand", "drawchar", "drawstring", "fillrect", "drawline", "blit"):
                 raise NotImplementedError(f"'{name}' does not return a value")
             return self.gen_call(node)
 
         raise NotImplementedError(f"unsupported expression node '{type(node).__name__}'")
 
     # -- conditions: returns a 1-byte boolean address ---------------------------
+    def gen_branch(self, node, label, jump_if):
+        """Jump to `label` when `node` is truthy (jump_if=True) or falsy (jump_if=False).
+        Integer comparisons compile to one fused compare-and-jump; && || ! short-circuit."""
+        if isinstance(node, c_ast.UnaryOp) and node.op == "!":
+            self.gen_branch(node.expr, label, not jump_if)
+            return
+        if isinstance(node, c_ast.BinaryOp) and node.op in ("&&", "||"):
+            both = node.op == "&&"
+            if both != jump_if:       # (&& jump-if-false) or (|| jump-if-true): either side decides
+                self.gen_branch(node.left, label, jump_if)
+                self.gen_branch(node.right, label, jump_if)
+            else:                     # (&& jump-if-true) or (|| jump-if-false): need both to agree
+                skip = Label("skip")
+                self.gen_branch(node.left, skip, not jump_if)
+                self.gen_branch(node.right, label, jump_if)
+                self.define_label(skip)
+            return
+        if (isinstance(node, c_ast.BinaryOp) and node.op in COND_CODES and self.try_const(node) is None
+                and not (self.expr_float_size(node.left) or self.expr_float_size(node.right))):
+            left_r = self.resolve_operand(node.left)
+            right_r = self.resolve_operand(node.right)
+            left_size = INT_SIZE if left_r[0] == "const" else left_r[2]
+            right_size = INT_SIZE if right_r[0] == "const" else right_r[2]
+            signed = node.op not in ("==", "!=") and self.comparison_is_signed(
+                node.left, node.right, left_size, right_size)
+            cond = COND_CODES[node.op] + (4 if signed else 0)
+            if not jump_if:
+                cond = COND_INVERT[cond]
+            self.load_comparison_operand(node.left, left_r, RA)
+            right_const = self.try_const(node.right)
+            if right_const is not None:
+                self.emit("jcmpv", RA, right_const, cond, label)
+            else:
+                self.load_comparison_operand(node.right, right_r, RB)
+                self.emit("jcmp", RA, RB, cond, label)
+            return
+        bool_addr = self.gen_cond(node)
+        self.emit_load(bool_addr, 1, RA)
+        self.emit("ifreg" if jump_if else "ifnotreg", RA, label)
+
     def gen_cond(self, node):
         comparisons = ("==", "!=", "<", ">", "<=", ">=")
         opmap = {"==": "eqreg", "!=": "neqreg", "<": "ltreg", ">": "gtreg", "<=": "lereg", ">=": "gereg"}
@@ -1948,14 +2026,18 @@ class Compiler:
             right_r = self.resolve_operand(node.right)
             left_size = INT_SIZE if left_r[0] == "const" else left_r[2]
             right_size = INT_SIZE if right_r[0] == "const" else right_r[2]
+            signed = node.op not in ("==", "!=") and self.comparison_is_signed(
+                node.left, node.right, left_size, right_size)
             self.load_comparison_operand(node.left, left_r, RA)
-            self.load_comparison_operand(node.right, right_r, RB)
-            if node.op not in ("==", "!=") and self.comparison_is_signed(
-                    node.left, node.right, left_size, right_size):
-                self.emit_set_const(RC, 0x80000000)
-                self.emit("xorreg", RA, RC, RA)
-                self.emit("xorreg", RB, RC, RB)
-            self.emit(opmap[node.op], RA, RB, RA)
+            right_const = self.try_const(node.right)
+            if right_const is not None:
+                self.emit("cmpregv", RA, right_const, RA, COND_CODES[node.op] + (4 if signed else 0))
+            else:
+                self.load_comparison_operand(node.right, right_r, RB)
+                if signed:
+                    self.emit({"<": "sltreg", ">": "sgtreg", "<=": "slereg", ">=": "sgereg"}[node.op], RA, RB, RA)
+                else:
+                    self.emit(opmap[node.op], RA, RB, RA)
             bool_addr = self.alloc_temp(1)
             self.emit_store(RA, bool_addr, 1)
             return bool_addr
@@ -2082,6 +2164,36 @@ class Compiler:
         self.emit_load(y_addr, self.addr_size(y_addr), 11)
         self.emit_load(val_addr, self.addr_size(val_addr), 12)
         self.emit("setpixel", 10, 11, 12)
+
+    def gen_rect_or_line(self, call, opname):
+        # fillrect(x, y, w, h, c) / drawline(x0, y0, x1, y1, c): one native opcode each
+        self.uses_graphics = True
+        args = call.args.exprs if call.args else []
+        if len(args) != 5:
+            raise NotImplementedError(f"{opname}() takes exactly 5 arguments")
+        addrs = [self.gen_expr(a) for a in args]
+        for i, a in enumerate(addrs):
+            self.emit_load(a, self.addr_size(a), 8 + i)
+        self.emit(opname, 8, 9, 10, 11, 12)
+
+    def gen_blit(self, call):
+        # blit(x, y, w, h, src, srcx, srcy, stride, flags, palette, transparent)
+        # See ulvm_blit() in unilang.h. `src` is a const array (ROM sheet) or RAM array (flag 32);
+        # `palette` is a RAM array (flag 8) or 0.
+        self.uses_graphics = True
+        args = call.args.exprs if call.args else []
+        if len(args) != 11:
+            raise NotImplementedError("blit(x, y, w, h, src, srcx, srcy, stride, flags, palette, transparent) takes 11 arguments")
+        desc = self.alloc_temp(44)
+        for i, a in enumerate(args):
+            if isinstance(a, c_ast.ID) and a.name in self.array_elem_bytes and a.name not in self.const_arrays \
+                    and a.name in self.vars:
+                self.emit_set_const(RA, self.var_addr(a.name))      # RAM array: its address
+            else:
+                addr = self.gen_expr(a)
+                self.emit_load(addr, self.addr_size(addr), RA)
+            self.emit_store(RA, desc + 4 * i, 4)
+        self.emit("blit", desc)
 
     def gen_getpixel(self, call):
         self.uses_graphics = True
@@ -2633,9 +2745,7 @@ class Compiler:
     def gen_loop_test(self, cond, end_label):
         value = 1 if cond is None else self.try_const(cond)
         if value is None:
-            bool_addr = self.gen_cond(cond)
-            self.emit_load(bool_addr, 1, RA)
-            self.emit("ifnotreg", RA, end_label)
+            self.gen_branch(cond, end_label, False)
         elif value == 0:
             self.emit("setpc", end_label)
 
@@ -2735,6 +2845,10 @@ class Compiler:
                 self.emit("flag", self.const_value(args[0]), self.const_value(args[1]))
             elif name == "setpixel":
                 self.gen_setpixel(node)
+            elif name in ("fillrect", "drawline"):
+                self.gen_rect_or_line(node, name)
+            elif name == "blit":
+                self.gen_blit(node)
             elif name == "sleep":
                 args = node.args.exprs if node.args else []
                 if len(args) != 1 or self.try_const(args[0]) is None:
@@ -2792,11 +2906,9 @@ class Compiler:
             if cond_value is not None:  # constant condition: compile only the branch that can run
                 self.gen_stmt(node.iftrue if cond_value else node.iffalse)
                 return
-            bool_addr = self.gen_cond(node.cond)
             label_else = Label("else")
             label_end = Label("endif")
-            self.emit_load(bool_addr, 1, RA)
-            self.emit("ifnotreg", RA, label_else if node.iffalse else label_end)
+            self.gen_branch(node.cond, label_else if node.iffalse else label_end, False)
             self.gen_stmt(node.iftrue)
             if node.iffalse:
                 self.emit("setpc", label_end)

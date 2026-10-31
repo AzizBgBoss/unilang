@@ -209,35 +209,10 @@ void collide(uint8_t i)
 }
 
 // ---- rendering ---------------------------------------------------------------------------
+// 8x8 sprite from the 4bpp sheet (PICO-8 layout), colours through lut[], source colour 12 transparent
 void draw8(int s, int sx, int sy, int flip)
 {
-    if (sx <= 0 - 8 || sx >= 128 || sy <= 0 - 8 || sy >= 64) return;
-    int gx0 = (s & 15) * 8;
-    int gy0 = (s >> 4) * 8;
-    int yy = 0;
-    while (yy < 8)
-    {
-        int py = sy + yy;
-        if (py >= 0 && py < 64)
-        {
-            int xx = 0;
-            while (xx < 8)
-            {
-                int px = sx + xx;
-                if (px >= 0 && px < 128)
-                {
-                    int gx = gx0 + xx;
-                    if (flip == 1) gx = gx0 + 7 - xx;
-                    uint8_t b = smb_gfx[(gy0 + yy) * 64 + (gx >> 1)];
-                    uint8_t c = b & 15;
-                    if ((gx & 1) == 1) c = b >> 4;
-                    if (c != 12) setpixel(px, py, lut[c]);
-                }
-                xx = xx + 1;
-            }
-        }
-        yy = yy + 1;
-    }
+    blit(sx, sy, 8, 8, smb_gfx, (s & 15) * 8, (s >> 4) * 8, 128, 28 + flip, lut, 12);
 }
 
 void set_lut(int a, int b, int c, int d, int e)
@@ -257,19 +232,7 @@ void set_lut(int a, int b, int c, int d, int e)
 
 void draw_world()
 {
-    // sky
-    uint8_t sky = disp332[12];
-    int y = 0;
-    while (y < 64)
-    {
-        int x = 0;
-        while (x < 128)
-        {
-            setpixel(x, y, sky);
-            x = x + 1;
-        }
-        y = y + 1;
-    }
+    fillrect(0, 0, 128, 64, disp332[12]); // sky
     uint8_t q = 1;
     while (q < MAXE)
     {

@@ -198,6 +198,9 @@ enum OP_CODES
     OP_FLOATOP,         // IEEE-754 float arithmetic/comparison - parameters: op(1), format(1), reg_left_addr(1), reg_right_addr(1), reg_dest_addr(1)
     OP_FLOATCAST,       // numeric conversion/copy - parameters: src_format(1), dst_format(1), reg_src_addr(1), reg_dst_addr(1)
     OP_ROMREAD64 = 0x23, // read 8 bytes from ROM into two registers - parameters: reg_addr(1), reg_hi(1), reg_lo(1)
+    OP_FILLRECT = 0x24,  // fill a rectangle (clipped to the screen) - parameters: regx(1), regy(1), regw(1), regh(1), regc(1)
+    OP_DRAWLINE,         // draw a line (Bresenham, clipped) - parameters: regx0(1), regy0(1), regx1(1), regy1(1), regc(1)
+    OP_BLIT,             // draw a sprite region from a ROM/RAM sheet; 11 parameter words live in RAM at desc_addr (see ulvm_blit) - parameters: desc_addr(4)
 
     // Direct Register & Memory Operations
     OP_SETREG = 0x40, // reg = val - parameters: reg(1), val(4)
@@ -251,6 +254,22 @@ enum OP_CODES
     OP_SMODREG, // signed 32-bit remainder
     OP_SSHRREG, // arithmetic right shift
     OP_OUTREGSIGNED, // print a signed 32-bit register
+
+    // Extended ALU / fused compare ops (0x71+)
+    OP_SLTREG = 0x71, // dst = (int32)r1 < (int32)r2 - parameters: r1(1), r2(1), dst(1)
+    OP_SGTREG,        // signed >
+    OP_SLEREG,        // signed <=
+    OP_SGEREG,        // signed >=
+    OP_ANDREGV,       // dst = r1 & val - parameters: r1(1), val(4), dst(1)
+    OP_ORREGV,        // dst = r1 | val - parameters: r1(1), val(4), dst(1)
+    OP_XORREGV,       // dst = r1 ^ val - parameters: r1(1), val(4), dst(1)
+    OP_SHLREGV,       // dst = r1 << imm - parameters: r1(1), imm(1), dst(1)
+    OP_SHRREGV,       // dst = r1 >> imm (logical) - parameters: r1(1), imm(1), dst(1)
+    OP_SSHRREGV,      // dst = r1 >> imm (arithmetic) - parameters: r1(1), imm(1), dst(1)
+    OP_CMPREGV,       // dst = cond(r1, val) ? 1 : 0 - parameters: r1(1), val(4), dst(1), cond(1)
+    OP_JCMP,          // if cond(r1, r2) jump to pos - parameters: r1(1), r2(1), cond(1), pos(4)
+    OP_JCMPV,         // if cond(r1, val) jump to pos - parameters: r1(1), val(4), cond(1), pos(4)
+    // cond: 0 ==, 1 !=, 2 < (u), 3 > (u), 4 <= (u), 5 >= (u), 6 < (s), 7 > (s), 8 <= (s), 9 >= (s)
 
     // Program Control
     OP_EXIT = 0xFF // exit the program - parameters: none
@@ -411,9 +430,34 @@ static inline uint32_t ulvm_next4(UnilangVM *vm, const uint8_t *rom, uint32_t ro
     return (hi << 16) | lo;
 }
 
-#define ULVM_NEXTBYTE() ulvm_fetch(vm, rom, rom_size, pc++)
-#define ULVM_NEXT2BYTES() ulvm_next2(vm, rom, rom_size, &pc)
-#define ULVM_NEXT4BYTES() ulvm_next4(vm, rom, rom_size, &pc)
+// Fast path: `fast` is computed once per instruction (>= 16 bytes of ROM left), so the
+// per-byte bounds checks are skipped for all but the last few instructions of a program.
+static inline uint32_t ulvm_next2f(UnilangVM *vm, const uint8_t *rom, uint32_t rom_size, uint32_t *pc, int fast)
+{
+    if (fast)
+    {
+        uint32_t p = *pc;
+        *pc = p + 2;
+        return ((uint32_t)READ_FLASH_BYTE(rom + p) << 8) | (uint32_t)READ_FLASH_BYTE(rom + p + 1);
+    }
+    return ulvm_next2(vm, rom, rom_size, pc);
+}
+
+static inline uint32_t ulvm_next4f(UnilangVM *vm, const uint8_t *rom, uint32_t rom_size, uint32_t *pc, int fast)
+{
+    if (fast)
+    {
+        uint32_t p = *pc;
+        *pc = p + 4;
+        return ((uint32_t)READ_FLASH_BYTE(rom + p) << 24) | ((uint32_t)READ_FLASH_BYTE(rom + p + 1) << 16)
+             | ((uint32_t)READ_FLASH_BYTE(rom + p + 2) << 8) | (uint32_t)READ_FLASH_BYTE(rom + p + 3);
+    }
+    return ulvm_next4(vm, rom, rom_size, pc);
+}
+
+#define ULVM_NEXTBYTE() (fast ? (uint32_t)READ_FLASH_BYTE(rom + pc++) : ulvm_fetch(vm, rom, rom_size, pc++))
+#define ULVM_NEXT2BYTES() ulvm_next2f(vm, rom, rom_size, &pc, fast)
+#define ULVM_NEXT4BYTES() ulvm_next4f(vm, rom, rom_size, &pc, fast)
 
 // Random-access ROM read (romread opcodes, drawstring from ROM).
 static inline uint8_t ulvm_rom_byte(UnilangVM *vm, uint32_t addr)
@@ -790,11 +834,123 @@ static inline uint8_t ulvm_itoa(UnilangVM *vm, uint32_t v, uint32_t addr)
    duration, so a large budget is much cheaper per instruction than calling
    ULVM_handlenextinstruction() in a loop. Pick a budget that matches how often
    the host must do other work (event pumping, watchdog, ...). */
+static inline int ulvm_cond(uint8_t c, uint32_t a, uint32_t b)
+{
+    switch (c)
+    {
+    case 0: return a == b;
+    case 1: return a != b;
+    case 2: return a < b;
+    case 3: return a > b;
+    case 4: return a <= b;
+    case 5: return a >= b;
+    case 6: return (int32_t)a < (int32_t)b;
+    case 7: return (int32_t)a > (int32_t)b;
+    case 8: return (int32_t)a <= (int32_t)b;
+    case 9: return (int32_t)a >= (int32_t)b;
+    default: return 0;
+    }
+}
+
+// Drawing helpers. Everything is clipped to the screen (gfx_w x gfx_h once graphics are on).
+static inline int32_t ulvm_gw(UnilangVM *vm) { return vm->gfx_w ? (int32_t)vm->gfx_w : 256; }
+static inline int32_t ulvm_gh(UnilangVM *vm) { return vm->gfx_h ? (int32_t)vm->gfx_h : 256; }
+
+static inline void ulvm_fillrect(UnilangVM *vm, int32_t x, int32_t y, int32_t w, int32_t h, uint8_t c)
+{
+    if (!vm->setpixel || w <= 0 || h <= 0)
+        return;
+    int32_t x1 = x + w, y1 = y + h;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x1 > ulvm_gw(vm)) x1 = ulvm_gw(vm);
+    if (y1 > ulvm_gh(vm)) y1 = ulvm_gh(vm);
+    for (int32_t yy = y; yy < y1; yy++)
+        for (int32_t xx = x; xx < x1; xx++)
+            vm->setpixel((uint8_t)xx, (uint8_t)yy, c);
+}
+
+static inline void ulvm_drawline(UnilangVM *vm, int32_t x0, int32_t y0, int32_t x1, int32_t y1, uint8_t c)
+{
+    if (!vm->setpixel)
+        return;
+    int32_t dx = x1 > x0 ? x1 - x0 : x0 - x1;
+    int32_t dy = y1 > y0 ? y0 - y1 : y1 - y0; // -|dy|
+    int32_t sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+    int32_t err = dx + dy;
+    int32_t maxx = ulvm_gw(vm), maxy = ulvm_gh(vm);
+    for (int32_t guard = 0; guard < 4096; guard++)
+    {
+        if (x0 >= 0 && y0 >= 0 && x0 < maxx && y0 < maxy)
+            vm->setpixel((uint8_t)x0, (uint8_t)y0, c);
+        if (x0 == x1 && y0 == y1)
+            break;
+        int32_t e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+
+// Sprite blit. Descriptor = 11 big-endian 32-bit words in RAM at `d`:
+//  0 x, 1 y (destination, may be negative)   2 w, 3 h (size in pixels)
+//  4 src (byte address of the sheet in ROM, or in RAM if flags bit 5)
+//  5 srcx, 6 srcy (top-left of the region inside the sheet)   7 stride (sheet width in pixels)
+//  8 flags: bit0 flip X, bit1 flip Y, bit2 4bpp (low nibble = even x, else 8bpp),
+//           bit3 map colours through the RAM table at word 9, bit4 skip pixels equal to word 10,
+//           bit5 sheet is in RAM
+//  9 palette (RAM address of a table indexed by the source value)   10 transparent value
+static inline void ulvm_blit(UnilangVM *vm, uint32_t d)
+{
+    if (!vm->setpixel)
+        return;
+    int32_t x = (int32_t)ulvm_load_memory(vm, d + 0, 4), y = (int32_t)ulvm_load_memory(vm, d + 4, 4);
+    int32_t w = (int32_t)ulvm_load_memory(vm, d + 8, 4), h = (int32_t)ulvm_load_memory(vm, d + 12, 4);
+    uint32_t src = ulvm_load_memory(vm, d + 16, 4);
+    int32_t sx = (int32_t)ulvm_load_memory(vm, d + 20, 4), sy = (int32_t)ulvm_load_memory(vm, d + 24, 4);
+    int32_t stride = (int32_t)ulvm_load_memory(vm, d + 28, 4);
+    uint32_t fl = ulvm_load_memory(vm, d + 32, 4), pal = ulvm_load_memory(vm, d + 36, 4);
+    uint32_t tr = ulvm_load_memory(vm, d + 40, 4);
+    int32_t maxx = ulvm_gw(vm), maxy = ulvm_gh(vm);
+    for (int32_t r = 0; r < h; r++)
+    {
+        int32_t py = y + r;
+        if (py < 0 || py >= maxy)
+            continue;
+        int32_t srow = (fl & 2) ? (h - 1 - r) : r;
+        for (int32_t c = 0; c < w; c++)
+        {
+            int32_t px = x + c;
+            if (px < 0 || px >= maxx)
+                continue;
+            int32_t scol = (fl & 1) ? (w - 1 - c) : c;
+            uint32_t idx = (uint32_t)((sy + srow) * stride + sx + scol);
+            uint32_t v;
+            if (fl & 4)
+            {
+                uint32_t a = src + (idx >> 1);
+                uint32_t b = (fl & 32) ? (a < (uint32_t)ULVM_MEM_SIZE ? vm->mem[a] : 0u) : (uint32_t)ulvm_rom_byte(vm, a);
+                v = (idx & 1) ? (b >> 4) : (b & 15);
+            }
+            else
+            {
+                uint32_t a = src + idx;
+                v = (fl & 32) ? (a < (uint32_t)ULVM_MEM_SIZE ? vm->mem[a] : 0u) : (uint32_t)ulvm_rom_byte(vm, a);
+            }
+            if ((fl & 16) && v == tr)
+                continue;
+            if (fl & 8)
+                v = (pal + v < (uint32_t)ULVM_MEM_SIZE) ? vm->mem[pal + v] : v;
+            vm->setpixel((uint8_t)px, (uint8_t)py, (uint8_t)v);
+        }
+    }
+}
+
 static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
 {
     uint32_t pc = vm->pc;
     const uint8_t *rom = vm->rom;
     const uint32_t rom_size = vm->rom_size;
+    uint32_t *const hits = vm->instruction_hits;
 
     while (budget && vm->running)
     {
@@ -808,8 +964,9 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
         break;
     }
     uint32_t instruction_pc = pc;
-    if (vm->instruction_hits && instruction_pc < rom_size)
-        vm->instruction_hits[instruction_pc]++;
+    if (hits && instruction_pc < rom_size)
+        hits[instruction_pc]++;
+    const int fast = (rom != NULL) && (pc + 16u <= rom_size);
     uint8_t opbyte = (uint8_t)ULVM_NEXTBYTE();
 
     switch (opbyte)
@@ -1230,47 +1387,98 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
     }
 
     case OP_LOADREG8:
+    {
+        uint8_t r = (uint8_t)ULVM_NEXTBYTE();
+        uint32_t addr = ULVM_NEXT4BYTES();
+        ULVM_R(r) = (addr < (uint32_t)ULVM_MEM_SIZE) ? (uint32_t)vm->mem[addr] : 0u;
+        break;
+    }
     case OP_LOADREG16:
+    {
+        uint8_t r = (uint8_t)ULVM_NEXTBYTE();
+        uint32_t addr = ULVM_NEXT4BYTES();
+        ULVM_R(r) = ULVM_INBOUNDS(addr, 2) ? (((uint32_t)vm->mem[addr] << 8) | vm->mem[addr + 1]) : 0u;
+        break;
+    }
     case OP_LOADREG32:
     {
         uint8_t r = (uint8_t)ULVM_NEXTBYTE();
         uint32_t addr = ULVM_NEXT4BYTES();
-        uint8_t size = (opbyte == OP_LOADREG8) ? 1 : (opbyte == OP_LOADREG16) ? 2 : 4;
-        ULVM_R(r) = ulvm_load_memory(vm, addr, size);
+        ULVM_R(r) = ULVM_INBOUNDS(addr, 4)
+            ? (((uint32_t)vm->mem[addr] << 24) | ((uint32_t)vm->mem[addr + 1] << 16) | ((uint32_t)vm->mem[addr + 2] << 8) | vm->mem[addr + 3])
+            : 0u;
         break;
     }
-
     case OP_STOREREG8:
+    {
+        uint8_t r = (uint8_t)ULVM_NEXTBYTE();
+        uint32_t addr = ULVM_NEXT4BYTES();
+        if (addr < (uint32_t)ULVM_MEM_SIZE) vm->mem[addr] = (uint8_t)ULVM_R(r);
+        break;
+    }
     case OP_STOREREG16:
+    {
+        uint8_t r = (uint8_t)ULVM_NEXTBYTE();
+        uint32_t addr = ULVM_NEXT4BYTES();
+        if (ULVM_INBOUNDS(addr, 2))
+        {
+            uint32_t v = ULVM_R(r);
+            vm->mem[addr] = (uint8_t)(v >> 8);
+            vm->mem[addr + 1] = (uint8_t)v;
+        }
+        break;
+    }
     case OP_STOREREG32:
     {
         uint8_t r = (uint8_t)ULVM_NEXTBYTE();
         uint32_t addr = ULVM_NEXT4BYTES();
-        uint8_t size = (opbyte == OP_STOREREG8) ? 1 : (opbyte == OP_STOREREG16) ? 2 : 4;
-        ulvm_store_memory(vm, addr, size, ULVM_R(r));
+        if (ULVM_INBOUNDS(addr, 4))
+        {
+            uint32_t v = ULVM_R(r);
+            vm->mem[addr] = (uint8_t)(v >> 24);
+            vm->mem[addr + 1] = (uint8_t)(v >> 16);
+            vm->mem[addr + 2] = (uint8_t)(v >> 8);
+            vm->mem[addr + 3] = (uint8_t)v;
+        }
         break;
     }
 
-    case OP_ADDREG:
-    case OP_SUBREG:
-    case OP_MULREG:
+#define ULVM_BINOP(OPC, EXPR) \
+    case OPC: \
+    { \
+        uint8_t r1 = (uint8_t)ULVM_NEXTBYTE(); \
+        uint8_t r2 = (uint8_t)ULVM_NEXTBYTE(); \
+        uint8_t dst = (uint8_t)ULVM_NEXTBYTE(); \
+        uint32_t a = ULVM_R(r1), b = ULVM_R(r2); \
+        ULVM_R(dst) = (EXPR); \
+        break; \
+    }
+    ULVM_BINOP(OP_ADDREG, a + b)
+    ULVM_BINOP(OP_SUBREG, a - b)
+    ULVM_BINOP(OP_MULREG, a * b)
+    ULVM_BINOP(OP_ORREG, a | b)
+    ULVM_BINOP(OP_ANDREG, a & b)
+    ULVM_BINOP(OP_EQREG, (a == b) ? 1u : 0u)
+    ULVM_BINOP(OP_NEQREG, (a != b) ? 1u : 0u)
+    ULVM_BINOP(OP_LTREG, (a < b) ? 1u : 0u)
+    ULVM_BINOP(OP_GTREG, (a > b) ? 1u : 0u)
+    ULVM_BINOP(OP_LEREG, (a <= b) ? 1u : 0u)
+    ULVM_BINOP(OP_GEREG, (a >= b) ? 1u : 0u)
+    ULVM_BINOP(OP_SLTREG, ((int32_t)a < (int32_t)b) ? 1u : 0u)
+    ULVM_BINOP(OP_SGTREG, ((int32_t)a > (int32_t)b) ? 1u : 0u)
+    ULVM_BINOP(OP_SLEREG, ((int32_t)a <= (int32_t)b) ? 1u : 0u)
+    ULVM_BINOP(OP_SGEREG, ((int32_t)a >= (int32_t)b) ? 1u : 0u)
+    ULVM_BINOP(OP_SHRREG, (b < 32) ? (a >> b) : 0u)
+    ULVM_BINOP(OP_SHLREG, (b < 32) ? (a << b) : 0u)
+#undef ULVM_BINOP
+
     case OP_DIVREG:
     case OP_MODREG:
     case OP_COMPREG:
-    case OP_ORREG:
-    case OP_ANDREG:
     case OP_NORREG:
     case OP_NANDREG:
     case OP_XORREG:
     case OP_XNORREG:
-    case OP_SHLREG:
-    case OP_SHRREG:
-    case OP_EQREG:
-    case OP_NEQREG:
-    case OP_LTREG:
-    case OP_GTREG:
-    case OP_LEREG:
-    case OP_GEREG:
     case OP_SDIVREG:
     case OP_SMODREG:
     case OP_SSHRREG:
@@ -1327,6 +1535,9 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
     case OP_ADDREGV:
     case OP_SUBREGV:
     case OP_MULREGV:
+    case OP_ANDREGV:
+    case OP_ORREGV:
+    case OP_XORREGV:
     {
         uint8_t r1 = (uint8_t)ULVM_NEXTBYTE();
         uint32_t val = ULVM_NEXT4BYTES();
@@ -1334,7 +1545,85 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
         uint32_t a = ULVM_R(r1);
         if (opbyte == OP_ADDREGV) ULVM_R(dst) = a + val;
         else if (opbyte == OP_SUBREGV) ULVM_R(dst) = a - val;
-        else ULVM_R(dst) = a * val;
+        else if (opbyte == OP_MULREGV) ULVM_R(dst) = a * val;
+        else if (opbyte == OP_ANDREGV) ULVM_R(dst) = a & val;
+        else if (opbyte == OP_ORREGV) ULVM_R(dst) = a | val;
+        else ULVM_R(dst) = a ^ val;
+        break;
+    }
+
+    case OP_SHLREGV:
+    case OP_SHRREGV:
+    case OP_SSHRREGV:
+    {
+        uint8_t r1 = (uint8_t)ULVM_NEXTBYTE();
+        uint32_t imm = ULVM_NEXTBYTE();
+        uint8_t dst = (uint8_t)ULVM_NEXTBYTE();
+        uint32_t a = ULVM_R(r1);
+        if (opbyte == OP_SHLREGV) ULVM_R(dst) = (imm < 32) ? (a << imm) : 0u;
+        else if (opbyte == OP_SHRREGV) ULVM_R(dst) = (imm < 32) ? (a >> imm) : 0u;
+        else if (imm >= 32) ULVM_R(dst) = (a & 0x80000000u) ? UINT32_MAX : 0u;
+        else if (imm == 0) ULVM_R(dst) = a;
+        else ULVM_R(dst) = (a >> imm) | ((a & 0x80000000u) ? (UINT32_MAX << (32 - imm)) : 0u);
+        break;
+    }
+
+    case OP_CMPREGV:
+    {
+        uint8_t r1 = (uint8_t)ULVM_NEXTBYTE();
+        uint32_t val = ULVM_NEXT4BYTES();
+        uint8_t dst = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t cond = (uint8_t)ULVM_NEXTBYTE();
+        ULVM_R(dst) = ulvm_cond(cond, ULVM_R(r1), val) ? 1u : 0u;
+        break;
+    }
+
+    case OP_JCMP:
+    {
+        uint8_t r1 = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t r2 = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t cond = (uint8_t)ULVM_NEXTBYTE();
+        uint32_t pos = ULVM_NEXT4BYTES();
+        if (ulvm_cond(cond, ULVM_R(r1), ULVM_R(r2))) pc = pos;
+        break;
+    }
+
+    case OP_JCMPV:
+    {
+        uint8_t r1 = (uint8_t)ULVM_NEXTBYTE();
+        uint32_t val = ULVM_NEXT4BYTES();
+        uint8_t cond = (uint8_t)ULVM_NEXTBYTE();
+        uint32_t pos = ULVM_NEXT4BYTES();
+        if (ulvm_cond(cond, ULVM_R(r1), val)) pc = pos;
+        break;
+    }
+
+    case OP_FILLRECT:
+    {
+        uint8_t rx = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t ry = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rw = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rh = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rc = (uint8_t)ULVM_NEXTBYTE();
+        ulvm_fillrect(vm, (int32_t)ULVM_R(rx), (int32_t)ULVM_R(ry), (int32_t)ULVM_R(rw), (int32_t)ULVM_R(rh), (uint8_t)ULVM_R(rc));
+        break;
+    }
+
+    case OP_DRAWLINE:
+    {
+        uint8_t rx0 = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t ry0 = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rx1 = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t ry1 = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rc = (uint8_t)ULVM_NEXTBYTE();
+        ulvm_drawline(vm, (int32_t)ULVM_R(rx0), (int32_t)ULVM_R(ry0), (int32_t)ULVM_R(rx1), (int32_t)ULVM_R(ry1), (uint8_t)ULVM_R(rc));
+        break;
+    }
+
+    case OP_BLIT:
+    {
+        uint32_t d = ULVM_NEXT4BYTES();
+        ulvm_blit(vm, d);
         break;
     }
 
