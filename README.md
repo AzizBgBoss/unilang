@@ -53,14 +53,23 @@ interpreter source changes; the checked-in executable may be out of date.
   `#include "unilang.h"`.
 - **Flags** (separate from `mem`) configure hardware capabilities, packed as
   4-bit fields:
-  - **Flag 0 — graphics**: `0` disabled, `1` mono 64x64, `2` 4-bit grayscale
-    64x64, `3` 8-bit color 64x64, `4` mono 128x64, `5` 4-bit grayscale
-    128x64, `6` 8-bit color 128x64. The SDL host interprets grayscale values
-    as 16 shades and 8-bit color as RGB332.
+  - **Flag 0 — graphics**: `0` disabled, `1` mono 64x64, `2` 2-bit grayscale
+    64x64 (4 shades), `3` 2-bit RGB555 palette 64x64, `4` 8-bit color 64x64,
+    `5` 8-bit RGB555 palette 64x64, `6` mono 128x64, `7` 2-bit grayscale
+    128x64 (4 shades), `8` 2-bit RGB555 palette 128x64, `9` 8-bit color
+    128x64, `10` 8-bit RGB555 palette 128x64, `11` 16-bit RGB555 128x128,
+    `12` 16-bit RGB555 256x128. The SDL host interprets grayscale values as
+    four shades and 8-bit color as RGB332. In the palette modes (3, 5, 8, 10)
+    pixel values are palette indices (0-3 or 0-255) that the host resolves
+    to RGB555 through `setpalette`.
   - **Flag 1 — keyboard**: `0` disabled, `1` NES-style
     (Up/Down/Left/Right/A/B/Select/Start, 8 bits). Only meaningful once
     graphics are enabled. Bit layout: Up=`1`, Down=`2`, Left=`4`, Right=`8`,
     C=`16`, V=`32`, Backspace=`64`, Enter=`128`.
+  - **Flag 2 — audio**: `0` disabled, `1` tone playback (`beep`), `2` the
+    four-channel SFX/music engine and `beep`. Support depends on the host's
+    audio device. Sound data is copied into host-owned storage and does not
+    consume VM RAM.
 - **Host-owned graphics.** `setpixel`/`getpixel` forward to callbacks; the
   SDL host owns a framebuffer and window, while embedded hosts can use their
   own display implementation.
@@ -111,6 +120,14 @@ raw bytes.
 | 0x21 | `floatop` | op, format, rleft, rright, rdest | binary32/binary64 arithmetic and comparisons |
 | 0x22 | `floatcast` | src_format, dst_format, rsrc, rdst | typed numeric conversion or 64-bit copy |
 | 0x23 | `romread64` | reg_addr, reg_hi, reg_lo | read 8 bytes from program bytecode/ROM |
+| 0x24 | `fillrect` | regx, regy, regw, regh, regc | fill a clipped rectangle |
+| 0x25 | `drawline` | regx0, regy0, regx1, regy1, regc | draw a clipped line |
+| 0x26 | `blit` | desc_addr | draw a clipped sprite region described by 11 RAM words |
+| 0x27 | `setpalette` | regindex, regcolor | set a palette entry to RGB555 |
+| 0x28-0x29 | `save`/`load` | regaddr, reglen, regresult | save/load a VM RAM block; result is 1 on success |
+| 0x2A | `beep` | regfreq, regms | play a tone when audio flag 2 is 1 or 2 |
+| 0x2B | `audio_command` | command, rega, regb, regresult | issue an audio command (see builtins below) |
+| 0x2C | `audio_load` | regkind, regindex, regaddr, reglen, source, regresult | copy audio data from RAM (`source=0`) or ROM (`source=1`) |
 | 0x40 | `setreg` | reg, val | reg = val |
 | 0x41 | `movreg` | dst, src | dst = src |
 | 0x42-0x44 | `loadreg8/16/32` | reg, addr | reg = mem at addr (zero-extended) |
@@ -252,7 +269,11 @@ live across statements.
   - `drawchar(c, x, y[, color])` and
     `drawstring(text, x, y[, color])` — draw glyphs with the optional pixel
     color; the default color is `1` for existing programs.
-    In flag 6, colors use the same RGB332 byte values as `setpixel`.
+    In flag 0 value 9, colors use the same RGB332 byte values as `setpixel`.
+  - `setpalette(index, color)` — sets one palette entry to an RGB555 color.
+    Only meaningful in the palette modes (flag 0 = 3, 5, 8, 10). The host
+    starts with a grayscale palette (2-bit) or RGB332 expanded to RGB555
+    (8-bit) each time a palette mode is enabled. Statement only.
   - `getpixel(x, y)` — reads a pixel back. Returns a value.
   - `getkey()` — reads the 8-bit NES-style keyboard state. Assumes
     `flag(0, ...)` and `flag(1, 1)` were already set. Returns a value.
@@ -264,6 +285,45 @@ live across statements.
   - `input(&name);` — reads external input into a variable.
   - `romread(pos, size)` — expression form of `romread8/16/32/64`. `pos` is a
     ROM byte offset expression; `size` must be a constant `1`, `2`, `4`, or `8`.
+  - `beep(frequency, duration_ms);` — play a square-wave tone; available with
+    audio flag 2 value `1` or `2`.
+  - `audioload(kind, index, data, length)` — copy one or more complete sound
+    records from an array into host storage. `kind` is `0` for SFX and `1` for
+    music patterns; `index` is the first slot to fill. `data` may be a const
+    ROM array or a RAM array, and `length` must be a multiple of that record's
+    size. The call returns `1` on success, `0` on invalid data or unsupported
+    mode. The record format is PICO-8's binary cartridge layout: each SFX is
+    68 bytes (filter, speed, loop start, exclusive loop end, then 32 little-endian
+    16-bit notes); each music pattern is four channel bytes. In each note,
+    bits 0-5 are pitch, 6-8 waveform, 9-11 volume, 12-14 effect, and bit 15
+    custom waveform. SFX speed is measured in 120 Hz ticks per note (`0`
+    uses `16`). Music channel bytes hold an SFX ID in bits 0-5 (values
+    `64..68` are silent channels) and pattern flags in bit 7: channel 0 marks
+    the loop start, channel 1 loops back, channel 2 stops, and channel 3's mode
+    flag is ignored. PICO-8 waveform IDs are triangle, tilted saw,
+    saw, square, pulse, organ, noise, and custom (`0..7`); effects are none,
+    slide, vibrato, drop, fade-in, fade-out, fast arpeggio, and slow arpeggio
+    (`0..7`). The host approximates the custom waveform with a triangle and
+    ignores SFX filter data. The extractor
+    [`examples/smb/extract_cart.py`](examples/smb/extract_cart.py) emits
+    `smb_audio_sfx` and `smb_audio_music` arrays that can be passed directly
+    to `audioload(0, 0, smb_audio_sfx, sizeof(smb_audio_sfx))` and
+    `audioload(1, 0, smb_audio_music, sizeof(smb_audio_music))`. Banks can be
+    loaded in one call when the data is contiguous and record-aligned.
+  - `sfx(id, channel)` — play an SFX on channel `0..3`; channel `-1` chooses a
+    free channel, replacing channel 0 if all four are busy.
+  - `music(pattern)` — play a music pattern; `music(-1)` stops music channels.
+  - `audiostop();`, `audiopause();`, `audioresume();` — stop all sounds, pause
+    synthesis, or resume it.
+  - `audiovolume(0..255);` — set the master volume.
+  - `audiostatus(channel)` — return the playing SFX slot on channel `0..3`,
+    `-1` for the current music pattern, or `0xFFFFFFFF` when nothing is
+    playing.
+  - `save(buffer, length)` / `load(buffer, length)` — store or restore the
+    requested bytes at a RAM pointer; both return `1` on success and `0` on
+    failure. The SDL host saves to a `.uls` file beside the bytecode: a
+    4-byte big-endian size followed by the bytes. The headless host keeps the
+    saved block in memory for the current process only.
 
 ### How functions work (and their limits)
 
@@ -310,8 +370,9 @@ the bytecode size. Debug with `UNILANG_OPT_DEBUG=1` or
 
 Testing tools: `tools/headless.c` (deterministic host that prints a digest
 of the framebuffer/output; `cc -O2 -std=c11 -I C-interpreter tools/headless.c
--o tools/headless`) and `tools/fuzz_opt.py` (random-program differential
-test, `--gcc` to also compare with gcc).
+-o tools/headless`; add `-wav out.wav` to render host audio) and
+`tools/fuzz_opt.py` (random-program differential test, `--gcc` to also compare
+with gcc).
 
 ### Other limitations
 
@@ -372,7 +433,11 @@ uint32_t main() {
 ```
 
 See `examples/pong/pong.c` and `examples/game/game.c` for fuller programs
-using functions, graphics, and keyboard input together.
+using functions, graphics, and keyboard input together. The
+[`audio` example](examples/audio/audio.c) demonstrates SFX/music loading and
+playback; the [`save counter`](examples/save_counter/save_counter.c) shows
+persistent storage; and the [`off-screen drawing example`](examples/offscreen/offscreen.c)
+exercises clipping at the screen edges.
 
 ---
 
@@ -396,6 +461,9 @@ ULVM_set_keyboard(&vm, my_getkeyboard);
 ULVM_set_time(&vm, my_gettime, my_sleep);
 ULVM_set_input(&vm, my_input);
 ULVM_set_flagsupport(&vm, my_isflagsupported);
+ULVM_set_palette(&vm, my_setpalette);   // optional, only for the palette modes
+ULVM_set_storage(&vm, my_save, my_load); // optional save/load handlers
+ULVM_set_audio(&vm, my_beep, my_audio_command, my_audio_load); // optional audio
 
 while (!ULVM_handlenextinstruction(&vm)) { /* runs until OP_EXIT */ }
 ```
@@ -406,13 +474,19 @@ while (!ULVM_handlenextinstruction(&vm)) { /* runs until OP_EXIT */ }
   ROM-paged targets that isn't necessarily a flat pointer into RAM.
 - Any other callback left `NULL` makes that opcode a safe no-op / return-0
   — a program that never touches graphics needs none of the graphics hooks.
+- `save`/`load` callbacks receive a pointer to the selected VM RAM block and
+  its byte length, and return nonzero only when the operation succeeds.
+  Audio callbacks are host-owned; `audio_load` receives one validated SFX or
+  music record at a time, even when a single bytecode call loads a whole bank.
 - **`enablegraphics(wx, wy, colorsize)` / `disablegraphics()`** fire
   automatically whenever the bytecode's flag 0 value actually *changes* —
   this is how the host knows when to create/destroy a window (or turn on a
   physical display) and at what size, rather than polling. `colorsize` is
-  bits-per-pixel (1/4/8) matching the flag-0 mode table.
-- The SDL host supports all six graphics modes: 1-bit monochrome, 4-bit
-  grayscale, and 8-bit RGB332 color at 64x64 or 128x64.
+  bits-per-pixel (1/4/8/16) matching the flag-0 mode table; the palette modes
+  pass `0x80 | bits` (`0x82` or `0x88`).
+- The SDL host supports every graphics mode (flag 0 values 1 to 12): 1-bit
+  monochrome, grayscale, 8-bit RGB332 color, 16-bit RGB555 color and the
+  2-bit and 8-bit RGB555 palette modes, at the sizes listed above.
 - **`clearscreen()`** is called automatically right after `refreshscreen()`
   fires, matching the VM's "flip then clear" framebuffer semantics from
   Section 1 — the host doesn't need to remember to clear manually.

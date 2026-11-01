@@ -366,10 +366,10 @@ void loop() {
 }
 
 uint32_t main() {
-  if (isflagsupported(0, 4)) {
-    flag(0, 4);
+  if (isflagsupported(0, 6)) {
+    flag(0, 6);
   } else {
-    printf("Graphics flag 4 unsupported\n");
+    printf("Graphics flag 0 value 6 unsupported\n");
     exit();
   }
 

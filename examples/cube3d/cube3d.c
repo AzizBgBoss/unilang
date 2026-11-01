@@ -141,13 +141,13 @@ void draw_background(uint32_t time)
 
 void main()
 {
-    if (!isflagsupported(0, 6) || !isflagsupported(1, 1))
+    if (!isflagsupported(0, 9) || !isflagsupported(1, 1))
     {
-        printf("Flag 6 graphics or keyboard is not supported");
+        printf("Flag 0 value 9 graphics or keyboard is not supported");
         exit();
     }
 
-    flag(0, 6);
+    flag(0, 9);
     flag(1, 1);
     while (true)
     {

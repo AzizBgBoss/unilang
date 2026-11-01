@@ -1,10 +1,12 @@
 #include <SDL2/SDL.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define ULVM_MEM_SIZE 8192
 #include "unilang.h"
+#include "uniaudio.h"
 
 #define SCALE 10
 
@@ -29,10 +31,14 @@ static uint32_t display_buffer[FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT];
 static uint16_t graphics_width = 0;
 static uint16_t graphics_height = 0;
 static uint8_t graphics_colorsize = 0;
+static uint16_t palette[256];
 static int scale = SCALE;
 static uint32_t presented_frames = 0;
 static uint32_t last_frame_time = 0;
 static uint8_t previous_keyboard_state = 0;
+static SDL_AudioDeviceID audio_device = 0;
+static Uniaudio audio_engine;
+static char *save_file_path;
 
 static void my_outputchar(char c)
 {
@@ -51,7 +57,9 @@ static void my_setpixel(uint8_t x, uint8_t y, uint16_t color)
     if (!graphics_colorsize || x >= graphics_width || y >= graphics_height)
         return;
 
-    if (graphics_colorsize == 1)
+    if (graphics_colorsize & 0x80)
+        color &= (graphics_colorsize == 0x82) ? 0x03 : 0xFF;
+    else if (graphics_colorsize == 1)
         color = color ? 1 : 0;
     else if (graphics_colorsize == 4)
         color &= 0x03;
@@ -78,7 +86,14 @@ static uint32_t my_color_to_argb(uint16_t color)
     uint8_t green;
     uint8_t blue;
 
-    if (graphics_colorsize == 1)
+    if (graphics_colorsize & 0x80)
+    {
+        uint16_t rgb = palette[color & 0xFF];
+        red = (uint8_t)(((rgb >> 10) & 0x1F) * 255 / 31);
+        green = (uint8_t)(((rgb >> 5) & 0x1F) * 255 / 31);
+        blue = (uint8_t)((rgb & 0x1F) * 255 / 31);
+    }
+    else if (graphics_colorsize == 1)
     {
         red = green = blue = color ? 255 : 0;
     }
@@ -137,10 +152,16 @@ static void my_clearscreen(void)
     memset(framebuffer, 0, sizeof(framebuffer));
 }
 
+static void my_setpalette(uint8_t index, uint16_t color)
+{
+    palette[index] = color & 0x7FFF;
+}
+
 static void my_enablegraphics(uint16_t wx, uint16_t wy, uint8_t colorsize)
 {
     if ((wx != 64 && wx != 128 && wx != 256) || (wy != 64 && wy != 128) ||
-        (colorsize != 1 && colorsize != 4 && colorsize != 8 && colorsize != 16))
+        (colorsize != 1 && colorsize != 4 && colorsize != 8 && colorsize != 16 &&
+         colorsize != 0x82 && colorsize != 0x88))
     {
         DEBUG_ERROR("[debug] unsupported graphics mode: %ux%u, %u bits per pixel\n",
                     wx, wy, colorsize);
@@ -160,6 +181,24 @@ static void my_enablegraphics(uint16_t wx, uint16_t wy, uint8_t colorsize)
     graphics_width = wx;
     graphics_height = wy;
     graphics_colorsize = colorsize;
+    if (colorsize & 0x80)
+    {
+        // default palettes: 2-bit = black/dark/light/white, 8-bit = RGB332 expanded to RGB555
+        for (int i = 0; i < 256; ++i)
+        {
+            if (colorsize == 0x82)
+            {
+                uint16_t v = (uint16_t)((i & 3) * 31 / 3);
+                palette[i] = (uint16_t)((v << 10) | (v << 5) | v);
+            }
+            else
+            {
+                palette[i] = (uint16_t)(((((i >> 5) & 7) * 31 / 7) << 10) |
+                                        ((((i >> 2) & 7) * 31 / 7) << 5) |
+                                        ((i & 3) * 31 / 3));
+            }
+        }
+    }
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     if (!renderer)
     {
@@ -240,16 +279,162 @@ static void my_sleep(uint32_t ms)
     SDL_Delay(ms);
 }
 
+static void my_audio_callback(void *userdata, Uint8 *stream, int length)
+{
+    Uniaudio *audio = (Uniaudio *)userdata;
+    uniaudio_render(audio, (int16_t *)stream, (uint32_t)(length / (int)sizeof(int16_t)));
+}
+
+static void my_beep(uint32_t frequency, uint32_t duration_ms)
+{
+    if (audio_device)
+    {
+        SDL_LockAudioDevice(audio_device);
+        uniaudio_beep(&audio_engine, frequency, duration_ms);
+        SDL_UnlockAudioDevice(audio_device);
+    }
+}
+
+static uint32_t my_audio_command(uint8_t command, uint32_t a, uint32_t b)
+{
+    if (!audio_device)
+        return UINT32_MAX;
+    SDL_LockAudioDevice(audio_device);
+    uint32_t result = uniaudio_command(&audio_engine, command, a, b);
+    SDL_UnlockAudioDevice(audio_device);
+    return result;
+}
+
+static int my_audio_load(uint8_t kind, uint8_t index, const uint8_t *data, uint32_t len)
+{
+    if (!audio_device)
+        return 0;
+    SDL_LockAudioDevice(audio_device);
+    int result = uniaudio_load(&audio_engine, kind, index, data, len);
+    SDL_UnlockAudioDevice(audio_device);
+    if (!result)
+        fprintf(stderr, "[audio] invalid data kind/index/length (%u/%u/%u)\n",
+                (unsigned)kind, (unsigned)index, (unsigned)len);
+    return result;
+}
+
+static int my_save(uint8_t *data, uint32_t len)
+{
+    if (!save_file_path || len > ULVM_MEM_SIZE)
+        return 0;
+    FILE *f = fopen(save_file_path, "wb");
+    if (!f)
+    {
+        fprintf(stderr, "[save] cannot open %s: %s\n", save_file_path, strerror(errno));
+        return 0;
+    }
+    uint8_t size[4] = {(uint8_t)(len >> 24), (uint8_t)(len >> 16),
+                       (uint8_t)(len >> 8), (uint8_t)len};
+    int ok = fwrite(size, 1, sizeof(size), f) == sizeof(size) &&
+             fwrite(data, 1, len, f) == len;
+    if (fclose(f) != 0)
+        ok = 0;
+    if (!ok)
+        fprintf(stderr, "[save] failed writing %s\n", save_file_path);
+    return ok;
+}
+
+static int my_load(uint8_t *data, uint32_t len)
+{
+    if (!save_file_path || len > ULVM_MEM_SIZE)
+        return 0;
+    FILE *f = fopen(save_file_path, "rb");
+    if (!f)
+    {
+        fprintf(stderr, "[save] cannot open %s: %s\n", save_file_path, strerror(errno));
+        return 0;
+    }
+    uint8_t size[4];
+    int ok = fread(size, 1, sizeof(size), f) == sizeof(size);
+    uint32_t stored = ok ? ((uint32_t)size[0] << 24) | ((uint32_t)size[1] << 16) |
+                           ((uint32_t)size[2] << 8) | size[3] : 0;
+    if (!ok || stored > ULVM_MEM_SIZE || stored < len)
+        ok = 0;
+    uint8_t *staged = NULL;
+    if (ok && len)
+    {
+        staged = (uint8_t *)malloc(len);
+        if (!staged)
+            ok = 0;
+        else if (fread(staged, 1, len, f) != len)
+            ok = 0;
+    }
+    if (fclose(f) != 0)
+        ok = 0;
+    if (ok && len)
+        memcpy(data, staged, len);
+    free(staged);
+    if (!ok)
+        fprintf(stderr, "[save] invalid or undersized save data in %s\n", save_file_path);
+    return ok;
+}
+
+static char *my_save_path(const char *bytecode_path)
+{
+    size_t len = strlen(bytecode_path);
+    size_t base = len;
+    for (size_t i = len; i > 0; i--)
+    {
+        if (bytecode_path[i - 1] == '/' || bytecode_path[i - 1] == '\\')
+            break;
+        if (bytecode_path[i - 1] == '.')
+        {
+            base = i - 1;
+            break;
+        }
+    }
+    char *path = (char *)malloc(base + 5);
+    if (!path)
+        return NULL;
+    memcpy(path, bytecode_path, base);
+    memcpy(path + base, ".uls", 5);
+    return path;
+}
+
+static int my_open_audio(void)
+{
+    if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0)
+    {
+        fprintf(stderr, "[audio] SDL audio unavailable: %s\n", SDL_GetError());
+        return 0;
+    }
+    SDL_AudioSpec desired;
+    SDL_zero(desired);
+    desired.freq = (int)UNIAUDIO_SAMPLE_RATE;
+    desired.format = AUDIO_S16SYS;
+    desired.channels = 1;
+    desired.samples = 512;
+    desired.callback = my_audio_callback;
+    desired.userdata = &audio_engine;
+    audio_device = SDL_OpenAudioDevice(NULL, 0, &desired, NULL, 0);
+    if (!audio_device)
+    {
+        fprintf(stderr, "[audio] cannot open SDL audio device: %s\n", SDL_GetError());
+        return 0;
+    }
+    SDL_PauseAudioDevice(audio_device, 0);
+    return 1;
+}
+
 static int my_isflagsupported(uint8_t flag, uint8_t val)
 {
     int supported = 0;
     if (flag == 0)
     {
-        supported = val >= 1 && val <= 8;
+        supported = val == 1 || val == 2 || val == 3 || val == 4 || val == 5 || val == 6 || val == 7 || val == 8 || val == 9 || val == 10 || val == 11 || val == 12;
     }
     else if (flag == 1)
     {
         supported = val == 1;
+    }
+    else if (flag == 2)
+    {
+        supported = audio_device && (val == 1 || val == 2);
     }
 
     DEBUG_PRINT("[debug] isflagsupported(%u, %u) -> %s\n",
@@ -364,11 +549,20 @@ int main(int argc, char **argv)
     fclose(f);
     DEBUG_PRINT("[debug] loaded bytecode %s (%ld bytes)\n", bytecode_path, romsize);
 
+    save_file_path = my_save_path(bytecode_path);
+    if (!save_file_path)
+    {
+        fprintf(stderr, "Could not allocate save-file path\n");
+        free(rom);
+        return 1;
+    }
+    uniaudio_init(&audio_engine);
     if (SDL_Init(SDL_INIT_VIDEO) != 0)
     {
         printf("SDL_Init failed: %s\n", SDL_GetError());
         return 1;
     }
+    my_open_audio();
     DEBUG_PRINT("[debug] SDL video subsystem initialized\n");
     DEBUG_PRINT("[debug] VM RAM configured: %u bytes\n", (unsigned)ULVM_MEM_SIZE);
     UnilangVM vm;
@@ -390,6 +584,9 @@ int main(int argc, char **argv)
     ULVM_set_keyboard(&vm, my_getkeyboard);
     ULVM_set_time(&vm, my_gettime, my_sleep);
     ULVM_set_flagsupport(&vm, my_isflagsupported);
+    ULVM_set_palette(&vm, my_setpalette);
+    ULVM_set_storage(&vm, my_save, my_load);
+    ULVM_set_audio(&vm, my_beep, my_audio_command, my_audio_load);
 
     // Run in batches and handle window events between them: far cheaper than
     // polling SDL after every single instruction.
@@ -425,8 +622,11 @@ int main(int argc, char **argv)
     }
 
     my_disablegraphics();
+    if (audio_device)
+        SDL_CloseAudioDevice(audio_device);
     SDL_Quit();
     free(vm.instruction_hits);
     free(rom);
+    free(save_file_path);
     return 0;
 }

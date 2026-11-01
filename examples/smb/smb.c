@@ -846,12 +846,12 @@ void frame_wait()
 
 uint32_t main()
 {
-    if (!isflagsupported(0, 6) || !isflagsupported(1, 1))
+    if (!isflagsupported(0, 9) || !isflagsupported(1, 1))
     {
         printf("Needs 128x64 color graphics and keyboard support.\n");
         exit();
     }
-    flag(0, 6);
+    flag(0, 9);
     flag(1, 1);
     frame_start = gettime();
     reset_level();

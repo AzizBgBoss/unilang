@@ -112,6 +112,12 @@ OPS = {
     "fillrect":        (0x24, [1, 1, 1, 1, 1]),       # regx, regy, regw, regh, regc
     "drawline":        (0x25, [1, 1, 1, 1, 1]),       # regx0, regy0, regx1, regy1, regc
     "blit":            (0x26, [4]),                   # desc_addr (11 words in RAM, see ulvm_blit)
+    "setpalette":      (0x27, [1, 1]),                # regindex, regcolor (RGB555), palette graphics modes only
+    "save":            (0x28, [1, 1, 1]),              # regaddr, reglen, regresult
+    "load":            (0x29, [1, 1, 1]),              # regaddr, reglen, regresult
+    "beep":            (0x2A, [1, 1]),                 # regfreq, regms
+    "audio_command":   (0x2B, [1, 1, 1, 1]),           # command, rega, regb, regresult
+    "audio_load":      (0x2C, [1, 1, 1, 1, 1, 1]),     # kind, index, regaddr, reglen, source, regresult
 
     "setreg":          (0x40, [1, 4]),                # reg, val
     "movreg":          (0x41, [1, 1]),                # dst, src
@@ -2129,6 +2135,12 @@ class Compiler:
                 size = self.addr_size(target)
                 self.emit("input", size, target)
                 return target
+            if name in ("save", "load"):
+                return self.gen_storage(node, name)
+            if name == "audiostatus":
+                return self.gen_audio_command(node, 7)
+            if name == "audioload":
+                return self.gen_audio_load(node)
             if name == "__mem_load":
                 args = node.args.exprs if node.args else []
                 if len(args) != 2:
@@ -2149,7 +2161,7 @@ class Compiler:
                 if not isinstance(args[1], c_ast.Constant):
                     raise NotImplementedError("__mem_ptr() size must be a compile-time constant")
                 return self.gen_expr(args[0])
-            if name in ("flag", "setpixel", "exit", "srand", "drawchar", "drawstring", "fillrect", "drawline", "blit"):
+            if name in ("flag", "setpixel", "exit", "srand", "drawchar", "drawstring", "fillrect", "drawline", "blit", "setpalette", "beep", "sfx", "music", "audiostop", "audiopause", "audioresume", "audiovolume"):
                 raise NotImplementedError(f"'{name}' does not return a value")
             return self.gen_call(node)
 
@@ -2358,6 +2370,18 @@ class Compiler:
             self.emit_load(a, self.addr_size(a), reg)
         self.emit(opname, *regs)
 
+    def gen_setpalette(self, call):
+        # setpalette(index, rgb555): palette graphics modes (flag 0 = 3, 5, 8, 10)
+        self.uses_graphics = True
+        args = call.args.exprs if call.args else []
+        if len(args) != 2:
+            raise NotImplementedError("setpalette() takes exactly 2 arguments")
+        addrs = [self.gen_expr(a) for a in args]
+        regs = (RA, RB)
+        for reg, a in zip(regs, addrs):
+            self.emit_load(a, self.addr_size(a), reg)
+        self.emit("setpalette", *regs)
+
     def gen_blit(self, call):
         # blit(x, y, w, h, src, srcx, srcy, stride, flags, palette, transparent)
         # See ulvm_blit() in unilang.h. `src` is a const array (ROM sheet) or RAM array (flag 32);
@@ -2440,6 +2464,66 @@ class Compiler:
         seed_r = self.resolve_operand(args[0])
         self.load_resolved(seed_r, RA)
         self.emit("srandreg", RA)
+
+    def gen_storage(self, call, opname):
+        self.raw_memory = True
+        args = call.args.exprs if call.args else []
+        if len(args) != 2:
+            raise NotImplementedError(f"{opname}(buffer, length) takes exactly 2 arguments")
+        buffer = args[0]
+        is_buffer = (isinstance(buffer, c_ast.UnaryOp) and buffer.op == "&") or \
+            isinstance(buffer, c_ast.ArrayRef)
+        if isinstance(buffer, c_ast.ID):
+            typ = self.var_types.get(buffer.name)
+            is_buffer = is_buffer or isinstance(typ, (c_ast.PtrDecl, c_ast.ArrayDecl))
+        if not is_buffer:
+            raise NotImplementedError(f"{opname}() requires a pointer, array, or &variable as its first argument")
+        addr = self.gen_expr(buffer)
+        length = self.gen_expr(args[1])
+        self.emit_load(addr, self.addr_size(addr), RA)
+        self.emit_load(length, self.addr_size(length), RB)
+        self.emit(opname, RA, RB, RC)
+        result = self.alloc_temp(1)
+        self.emit_store(RC, result, 1)
+        return result
+
+    def gen_audio_command(self, call, command):
+        args = call.args.exprs if call.args else []
+        required = 1 if command in (2, 6, 7) else 2 if command == 1 else 0
+        if len(args) != required:
+            labels = {1: "sfx(id, channel)", 2: "music(pattern)", 6: "audiovolume(volume)", 7: "audiostatus(channel)"}
+            label = labels.get(command, "audio command")
+            raise NotImplementedError(f"{label} takes exactly {required} argument(s)")
+        regs = [RA, RB]
+        for i, arg in enumerate(args):
+            addr = self.gen_expr(arg)
+            self.emit_load(addr, self.addr_size(addr), regs[i])
+        if len(args) < 2:
+            self.emit_set_const(RB, 0)
+        self.emit("audio_command", command, RA, RB, RC)
+        if command != 7:
+            return None
+        result = self.alloc_temp(INT_SIZE)
+        self.emit_store(RC, result, INT_SIZE)
+        return result
+
+    def gen_audio_load(self, call):
+        args = call.args.exprs if call.args else []
+        if len(args) != 4:
+            raise NotImplementedError("audioload(kind, index, data, length) takes exactly 4 arguments")
+        kind_addr = self.gen_expr(args[0])
+        index_addr = self.gen_expr(args[1])
+        data_addr = self.gen_expr(args[2])
+        length_addr = self.gen_expr(args[3])
+        source = int(self.expr_is_rom(args[2]))
+        if not source:
+            self.raw_memory = True
+        for reg, addr in zip((RA, RB, RC, 9), (kind_addr, index_addr, data_addr, length_addr)):
+            self.emit_load(addr, self.addr_size(addr), reg)
+        self.emit("audio_load", RA, RB, RC, 9, source, 10)
+        result = self.alloc_temp(1)
+        self.emit_store(10, result, 1)
+        return result
 
     def gen_gettime(self):
         self.emit("gettime", RA)
@@ -3052,6 +3136,28 @@ class Compiler:
                 self.gen_rect_or_line(node, name)
             elif name == "blit":
                 self.gen_blit(node)
+            elif name == "setpalette":
+                self.gen_setpalette(node)
+            elif name == "beep":
+                args = node.args.exprs if node.args else []
+                if len(args) != 2:
+                    raise NotImplementedError("beep(frequency, duration_ms) takes exactly 2 arguments")
+                addrs = [self.gen_expr(arg) for arg in args]
+                for reg, addr in zip((RA, RB), addrs):
+                    self.emit_load(addr, self.addr_size(addr), reg)
+                self.emit("beep", RA, RB)
+            elif name == "sfx":
+                self.gen_audio_command(node, 1)
+            elif name == "music":
+                self.gen_audio_command(node, 2)
+            elif name == "audiostop":
+                self.gen_audio_command(node, 3)
+            elif name == "audiopause":
+                self.gen_audio_command(node, 4)
+            elif name == "audioresume":
+                self.gen_audio_command(node, 5)
+            elif name == "audiovolume":
+                self.gen_audio_command(node, 6)
             elif name == "sleep":
                 args = node.args.exprs if node.args else []
                 if len(args) != 1 or self.try_const(args[0]) is None:

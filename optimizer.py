@@ -58,7 +58,9 @@ ROLES = {
     "getmemsize": "w", "getflag": "iw", "randreg": "rrW", "srandreg": "r",
     "drawstring": "rrrrriww", "numtostr": "rMw", "floatop": "iirrr",
     "floatcast": "iirr", "romread64": "rww", "fillrect": "rrrrr",
-    "drawline": "rrrrr", "blit": "M",
+    "drawline": "rrrrr", "blit": "M", "setpalette": "rr",
+    "save": "rrw", "load": "rrw", "beep": "rr",
+    "audio_command": "irrw", "audio_load": "rrrriw",
     "setreg": "wi", "movreg": "wr",
     "loadreg8": "wm", "loadreg16": "wm", "loadreg32": "wm",
     "storereg8": "rs", "storereg16": "rs", "storereg32": "rs",
@@ -91,7 +93,7 @@ PURE = {
 }
 # instructions that write RAM somewhere other than a tagged direct address
 MEM_CLOBBER = {"storeregi8", "storeregi16", "storeregi32", "floatop", "floatcast",
-               "numtostr", "input", "write", "setbyte"}
+               "numtostr", "input", "write", "setbyte", "load"}
 LOADS = {"loadreg8": 1, "loadreg16": 2, "loadreg32": 4}
 STORES = {"storereg8": 1, "storereg16": 2, "storereg32": 4}
 COND_JUMPS = {"ifreg", "ifnotreg", "jcmp", "jcmpv"}

@@ -1,7 +1,7 @@
-// Walker: a tour of graphics flag 0, modes 1 to 8, five seconds each.
-//   1 mono 64x64      2 gray 64x64      3 RGB332 64x64
-//   4 mono 128x64     5 gray 128x64     6 RGB332 128x64
-//   7 RGB555 128x128  8 RGB555 256x128
+// Walker: a tour of graphics flag 0, values 1 to 12, five seconds each.
+//   1 mono 64x64      2 gray 64x64      3 palette2 64x64   4 RGB332 64x64    5 palette8 64x64
+//   6 mono 128x64     7 gray 128x64     8 palette2 128x64  9 RGB332 128x64   10 palette8 128x64
+//   11 RGB555 128x128  12 RGB555 256x128
 // A kid walks through a scrolling dusk landscape. Press Enter to quit.
 
 #define RGB332(r, g, b) (((r) << 5) | ((g) << 2) | (b))
@@ -24,7 +24,7 @@
 #define C_SHADOW 13
 #define C_BAR 14
 
-const uint16_t pal[64] = {
+const uint16_t pal[96] = {
     // class 0, mono: 0 black, 1 white, 2 checker, 3 sparse dots
     1, 3, 0, 0, 1, 1, 1, 2, 1, 1, 2, 1, 3, 0, 1, 0,
     // class 1, 2-bit gray: 0 to 3
@@ -38,13 +38,18 @@ const uint16_t pal[64] = {
     RGB555(31, 29, 6), RGB555(14, 10, 18), RGB555(3, 13, 6), RGB555(17, 11, 5),
     RGB555(7, 24, 4), RGB555(31, 23, 17), RGB555(9, 5, 2), RGB555(31, 5, 6),
     RGB555(4, 9, 22), RGB555(5, 4, 3), RGB555(31, 28, 29), 32767,
-    RGB555(21, 15, 8), RGB555(1, 3, 5), 32767, 0
+    RGB555(21, 15, 8), RGB555(1, 3, 5), 32767, 0,
+    // class 4, 2-bit palette indices (same layout as gray)
+    3, 1, 0, 1, 2, 3, 2, 2, 3, 2, 3, 3, 2, 0, 3, 0,
+    // class 5, 8-bit palette indices (slot i uses palette entry i, filled from class 3)
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
 };
 
-// per mode (index 1 to 8): width, height, color class
-const uint16_t pw[9] = {0, 64, 64, 64, 128, 128, 128, 128, 256};
-const uint16_t ph[9] = {0, 64, 64, 64, 64, 64, 64, 128, 128};
-const uint8_t pcl[9] = {0, 0, 1, 2, 0, 1, 2, 3, 3};
+// per mode (index 1 to 12, same as the flag 0 value): width, height, color class
+// classes: 0 mono, 1 gray, 2 RGB332, 3 RGB555, 4 2-bit palette, 5 8-bit palette
+const uint16_t pw[13] = {0, 64, 64, 64, 64, 64, 128, 128, 128, 128, 128, 128, 256};
+const uint16_t ph[13] = {0, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 128, 128};
+const uint8_t pcl[13] = {0, 0, 1, 4, 2, 5, 0, 1, 4, 2, 5, 3, 3};
 
 // 2x2 ordered dither thresholds and the 4 frame leg positions (in sprite units)
 const uint8_t bay[4] = {51, 153, 204, 102};
@@ -104,6 +109,28 @@ uint32_t rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t idx)
     return 0;
 }
 
+// palette modes: load the scene colors into the host palette
+uint32_t setup_palette()
+{
+    if (CL == 4)
+    {
+        setpalette(0, RGB555(3, 3, 10));
+        setpalette(1, RGB555(14, 6, 18));
+        setpalette(2, RGB555(30, 16, 6));
+        setpalette(3, RGB555(31, 29, 20));
+    }
+    else if (CL == 5)
+    {
+        uint32_t i = 0;
+        while (i < 16)
+        {
+            setpalette(i, pal[48 + i]);
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
 // one gradient value per row, quantized to the current mode's color depth
 uint32_t build_sky()
 {
@@ -123,6 +150,14 @@ uint32_t build_sky()
             v = ((r * 3 + g * 6 + b) / 10) / 64;
         else if (CL == 2)
             v = ((r / 32) << 5) | ((g / 32) << 2) | (b / 64);
+        else if (CL == 4)
+            v = ((r * 3 + g * 6 + b) / 10) / 64;
+        else if (CL == 5)
+        {
+            // 8-bit palette: one palette entry per sky row, starting at 16
+            setpalette(16 + y, ((r / 8) << 10) | ((g / 8) << 5) | (b / 8));
+            v = 16 + y;
+        }
         else
             v = ((r / 8) << 10) | ((g / 8) << 5) | (b / 8);
         skyc[y] = v;
@@ -222,9 +257,9 @@ uint32_t draw_walker(uint32_t dist)
 
 uint32_t main()
 {
-    if (!isflagsupported(0, 8))
+    if (!isflagsupported(0, 12))
     {
-        printf("This host does not support graphics flag 0 value 8. Rebuild C-interpreter/main.\n");
+        printf("This host does not support graphics flag 0 value 12. Rebuild C-interpreter/main.\n");
         exit();
     }
     flag(1, 1);
@@ -235,7 +270,7 @@ uint32_t main()
     {
         uint32_t el = gettime() - start;
         uint32_t mode = 1 + el / 5000;
-        if (mode > 8)
+        if (mode > 12)
             break;
 
         if (mode != cur)
@@ -255,8 +290,16 @@ uint32_t main()
                 flag(0, 6);
             else if (mode == 7)
                 flag(0, 7);
-            else
+            else if (mode == 8)
                 flag(0, 8);
+            else if (mode == 9)
+                flag(0, 9);
+            else if (mode == 10)
+                flag(0, 10);
+            else if (mode == 11)
+                flag(0, 11);
+            else
+                flag(0, 12);
             SW = pw[mode];
             SH = ph[mode];
             CL = pcl[mode];
@@ -265,6 +308,7 @@ uint32_t main()
             SUNX = SW * 5 / 8;
             SUNY = GY - 16 * SC;
             SUNR2 = 49 * SC * SC;
+            setup_palette();
             build_sky();
             printf("flag 0 = %d\n", mode);
         }
@@ -282,17 +326,25 @@ uint32_t main()
         else if (mode == 2)
             drawstring("2 GRAY 64x64", 1, 1, wc);
         else if (mode == 3)
-            drawstring("3 RGB332 64x64", 1, 1, wc);
+            drawstring("3 PAL2 64x64", 1, 1, wc);
         else if (mode == 4)
-            drawstring("4 MONO 128x64", 1, 1, wc);
+            drawstring("4 RGB332 64x64", 1, 1, wc);
         else if (mode == 5)
-            drawstring("5 GRAY 128x64", 1, 1, wc);
+            drawstring("5 PAL8 64x64", 1, 1, wc);
         else if (mode == 6)
-            drawstring("6 RGB332 128x64", 1, 1, wc);
+            drawstring("6 MONO 128x64", 1, 1, wc);
         else if (mode == 7)
-            drawstring("7 RGB555 128x128", 1, 1, wc);
+            drawstring("7 GRAY 128x64", 1, 1, wc);
+        else if (mode == 8)
+            drawstring("8 PAL2 128x64", 1, 1, wc);
+        else if (mode == 9)
+            drawstring("9 RGB332 128x64", 1, 1, wc);
+        else if (mode == 10)
+            drawstring("10 PAL8 128x64", 1, 1, wc);
+        else if (mode == 11)
+            drawstring("11 RGB555 128x128", 1, 1, wc);
         else
-            drawstring("8 RGB555 256x128", 1, 1, wc);
+            drawstring("12 RGB555 256x128", 1, 1, wc);
 
         refreshscreen();
         if (getkey() & 128)

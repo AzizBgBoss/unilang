@@ -590,12 +590,12 @@ void update_player(uint8_t keys)
 
 uint32_t main()
 {
-    if (!isflagsupported(0, 6) || !isflagsupported(1, 1))
+    if (!isflagsupported(0, 9) || !isflagsupported(1, 1))
     {
         printf("Celeste needs 128x64 color graphics and keyboard support.\n");
         exit();
     }
-    flag(0, 6);
+    flag(0, 9);
     flag(1, 1);
     srand(gettime());
     frame_start = gettime();

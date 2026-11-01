@@ -24,12 +24,18 @@ Operand encoding conventions (all big-endian):
 0 - disable graphics
 1 - enable monochrome graphics (64x64) (1 x 64 x 64 = 4096 bits = 512 bytes = 0.5 KB)
 2 - enable 2-bit grayscale graphics (4 shades, 64x64) (2 x 64 x 64 = 8192 bits = 1024 bytes = 1 KB)
-3 - enable 8-bit color graphics (64x64) (8 x 64 x 64 = 32768 bits = 4096 bytes = 4 KB)
-4 - enable monochrome graphics (128x64) (1 x 128 x 64 = 8192 bits = 1024 bytes = 1 KB)
-5 - enable 2-bit grayscale graphics (4 shades, 128x64) (2 x 128 x 64 = 16384 bits = 2048 bytes = 2 KB)
-6 - enable 8-bit color graphics (128x64) (8 x 128 x 64 = 65536 bits = 8192 bytes = 8 KB)
-7 - enable 16-bit RGB555 color graphics (128x128) (16 x 128 x 128 = 262144 bits = 32768 bytes = 32 KB)
-8 - enable 16-bit RGB555 color graphics (256x128) (16 x 256 x 128 = 524288 bits = 65536 bytes = 64 KB)
+3 - enable 2-bit RGB555 palette graphics (64x64) (2 x 64 x 64 = 8192 bits = 1024 bytes = 1 KB)
+4 - enable 8-bit color graphics (64x64) (8 x 64 x 64 = 32768 bits = 4096 bytes = 4 KB)
+5 - enable 8-bit RGB555 palette graphics (64x64) (8 x 64 x 64 = 32768 bits = 4096 bytes = 4 KB)
+6 - enable monochrome graphics (128x64) (1 x 128 x 64 = 8192 bits = 1024 bytes = 1 KB)
+7 - enable 2-bit grayscale graphics (4 shades, 128x64) (2 x 128 x 64 = 16384 bits = 2048 bytes = 2 KB)
+8 - enable 2-bit RGB555 palette graphics (128x64) (2 x 128 x 64 = 16384 bits = 2048 bytes = 2 KB)
+9 - enable 8-bit color graphics (128x64) (8 x 128 x 64 = 65536 bits = 8192 bytes = 8 KB)
+10 - enable 8-bit RGB555 palette graphics (128x64) (8 x 128 x 64 = 65536 bits = 8192 bytes = 8 KB)
+11 - enable 16-bit RGB555 color graphics (128x128) (16 x 128 x 128 = 262144 bits = 32768 bytes = 32 KB)
+12 - enable 16-bit RGB555 color graphics (256x128) (16 x 256 x 128 = 524288 bits = 65536 bytes = 64 KB)
+Palette modes (3, 5, 8, 10): setpixel/drawchar/fillrect values are palette indices (0-3 or 0-255). The host turns an index into an RGB555 color
+through the setpalette(index, rgb555) opcode. enablegraphics() receives colorsize = 0x80 | bits per pixel for these modes.
 
 - flag 1 (keyboard) (this will consume the last n bits of memory (after graphics if it's used)) (Only gets supported once graphics are supported and on):
 0 - disable keyboard
@@ -201,6 +207,12 @@ enum OP_CODES
     OP_FILLRECT = 0x24,  // fill a rectangle (clipped to the screen) - parameters: regx(1), regy(1), regw(1), regh(1), regc(1)
     OP_DRAWLINE,         // draw a line (Bresenham, clipped) - parameters: regx0(1), regy0(1), regx1(1), regy1(1), regc(1)
     OP_BLIT,             // draw a sprite region from a ROM/RAM sheet; 11 parameter words live in RAM at desc_addr (see ulvm_blit) - parameters: desc_addr(4)
+    OP_SETPALETTE,       // set a palette entry, palette graphics modes only (flag 0 = 3, 5, 8, 10) - parameters: regindex(1), regcolor(1) (RGB555)
+    OP_SAVE,             // save a VM RAM block through the host - parameters: regaddr(1), reglen(1), regresult(1)
+    OP_LOAD,             // load a VM RAM block through the host - parameters: regaddr(1), reglen(1), regresult(1)
+    OP_BEEP,             // start a host-side tone - parameters: regfreq(1), regms(1)
+    OP_AUDIO_COMMAND,    // send a host audio command - parameters: command(1), rega(1), regb(1), regresult(1)
+    OP_AUDIO_LOAD,       // copy audio data to the host - parameters: regkind(1), regindex(1), regaddr(1), reglen(1), source(1), regresult(1)
 
     // Direct Register & Memory Operations
     OP_SETREG = 0x40, // reg = val - parameters: reg(1), val(4)
@@ -290,6 +302,32 @@ typedef uint32_t (*vm_input)(char *buf, uint32_t maxchars);
 typedef void     (*vm_enablegraphics)(uint16_t wx, uint16_t wy, uint8_t colorsize);
 typedef void     (*vm_disablegraphics)(void);
 typedef void     (*vm_clearscreen)(void);
+typedef void     (*vm_setpalette)(uint8_t index, uint16_t color);
+typedef int      (*vm_storage)(uint8_t *data, uint32_t len);
+typedef void     (*vm_beep)(uint32_t frequency, uint32_t duration_ms);
+typedef uint32_t (*vm_audio_command)(uint8_t command, uint32_t a, uint32_t b);
+typedef int      (*vm_audio_load)(uint8_t kind, uint8_t index, const uint8_t *data, uint32_t len);
+
+#define ULVM_AUDIO_LOAD_MAX 68
+#define ULVM_AUDIO_SFX_BYTES (4u + 32u * 2u)
+#define ULVM_AUDIO_MUSIC_BYTES 4u
+
+enum ULVM_AUDIO_COMMANDS
+{
+    ULVM_AUDIO_SFX = 1,
+    ULVM_AUDIO_MUSIC,
+    ULVM_AUDIO_STOP,
+    ULVM_AUDIO_PAUSE,
+    ULVM_AUDIO_RESUME,
+    ULVM_AUDIO_VOLUME,
+    ULVM_AUDIO_STATUS
+};
+
+enum ULVM_AUDIO_DATA_KINDS
+{
+    ULVM_AUDIO_DATA_SFX = 0,
+    ULVM_AUDIO_DATA_MUSIC = 1
+};
 
 #define ULVM_FLAG_NUM 16
 #define ULVM_FLAG_SIZE 4
@@ -334,10 +372,16 @@ struct UnilangVM
     vm_enablegraphics enablegraphics;
     vm_disablegraphics disablegraphics;
     vm_clearscreen clearscreen;
+    vm_setpalette setpalette;
+    vm_storage save;
+    vm_storage load;
+    vm_beep beep;
+    vm_audio_command audio_command;
+    vm_audio_load audio_load;
 
     uint32_t rand_state;
     uint16_t gfx_w, gfx_h;
-    uint16_t cursor_x, cursor_y;
+    int64_t cursor_x, cursor_y;
 };
 
 static inline void ULVM_init(UnilangVM *vm, vm_outputchar outputchar, vm_readbyte readbyte)
@@ -375,6 +419,25 @@ static inline void ULVM_set_graphics(UnilangVM *vm, vm_setpixel setpixel, vm_get
     vm->enablegraphics = enablegraphics;
     vm->disablegraphics = disablegraphics;
     vm->clearscreen = clearscreen;
+}
+
+static inline void ULVM_set_palette(UnilangVM *vm, vm_setpalette setpalette)
+{
+    vm->setpalette = setpalette;
+}
+
+static inline void ULVM_set_storage(UnilangVM *vm, vm_storage save, vm_storage load)
+{
+    vm->save = save;
+    vm->load = load;
+}
+
+static inline void ULVM_set_audio(UnilangVM *vm, vm_beep beep,
+                                  vm_audio_command audio_command, vm_audio_load audio_load)
+{
+    vm->beep = beep;
+    vm->audio_command = audio_command;
+    vm->audio_load = audio_load;
 }
 
 static inline void ULVM_set_keyboard(UnilangVM *vm, vm_getkeyboard getkeyboard)
@@ -730,33 +793,49 @@ static inline void ulvm_graphics_dims(uint8_t val, uint16_t *wx, uint16_t *wy, u
 {
     switch (val)
     {
+    // palette modes report colorsize = 0x80 | bits per pixel (2 or 8); the host maps indices through setpalette()
     case 1: *wx = 64;  *wy = 64; *colorsize = 1; break;
     case 2: *wx = 64;  *wy = 64; *colorsize = 4; break;
-    case 3: *wx = 64;  *wy = 64; *colorsize = 8; break;
-    case 4: *wx = 128; *wy = 64; *colorsize = 1; break;
-    case 5: *wx = 128; *wy = 64; *colorsize = 4; break;
-    case 6: *wx = 128; *wy = 64; *colorsize = 8; break;
-    case 7: *wx = 128; *wy = 128; *colorsize = 16; break;
-    case 8: *wx = 256; *wy = 128; *colorsize = 16; break;
+    case 3: *wx = 64;  *wy = 64; *colorsize = 0x82; break;
+    case 4: *wx = 64;  *wy = 64; *colorsize = 8; break;
+    case 5: *wx = 64;  *wy = 64; *colorsize = 0x88; break;
+    case 6: *wx = 128; *wy = 64; *colorsize = 1; break;
+    case 7: *wx = 128; *wy = 64; *colorsize = 4; break;
+    case 8: *wx = 128; *wy = 64; *colorsize = 0x82; break;
+    case 9: *wx = 128; *wy = 64; *colorsize = 8; break;
+    case 10: *wx = 128; *wy = 64; *colorsize = 0x88; break;
+    case 11: *wx = 128; *wy = 128; *colorsize = 16; break;
+    case 12: *wx = 256; *wy = 128; *colorsize = 16; break;
     default: *wx = 0; *wy = 0; *colorsize = 0; break;
     }
 }
 
-static inline void ulvm_drawchar(UnilangVM *vm, uint16_t x, uint16_t y, uint16_t color, uint8_t c)
+static inline int32_t ulvm_gw(UnilangVM *vm);
+static inline int32_t ulvm_gh(UnilangVM *vm);
+
+// Draws one glyph at a signed position; pixels outside the screen are skipped, so glyphs can be partly off any edge.
+static inline void ulvm_drawchar(UnilangVM *vm, int64_t x, int64_t y, uint16_t color, uint8_t c)
 {
     if (!vm->setpixel)
         return;
     if (c < 0x20 || c > 0x7F)
         c = 0x20;
     const uint8_t *glyph = ulvm_font4x6_basic[c - 0x20];
+    int32_t maxx = ulvm_gw(vm), maxy = ulvm_gh(vm);
     for (int row = 0; row < 6; row++)
     {
+        int64_t py = y + row;
+        if (py < 0 || py >= maxy)
+            continue;
         uint8_t byte = READ_FLASH_BYTE(&glyph[row / 2]);  // the font lives in PROGMEM on AVR
         uint8_t nibble = (row % 2 == 0) ? ((byte >> 4) & 0xF) : (byte & 0xF);
         for (int col = 0; col < 4; col++)
         {
+            int64_t px = x + col;
+            if (px < 0 || px >= maxx)
+                continue;
             if (nibble & (1 << col))
-                vm->setpixel((uint8_t)(x + col), (uint8_t)(y + row), color);
+                vm->setpixel((uint8_t)px, (uint8_t)py, color);
         }
     }
 }
@@ -767,27 +846,34 @@ static inline void ulvm_drawstring(UnilangVM *vm, uint16_t color, char c)
     {
         vm->cursor_x = 0;
         vm->cursor_y += ULVM_GLYPH_H;
+        if (vm->cursor_y + 6 > vm->gfx_h)
+        {
+            vm->cursor_x = 0;
+            vm->cursor_y = 0;
+        }
     }
     else
     {
         ulvm_drawchar(vm, vm->cursor_x, vm->cursor_y, color, (uint8_t)c);
         vm->cursor_x += ULVM_GLYPH_W;
-        if (vm->cursor_x + 4 > vm->gfx_w)
+        // wrap only once the next glyph no longer fits; a single line placed partly off the
+        // bottom or left edge keeps its position and is simply clipped
+        if (vm->cursor_x + 4 > vm->gfx_w && vm->cursor_x > 0)
         {
             vm->cursor_x = 0;
             vm->cursor_y += ULVM_GLYPH_H;
+            if (vm->cursor_y + 6 > vm->gfx_h)
+            {
+                vm->cursor_x = 0;
+                vm->cursor_y = 0;
+            }
         }
-    }
-    if (vm->cursor_y + 6 > vm->gfx_h)
-    {
-        vm->cursor_x = 0;
-        vm->cursor_y = 0;
     }
 }
 
-static inline void ulvm_drawstring_mem(UnilangVM *vm, uint16_t x, uint16_t y, uint16_t color,
+static inline void ulvm_drawstring_mem(UnilangVM *vm, int32_t x, int32_t y, uint16_t color,
                                         uint32_t addr, uint32_t len, uint8_t rom,
-                                        uint16_t *retx, uint16_t *rety)
+                                        int32_t *retx, int32_t *rety)
 {
     if (!rom)
     {
@@ -803,7 +889,7 @@ static inline void ulvm_drawstring_mem(UnilangVM *vm, uint16_t x, uint16_t y, ui
         uint8_t c;
         if (rom)
         {
-            c = ulvm_rom_byte(vm, addr + i);
+            c = i <= UINT32_MAX - addr ? ulvm_rom_byte(vm, addr + i) : 0;
         }
         else
         {
@@ -864,33 +950,80 @@ ULVM_HOT int ulvm_cond(uint8_t c, uint32_t a, uint32_t b)
 static inline int32_t ulvm_gw(UnilangVM *vm) { return vm->gfx_w ? (int32_t)vm->gfx_w : 256; }
 static inline int32_t ulvm_gh(UnilangVM *vm) { return vm->gfx_h ? (int32_t)vm->gfx_h : 256; }
 
-static inline void ulvm_fillrect(UnilangVM *vm, int32_t x, int32_t y, int32_t w, int32_t h, uint8_t c)
+static inline void ulvm_fillrect(UnilangVM *vm, int32_t x, int32_t y, int32_t w, int32_t h, uint16_t c)
 {
     if (!vm->setpixel || w <= 0 || h <= 0)
         return;
-    int32_t x1 = x + w, y1 = y + h;
-    if (x < 0) x = 0;
-    if (y < 0) y = 0;
-    if (x1 > ulvm_gw(vm)) x1 = ulvm_gw(vm);
-    if (y1 > ulvm_gh(vm)) y1 = ulvm_gh(vm);
-    for (int32_t yy = y; yy < y1; yy++)
-        for (int32_t xx = x; xx < x1; xx++)
+    int64_t x0 = x, y0 = y, x1 = x0 + (int64_t)w, y1 = y0 + (int64_t)h;
+    int32_t maxx = ulvm_gw(vm), maxy = ulvm_gh(vm);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > maxx) x1 = maxx;
+    if (y1 > maxy) y1 = maxy;
+    for (int64_t yy = y0; yy < y1; yy++)
+        for (int64_t xx = x0; xx < x1; xx++)
             vm->setpixel((uint8_t)xx, (uint8_t)yy, c);
 }
 
-static inline void ulvm_drawline(UnilangVM *vm, int32_t x0, int32_t y0, int32_t x1, int32_t y1, uint8_t c)
+static inline int ulvm_clip_line(double *x0, double *y0, double *x1, double *y1,
+                                 double xmin, double ymin, double xmax, double ymax)
+{
+    double dx = *x1 - *x0, dy = *y1 - *y0;
+    double t0 = 0.0, t1 = 1.0;
+    double p[4] = {-dx, dx, -dy, dy};
+    double q[4] = {*x0 - xmin, xmax - *x0, *y0 - ymin, ymax - *y0};
+    for (int i = 0; i < 4; i++)
+    {
+        if (p[i] == 0.0)
+        {
+            if (q[i] < 0.0)
+                return 0;
+            continue;
+        }
+        double t = q[i] / p[i];
+        if (p[i] < 0.0)
+        {
+            if (t > t1)
+                return 0;
+            if (t > t0)
+                t0 = t;
+        }
+        else
+        {
+            if (t < t0)
+                return 0;
+            if (t < t1)
+                t1 = t;
+        }
+    }
+    double ox = *x0, oy = *y0;
+    *x0 = ox + t0 * dx;
+    *y0 = oy + t0 * dy;
+    *x1 = ox + t1 * dx;
+    *y1 = oy + t1 * dy;
+    return 1;
+}
+
+static inline void ulvm_drawline(UnilangVM *vm, int32_t x0, int32_t y0, int32_t x1, int32_t y1, uint16_t c)
 {
     if (!vm->setpixel)
         return;
+    int32_t maxx = ulvm_gw(vm), maxy = ulvm_gh(vm);
+    double cx0 = x0, cy0 = y0, cx1 = x1, cy1 = y1;
+    if (!ulvm_clip_line(&cx0, &cy0, &cx1, &cy1, 0.0, 0.0,
+                        (double)(maxx - 1), (double)(maxy - 1)))
+        return;
+    x0 = (int32_t)(cx0 + 0.5);
+    y0 = (int32_t)(cy0 + 0.5);
+    x1 = (int32_t)(cx1 + 0.5);
+    y1 = (int32_t)(cy1 + 0.5);
     int32_t dx = x1 > x0 ? x1 - x0 : x0 - x1;
-    int32_t dy = y1 > y0 ? y0 - y1 : y1 - y0; // -|dy|
+    int32_t dy = y1 > y0 ? y0 - y1 : y1 - y0;
     int32_t sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
     int32_t err = dx + dy;
-    int32_t maxx = ulvm_gw(vm), maxy = ulvm_gh(vm);
-    for (int32_t guard = 0; guard < 4096; guard++)
+    for (;;)
     {
-        if (x0 >= 0 && y0 >= 0 && x0 < maxx && y0 < maxy)
-            vm->setpixel((uint8_t)x0, (uint8_t)y0, c);
+        vm->setpixel((uint8_t)x0, (uint8_t)y0, c);
         if (x0 == x1 && y0 == y1)
             break;
         int32_t e2 = 2 * err;
@@ -918,37 +1051,54 @@ static inline void ulvm_blit(UnilangVM *vm, uint32_t d)
     int32_t stride = (int32_t)ulvm_load_memory(vm, d + 28, 4);
     uint32_t fl = ulvm_load_memory(vm, d + 32, 4), pal = ulvm_load_memory(vm, d + 36, 4);
     uint32_t tr = ulvm_load_memory(vm, d + 40, 4);
-    int32_t maxx = ulvm_gw(vm), maxy = ulvm_gh(vm);
-    for (int32_t r = 0; r < h; r++)
+    if (w <= 0 || h <= 0 || stride <= 0)
+        return;
+    int64_t maxx = ulvm_gw(vm), maxy = ulvm_gh(vm);
+    int64_t r0 = y < 0 ? -(int64_t)y : 0;
+    int64_t c0 = x < 0 ? -(int64_t)x : 0;
+    int64_t r1 = (int64_t)h < maxy - y ? h : maxy - y;
+    int64_t c1 = (int64_t)w < maxx - x ? w : maxx - x;
+    if (r1 > h) r1 = h;
+    if (c1 > w) c1 = w;
+    if (r0 >= r1 || c0 >= c1)
+        return;
+    for (int64_t r = r0; r < r1; r++)
     {
-        int32_t py = y + r;
-        if (py < 0 || py >= maxy)
+        int64_t py = (int64_t)y + r;
+        int64_t srow = (fl & 2) ? ((int64_t)h - 1 - r) : r;
+        int64_t source_y = (int64_t)sy + srow;
+        if (source_y < 0)
             continue;
-        int32_t srow = (fl & 2) ? (h - 1 - r) : r;
-        for (int32_t c = 0; c < w; c++)
+        for (int64_t c = c0; c < c1; c++)
         {
-            int32_t px = x + c;
-            if (px < 0 || px >= maxx)
+            int64_t px = (int64_t)x + c;
+            int64_t scol = (fl & 1) ? ((int64_t)w - 1 - c) : c;
+            int64_t source_x = (int64_t)sx + scol;
+            if (source_x < 0 || source_x >= stride)
                 continue;
-            int32_t scol = (fl & 1) ? (w - 1 - c) : c;
-            uint32_t idx = (uint32_t)((sy + srow) * stride + sx + scol);
-            uint32_t v;
+            uint64_t idx = (uint64_t)source_y * (uint32_t)stride + (uint64_t)source_x;
+            uint64_t v;
             if (fl & 4)
             {
-                uint32_t a = src + (idx >> 1);
-                uint32_t b = (fl & 32) ? (a < (uint32_t)ULVM_MEM_SIZE ? vm->mem[a] : 0u) : (uint32_t)ulvm_rom_byte(vm, a);
+                uint64_t a = (uint64_t)src + (idx >> 1);
+                uint32_t b = (fl & 32)
+                    ? (a < (uint32_t)ULVM_MEM_SIZE ? vm->mem[(uint32_t)a] : 0u)
+                    : (a <= UINT32_MAX ? (uint32_t)ulvm_rom_byte(vm, (uint32_t)a) : 0u);
                 v = (idx & 1) ? (b >> 4) : (b & 15);
             }
             else
             {
-                uint32_t a = src + idx;
-                v = (fl & 32) ? (a < (uint32_t)ULVM_MEM_SIZE ? vm->mem[a] : 0u) : (uint32_t)ulvm_rom_byte(vm, a);
+                uint64_t a = (uint64_t)src + idx;
+                v = (fl & 32)
+                    ? (a < (uint32_t)ULVM_MEM_SIZE ? vm->mem[(uint32_t)a] : 0u)
+                    : (a <= UINT32_MAX ? (uint32_t)ulvm_rom_byte(vm, (uint32_t)a) : 0u);
             }
             if ((fl & 16) && v == tr)
                 continue;
             if (fl & 8)
-                v = (pal + v < (uint32_t)ULVM_MEM_SIZE) ? vm->mem[pal + v] : v;
-            vm->setpixel((uint8_t)px, (uint8_t)py, (uint8_t)v);
+                v = (uint64_t)pal + v < (uint32_t)ULVM_MEM_SIZE
+                    ? vm->mem[(uint32_t)((uint64_t)pal + v)] : v;
+            vm->setpixel((uint8_t)px, (uint8_t)py, (uint16_t)v);
         }
     }
 }
@@ -977,6 +1127,12 @@ static inline void ulvm_blit(UnilangVM *vm, uint32_t d)
     [OP_ANDREG] = &&ulvm_l_OP_ANDREG, \
     [OP_ANDREGV] = &&ulvm_l_OP_ANDREGV, \
     [OP_BLIT] = &&ulvm_l_OP_BLIT, \
+    [OP_SETPALETTE] = &&ulvm_l_OP_SETPALETTE, \
+    [OP_SAVE] = &&ulvm_l_OP_SAVE, \
+    [OP_LOAD] = &&ulvm_l_OP_LOAD, \
+    [OP_BEEP] = &&ulvm_l_OP_BEEP, \
+    [OP_AUDIO_COMMAND] = &&ulvm_l_OP_AUDIO_COMMAND, \
+    [OP_AUDIO_LOAD] = &&ulvm_l_OP_AUDIO_LOAD, \
     [OP_CMPREGV] = &&ulvm_l_OP_CMPREGV, \
     [OP_COMPREG] = &&ulvm_l_OP_COMPREG, \
     [OP_CUR] = &&ulvm_l_OP_CUR, \
@@ -1448,11 +1604,11 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
         uint8_t src = (uint8_t)ULVM_NEXTBYTE();
         uint8_t regreturnx = (uint8_t)ULVM_NEXTBYTE();
         uint8_t regreturny = (uint8_t)ULVM_NEXTBYTE();
-        uint16_t retx, rety;
-        ulvm_drawstring_mem(vm, (uint16_t)ULVM_R(regx), (uint16_t)ULVM_R(regy), (uint16_t)ULVM_R(regcolor),
+        int32_t retx, rety;
+        ulvm_drawstring_mem(vm, (int32_t)ULVM_R(regx), (int32_t)ULVM_R(regy), (uint16_t)ULVM_R(regcolor),
                             ULVM_R(regaddr), ULVM_R(reglen), src, &retx, &rety);
-        ULVM_R(regreturnx) = retx;
-        ULVM_R(regreturny) = rety;
+        ULVM_R(regreturnx) = (uint32_t)retx;
+        ULVM_R(regreturny) = (uint32_t)rety;
         ULVM_NEXT();
     }
 
@@ -1788,7 +1944,96 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
         uint8_t rw = (uint8_t)ULVM_NEXTBYTE();
         uint8_t rh = (uint8_t)ULVM_NEXTBYTE();
         uint8_t rc = (uint8_t)ULVM_NEXTBYTE();
-        ulvm_fillrect(vm, (int32_t)ULVM_R(rx), (int32_t)ULVM_R(ry), (int32_t)ULVM_R(rw), (int32_t)ULVM_R(rh), (uint8_t)ULVM_R(rc));
+        ulvm_fillrect(vm, (int32_t)ULVM_R(rx), (int32_t)ULVM_R(ry), (int32_t)ULVM_R(rw), (int32_t)ULVM_R(rh), (uint16_t)ULVM_R(rc));
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_SETPALETTE)
+    {
+        uint8_t ri = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rc = (uint8_t)ULVM_NEXTBYTE();
+        if (vm->setpalette)
+            vm->setpalette((uint8_t)ULVM_R(ri), (uint16_t)ULVM_R(rc));
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_SAVE)
+    ULVM_CASE(OP_LOAD)
+    {
+        uint8_t raddr = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rlen = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rresult = (uint8_t)ULVM_NEXTBYTE();
+        uint32_t addr = ULVM_R(raddr), len = ULVM_R(rlen);
+        vm_storage storage = opbyte == OP_SAVE ? vm->save : vm->load;
+        int ok = storage && ULVM_INBOUNDS(addr, len)
+            ? storage(&vm->mem[addr], len) : 0;
+        ULVM_R(rresult) = ok ? 1u : 0u;
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_BEEP)
+    {
+        uint8_t rfreq = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rms = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t mode = ulvm_getflag(vm, 2);
+        if ((mode == 1 || mode == 2) && vm->beep)
+            vm->beep(ULVM_R(rfreq), ULVM_R(rms));
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_AUDIO_COMMAND)
+    {
+        uint8_t command = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t ra = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rb = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rresult = (uint8_t)ULVM_NEXTBYTE();
+        ULVM_R(rresult) = ulvm_getflag(vm, 2) == 2 && vm->audio_command
+            ? vm->audio_command(command, ULVM_R(ra), ULVM_R(rb)) : UINT32_MAX;
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_AUDIO_LOAD)
+    {
+        uint8_t rkind = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rindex = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t raddr = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rlen = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t source = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rresult = (uint8_t)ULVM_NEXTBYTE();
+        uint32_t addr = ULVM_R(raddr), len = ULVM_R(rlen);
+        uint8_t data[ULVM_AUDIO_LOAD_MAX];
+        uint32_t item_size = 0, item_count = 0;
+        int address_ok = len == 0 || addr <= UINT32_MAX - (len - 1u);
+        int rom_ok = !vm->rom || source == 0 ||
+            (addr <= vm->rom_size && len <= vm->rom_size - addr);
+        if (ULVM_R(rkind) == ULVM_AUDIO_DATA_SFX)
+            item_size = ULVM_AUDIO_SFX_BYTES;
+        else if (ULVM_R(rkind) == ULVM_AUDIO_DATA_MUSIC)
+            item_size = ULVM_AUDIO_MUSIC_BYTES;
+        if (item_size && len && len % item_size == 0)
+            item_count = len / item_size;
+        int ok = ulvm_getflag(vm, 2) == 2 && vm->audio_load &&
+            ULVM_R(rkind) <= UINT8_MAX && ULVM_R(rindex) <= UINT8_MAX &&
+            ULVM_R(rindex) < 64u && item_count && item_count <= 64u - ULVM_R(rindex) &&
+            item_size <= sizeof(data) && source <= 1 && address_ok && rom_ok &&
+            (source == 1 || ULVM_INBOUNDS(addr, len));
+        if (ok)
+        {
+            for (uint32_t item = 0; item < item_count; item++)
+            {
+                uint32_t offset = item * item_size;
+                for (uint32_t i = 0; i < item_size; i++)
+                    data[i] = source ? ulvm_rom_byte(vm, addr + offset + i)
+                                     : vm->mem[addr + offset + i];
+                if (!vm->audio_load((uint8_t)ULVM_R(rkind),
+                                    (uint8_t)(ULVM_R(rindex) + item), data, item_size))
+                {
+                    ok = 0;
+                    break;
+                }
+            }
+        }
+        ULVM_R(rresult) = ok ? 1u : 0u;
         ULVM_NEXT();
     }
 
@@ -1799,7 +2044,7 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
         uint8_t rx1 = (uint8_t)ULVM_NEXTBYTE();
         uint8_t ry1 = (uint8_t)ULVM_NEXTBYTE();
         uint8_t rc = (uint8_t)ULVM_NEXTBYTE();
-        ulvm_drawline(vm, (int32_t)ULVM_R(rx0), (int32_t)ULVM_R(ry0), (int32_t)ULVM_R(rx1), (int32_t)ULVM_R(ry1), (uint8_t)ULVM_R(rc));
+        ulvm_drawline(vm, (int32_t)ULVM_R(rx0), (int32_t)ULVM_R(ry0), (int32_t)ULVM_R(rx1), (int32_t)ULVM_R(ry1), (uint16_t)ULVM_R(rc));
         ULVM_NEXT();
     }
 

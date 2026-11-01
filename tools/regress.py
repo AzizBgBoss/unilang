@@ -16,6 +16,9 @@ EXAMPLES = [
     ("float", ROOT / "examples" / "float" / "float.c"),
     ("game", ROOT / "examples" / "game" / "game.c"),
     ("pong", ROOT / "examples" / "pong" / "pong.c"),
+    ("audio", ROOT / "examples" / "audio" / "audio.c"),
+    ("save_counter", ROOT / "examples" / "save_counter" / "save_counter.c"),
+    ("offscreen", ROOT / "examples" / "offscreen" / "offscreen.c"),
     ("test", ROOT / "examples" / "test" / "test.c"),
 ]
 

@@ -228,6 +228,8 @@ def main():
     h += '#define LVL_W %d\n#define LVL_H 14\n#define NCONT %d\n#define NENT %d\n\n' % (W, len(cont), len(ej))
     h += emit('smb_gfx', list(cart.mem[0:8192]))                    # 128x128, 4bpp, low nibble = even x
     h += emit('smb_flags', list(cart.mem[0x3000:0x3100]))           # sprite flags
+    h += emit('smb_audio_music', list(cart.mem[0x3100:0x3200]))      # 64 PICO-8 music patterns
+    h += emit('smb_audio_sfx', list(cart.mem[0x3200:0x4300]))        # 64 PICO-8 SFX records
     h += emit('smb_level', level, 20)                               # row-major tile ids
     h += emit('cont_x', [c[0] for c in cont]) + emit('cont_y', [c[1] for c in cont]) + emit('cont_v', [c[2] for c in cont])
     h += emit('ent_type', [e['entnum'] for e in ej]) + emit('ent_x', [e['x'] for e in ej], typ='uint16_t') + emit('ent_y', [e['y'] for e in ej])

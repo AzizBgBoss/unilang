@@ -1,4 +1,4 @@
-# Flag 6 visual demo
+# Flag 0 value 9 visual demo
 
 An animated 128x64 RGB332 night scene with a flowing neon aurora, twinkling
 stars, a glowing ringed planet, layered parallax mountains, and a passing
