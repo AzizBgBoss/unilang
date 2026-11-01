@@ -213,6 +213,10 @@ TYPE_ALIASES = {
 
 M32 = 0xFFFFFFFF
 
+# integer numeric formats (see floatcast) -> storage bytes; signed ones
+INT_FMT_SIZE = {1: 1, 2: 1, 3: 2, 4: 2, 5: 4, 6: 4}
+SIGNED_FMTS = (1, 3, 5)
+
 
 class _NotConst(Exception):
     """Raised internally when an expression isn't a compile-time constant."""
@@ -225,16 +229,94 @@ class Label:
         self.addr = None
 
 
+class Slot:
+    """One RAM allocation (variable, parameter, return slot or temporary).
+
+    `start`/`end` are indices into Compiler.code: the slot exists from the
+    instruction emitted right after it was allocated until the point where
+    the compiler freed its address again (end=None: never freed). Every
+    instruction that can touch the slot lies inside that range, because
+    temporaries never outlive the statement that created them and block
+    locals never outlive their block. The optimizer relies on this."""
+    __slots__ = ("id", "addr", "size", "start", "end", "name", "permanent")
+
+    def __init__(self, sid, addr, size, start, name):
+        self.id = sid
+        self.addr = addr
+        self.size = size
+        self.start = start
+        self.end = None
+        self.name = name
+        self.permanent = False
+
+
+class Addr(int):
+    """A RAM address that remembers which Slot (and offset inside it) it
+    designates. Adding/subtracting a plain integer keeps the tag, so every
+    address that reaches an instruction operand can be traced back to its
+    variable. That is what lets the optimizer move variables to other
+    addresses or into registers safely."""
+    # (no __slots__: not supported on int subclasses)
+
+    def __new__(cls, value, slot, off=0):
+        obj = int.__new__(cls, value)
+        obj.slot = slot
+        obj.off = off
+        return obj
+
+    def __add__(self, other):
+        if isinstance(other, int) and not isinstance(other, (Addr, bool)):
+            return Addr(int(self) + other, self.slot, self.off + other)
+        return int(self) + int(other)
+
+    __radd__ = __add__
+
+    def __sub__(self, other):
+        if isinstance(other, int) and not isinstance(other, (Addr, bool)):
+            return Addr(int(self) - other, self.slot, self.off - other)
+        return int(self) - int(other)
+
+    def __rsub__(self, other):
+        return int(other) - int(self)
+
+    def __repr__(self):
+        return f"@{int(self)}({self.slot.name}+{self.off})"
+
+
+class RomRef:
+    """Placeholder for a ROM byte offset that is only known once all code
+    has been laid out (const arrays and string literals live after the code)."""
+    __slots__ = ("name",)
+
+    def __init__(self, name):
+        self.name = name
+
+
+class Ins:
+    """One instruction (or a label marker when op == 'LABEL')."""
+    __slots__ = ("op", "args")
+
+    def __init__(self, op, args):
+        self.op = op
+        self.args = args
+
+    def __repr__(self):
+        return f"{self.op} {', '.join(repr(a) if not isinstance(a, Label) else a.name for a in self.args)}"
+
+
 class Compiler:
-    def __init__(self):
-        self.buf = bytearray()
-        self.patches = []          # (byte_offset_in_buf, Label, width)
+    def __init__(self, optimize=True):
+        self.optimize = optimize
+        self.code = []             # list of Ins; encoded to bytes by finalize()
+        self.slots = []            # every Slot ever allocated, in allocation order
+        self.live_slots = []       # currently allocated slots (a stack, by address)
+        self._next_addr = VARS_START
+        self.raw_memory = False    # program addresses RAM by number (MEMORY[...], int->pointer casts)
         self.vars = {}              # name -> byte address (current scope view)
         self.var_sizes = {}         # name -> byte width (current scope view)
         self.addr_sizes = {}        # allocated address -> byte width
         self.addr_formats = {}      # allocated scalar address -> numeric format
         self.alloc_meta = {}        # name -> {"kind": "scalar"|"array", "bits":..., "count":...}
-        self.next_addr = VARS_START
         self.next_temp = 0
         self.function_asts = {}     # name -> FuncDef node
         self.inlining_stack = []    # names currently being inlined (recursion guard)
@@ -243,12 +325,12 @@ class Compiler:
 
         self.runtime_memsize_addr = None   # set by gen_prologue(); holds getmemsize()'s result
         self.uses_graphics = False         # set True by flag()/setpixel()/getkey()
-        self.required_bytes_patch_pos = None  # byte offset to patch once we know final memory usage
+        self.required_bytes_ins = None  # prologue setreg patched once we know final memory usage
         self.array_elem_bytes = {}   # array variable name -> element width in bytes
 
         self.const_arrays = {}       # name -> {base_addr, elem_bytes, count}
         self.const_array_types = {}  # name -> declared ArrayDecl type, for nested ROM indexing
-        self.rom_data = []           # {"patch_pos", "data"}
+        self.rom_data = []           # {"name", "data", "relocations"}
 
         self.typedefs = {}           # user typedef name -> byte size
         self.typedef_formats = {}    # user scalar typedef name -> numeric format
@@ -324,8 +406,24 @@ class Compiler:
         return source
 
     # -- memory allocation ---------------------------------------------------
+    @property
+    def next_addr(self):
+        return self._next_addr
+
+    @next_addr.setter
+    def next_addr(self, value):
+        value = int(value)
+        if value < self._next_addr:
+            # everything allocated at or above `value` is freed here
+            while self.live_slots and self.live_slots[-1].addr >= value:
+                self.live_slots.pop().end = len(self.code)
+        self._next_addr = value
+
     def alloc_var(self, name, size=INT_SIZE, fmt=None):
-        addr = self.next_addr
+        slot = Slot(len(self.slots), self._next_addr, size, len(self.code), name)
+        self.slots.append(slot)
+        self.live_slots.append(slot)
+        addr = Addr(self._next_addr, slot)
         self.constants.pop(name, None)  # a variable shadows a same-named constant
         self.next_addr += size
         if self.next_addr > self.max_addr:
@@ -375,9 +473,33 @@ class Compiler:
         self.emit_set_const(RA, val)
         self.emit_store(RA, addr, size)
 
+    def int_conversion(self, src, src_fmt, dest_size, dest_fmt):
+        """True when converting src (format src_fmt) to an integer of
+        dest_size bytes needs no floatcast: both sides are plain integers
+        whose storage width matches their format."""
+        return (src_fmt in INT_FMT_SIZE and dest_fmt in INT_FMT_SIZE
+                and INT_FMT_SIZE[src_fmt] == self.addr_size(src)
+                and INT_FMT_SIZE[dest_fmt] == dest_size)
+
+    def emit_load_int(self, src, src_fmt, dest_size, reg):
+        """Loads an integer so that storing `reg` with dest_size bytes gives
+        the C conversion: truncation needs nothing (storereg truncates), and
+        widening a signed value sign-extends it."""
+        size = self.addr_size(src)
+        self.emit_load(src, size, reg)
+        if src_fmt in SIGNED_FMTS and dest_size > size:
+            shift = 32 - 8 * size
+            self.emit("shlregv", reg, shift, reg)
+            self.emit("sshrregv", reg, shift, reg)
+
     def emit_copy(self, src, dest):
         src_fmt = self.addr_formats.get(src, self.format_for_size(self.addr_size(src)))
         dest_fmt = self.addr_formats.get(dest, self.format_for_size(self.addr_size(dest)))
+        if src_fmt != dest_fmt and self.int_conversion(src, src_fmt, self.addr_size(dest), dest_fmt):
+            # e.g. uint8_t c = b & 15: a load and a (truncating) store
+            self.emit_load_int(src, src_fmt, self.addr_size(dest), RA)
+            self.emit_store(RA, dest, self.addr_size(dest))
+            return
         if src_fmt != dest_fmt or self.addr_size(src) == 8 or self.addr_size(dest) == 8:
             self.emit_set_const(RA, src)
             self.emit_set_const(RB, dest)
@@ -979,10 +1101,9 @@ class Compiler:
         size = self.load_resolved(resolved, reg)
         type_node = self.expr_type(node)
         if self.scalar_type_signed(type_node) and size < INT_SIZE:
-            sign_bit = 1 << (size * 8 - 1)
-            self.emit_set_const(RC, sign_bit)
-            self.emit("xorreg", reg, RC, reg)
-            self.emit("subreg", reg, RC, reg)
+            shift = 32 - size * 8   # sign-extend: two shifts, no scratch register
+            self.emit("shlregv", reg, shift, reg)
+            self.emit("sshrregv", reg, shift, reg)
 
     def sizeof_value(self, expr):
         if isinstance(expr, c_ast.Typename):
@@ -1100,11 +1221,8 @@ class Compiler:
                 raise NotImplementedError("subscripted value is neither an array nor a pointer")
             return elem
         if isinstance(node, c_ast.StructRef):
-            base_type = self.resolve_type_for_expr(node.expr)
-            if isinstance(base_type, c_ast.TypeDecl) and isinstance(base_type.type, c_ast.Struct):
-                info = self.struct_field_info(base_type.type, node.field.name)
-                return info["size"]
-            return 1
+            # pycparser keeps the base expression in `.name` (not `.expr`)
+            return self.sizeof_value(node)
         if isinstance(node, c_ast.UnaryOp) and node.op == "*":
             elem = self.expr_ptr_elem(node.expr)
             if elem is None:
@@ -1151,10 +1269,8 @@ class Compiler:
 
     def add_const_array(self, name, elem_bytes, values, type_node=None, relocations=None):
         base = self.alloc_temp(INT_SIZE)
-        instr_start = len(self.buf)
-        # placeholder ROM offset, patched in finalize() once we know it
-        self.emit("setreg", RA, 0)
-        patch_pos = instr_start + 1 + 1  # opcode(1) + reg(1), then the 4-byte val
+        # ROM offset, resolved in finalize() once the code size is known
+        self.emit("setreg", RA, RomRef(name))
         self.emit_store(RA, base, INT_SIZE)
         self.const_arrays[name] = {"base": base, "elem_bytes": elem_bytes, "count": len(values)}
         if type_node is not None:
@@ -1162,7 +1278,6 @@ class Compiler:
         self.array_elem_bytes[name] = elem_bytes
         self.rom_data.append({
             "name": name,
-            "patch_pos": patch_pos,
             "data": self.pack_values(values, elem_bytes),
             "relocations": relocations or [],
         })
@@ -1218,43 +1333,64 @@ class Compiler:
 
     # -- low level emission ---------------------------------------------------
     def emit(self, op, *operands):
-        byte, sizes = OPS[op]
+        _, sizes = OPS[op]
         if len(operands) != len(sizes):
             raise ValueError(f"{op} expects {len(sizes)} operands, got {len(operands)}")
-        self.buf.append(byte)
-        for val, width in zip(operands, sizes):
-            if width == 0:
-                text = val.encode("utf-8")
-                self.buf += len(text).to_bytes(2, "big")
-                self.buf += text
-            elif isinstance(val, Label):
-                self.patches.append((len(self.buf), val, width))
-                self.buf += bytes(width)
-            else:
-                self.buf += (int(val) % (2 ** (width * 8))).to_bytes(width, "big")
+        ins = Ins(op, list(operands))
+        self.code.append(ins)
+        return ins
 
     def define_label(self, label):
-        label.addr = len(self.buf)
+        self.code.append(Ins("LABEL", [label]))
+
+    @staticmethod
+    def ins_size(ins):
+        if ins.op == "LABEL":
+            return 0
+        size = 1
+        for val, width in zip(ins.args, OPS[ins.op][1]):
+            size += 2 + len(val.encode("utf-8")) if width == 0 else width
+        return size
 
     def finalize(self):
-        for pos, label, width in self.patches:
-            if label.addr is None:
-                raise RuntimeError(f"label '{label.name}' used but never defined")
-            self.buf[pos:pos + width] = label.addr.to_bytes(width, "big")
-        byte_offset = len(self.buf)
+        code = [ins for ins in self.code if ins is not None]
+        pos = 0
+        for ins in code:
+            if ins.op == "LABEL":
+                ins.args[0].addr = pos
+            pos += self.ins_size(ins)
         rom_offsets = {}
+        byte_offset = pos
         for item in self.rom_data:
-            self.buf[item["patch_pos"]:item["patch_pos"] + 4] = byte_offset.to_bytes(4, "big")
             rom_offsets[item["name"]] = byte_offset
             byte_offset += len(item["data"])
+        buf = bytearray()
+        for ins in code:
+            if ins.op == "LABEL":
+                continue
+            byte, sizes = OPS[ins.op]
+            buf.append(byte)
+            for val, width in zip(ins.args, sizes):
+                if width == 0:
+                    text = val.encode("utf-8")
+                    buf += len(text).to_bytes(2, "big")
+                    buf += text
+                    continue
+                if isinstance(val, Label):
+                    if val.addr is None:
+                        raise RuntimeError(f"label '{val.name}' used but never defined")
+                    val = val.addr
+                elif isinstance(val, RomRef):
+                    val = rom_offsets[val.name]
+                buf += (int(val) % (2 ** (width * 8))).to_bytes(width, "big")
         for item in self.rom_data:
             data = bytearray(item["data"])
             for offset, target in item["relocations"]:
                 if target not in rom_offsets:
                     raise ValueError(f"ROM pointer in '{item['name']}' refers to unknown array '{target}'")
                 data[offset:offset + INT_SIZE] = rom_offsets[target].to_bytes(INT_SIZE, "big")
-            self.buf.extend(data)
-        return bytes(self.buf)
+            buf.extend(data)
+        return bytes(buf)
 
     # -- startup prologue: query real memory size, warn if too small ------------
     def gen_prologue(self):
@@ -1263,9 +1399,8 @@ class Compiler:
         self.emit_store(RA, self.runtime_memsize_addr, INT_SIZE)
 
         required_addr = self.alloc_temp()
-        instr_start = len(self.buf)
-        self.emit("setreg", RA, 0)  # placeholder; patched once compilation finishes
-        self.required_bytes_patch_pos = instr_start + 1 + 1
+        # placeholder; patched once compilation (and RAM layout) is finished
+        self.required_bytes_ins = self.emit("setreg", RA, 0)
         self.emit_store(RA, required_addr, INT_SIZE)
 
         too_small = self.alloc_temp(1)
@@ -1322,7 +1457,12 @@ class Compiler:
             field = node.field.name
             base = getattr(node, "expr", getattr(node, "name", None))
             base_type = None
-            if isinstance(base, c_ast.ID):
+            if isinstance(base, c_ast.ID) and node.type == "->":
+                # p->field: the struct lives where the pointer points
+                base_type = self.resolve_type_for_expr(base)
+                ptr_addr = self.gen_expr(base)
+                self.emit_load(ptr_addr, self.addr_size(ptr_addr), RA)
+            elif isinstance(base, c_ast.ID):
                 base_type = self.resolve_type_for_expr(base)
                 base_addr = self.var_addr(base.name)
                 self.emit_set_const(RA, base_addr)
@@ -1737,6 +1877,11 @@ class Compiler:
                 if self.vars.get(name) in self.ptr_elem:
                     self.check_not_rom(node.rvalue)
 
+            if isinstance(node.lvalue, c_ast.ID) and node.lvalue.name in self.vars:
+                dest = self.var_addr(node.lvalue.name)
+                if self.store_int_constant(node.rvalue, dest):
+                    return dest
+
             rhs = self.gen_expr(node.rvalue)
 
             if isinstance(node.lvalue, c_ast.ID):
@@ -1750,6 +1895,14 @@ class Compiler:
             dest_type = self.resolve_type_for_expr(node.lvalue)
             dest_fmt = self.type_format(dest_type)
             src_fmt = self.addr_formats.get(rhs, self.expr_format(node.rvalue))
+            if src_fmt != dest_fmt and elem_bytes != 8 and self.int_conversion(
+                    rhs, src_fmt, elem_bytes, dest_fmt):
+                converted = self.alloc_temp(elem_bytes, dest_fmt)
+                self.emit_copy(rhs, converted)
+                self.emit_addr_in_ra(node.lvalue)
+                self.emit_load(converted, elem_bytes, RB)
+                self.emit(f"storeregi{self._reg_width(elem_bytes)}", RA, RB)
+                return converted
             if src_fmt != dest_fmt or elem_bytes == 8:
                 converted = self.alloc_temp(elem_bytes, dest_fmt)
                 self.emit_copy(rhs, converted)
@@ -1791,7 +1944,10 @@ class Compiler:
             fmt = self.type_format(target)
             dest = self.alloc_temp(size, fmt)
             src_fmt = self.addr_formats.get(src, self.expr_format(node.expr))
-            if src_fmt != fmt or size == 8 or self.addr_size(src) == 8:
+            if src_fmt != fmt and self.int_conversion(src, src_fmt, size, fmt):
+                self.emit_load_int(src, src_fmt, size, RA)
+                self.emit_store(RA, dest, size)
+            elif src_fmt != fmt or size == 8 or self.addr_size(src) == 8:
                 self.emit_floatcast(src, src_fmt, dest, fmt)
             else:
                 self.emit_load(src, self.addr_size(src), RA)
@@ -1885,7 +2041,31 @@ class Compiler:
                 node.left, node.right, left_size, right_size)
             right_const = self.try_const(node.right)
             left_const = self.try_const(node.left)
-            if right_const is not None and node.op in const_ops and not (
+            pow2 = (right_const is not None and node.op in ("/", "%")
+                    and 0 < right_const < (1 << 31) and right_const & (right_const - 1) == 0)
+            left_type = self.expr_type(node.left)
+            left_nonneg = left_r[0] == "const" or not signed_op or (
+                left_size < INT_SIZE and left_type is not None
+                and not self.scalar_type_signed(left_type))
+            if pow2 and (left_nonneg or node.op == "/"):
+                k = right_const.bit_length() - 1
+                self.load_comparison_operand(node.left, left_r, RA)
+                if node.op == "%":
+                    self.emit("andregv", RA, right_const - 1, RA)
+                elif left_nonneg:
+                    if k:
+                        self.emit("shrregv", RA, k, RA)
+                elif k:
+                    # signed x / 2^k rounds toward zero: add 2^k - 1 to
+                    # negative values before the arithmetic shift
+                    if k == 1:
+                        self.emit("shrregv", RA, 31, RB)
+                    else:
+                        self.emit("sshrregv", RA, 31, RB)
+                        self.emit("shrregv", RB, 32 - k, RB)
+                    self.emit("addreg", RA, RB, RA)
+                    self.emit("sshrregv", RA, k, RA)
+            elif right_const is not None and node.op in const_ops and not (
                     signed_op and left_size < INT_SIZE):
                 self.load_operand(node.left, RA)
                 self.emit(const_ops[node.op], RA, right_const, RA)
@@ -2160,10 +2340,11 @@ class Compiler:
         y_addr = self.gen_expr(y_node)
         val_addr = self.gen_expr(val_node)
 
-        self.emit_load(x_addr, self.addr_size(x_addr), 10)
-        self.emit_load(y_addr, self.addr_size(y_addr), 11)
-        self.emit_load(val_addr, self.addr_size(val_addr), 12)
-        self.emit("setpixel", 10, 11, 12)
+        # only the scratch registers: r0-r12 stay free for variables
+        self.emit_load(x_addr, self.addr_size(x_addr), RC)
+        self.emit_load(y_addr, self.addr_size(y_addr), RA)
+        self.emit_load(val_addr, self.addr_size(val_addr), RB)
+        self.emit("setpixel", RC, RA, RB)
 
     def gen_rect_or_line(self, call, opname):
         # fillrect(x, y, w, h, c) / drawline(x0, y0, x1, y1, c): one native opcode each
@@ -2172,9 +2353,10 @@ class Compiler:
         if len(args) != 5:
             raise NotImplementedError(f"{opname}() takes exactly 5 arguments")
         addrs = [self.gen_expr(a) for a in args]
-        for i, a in enumerate(addrs):
-            self.emit_load(a, self.addr_size(a), 8 + i)
-        self.emit(opname, 8, 9, 10, 11, 12)
+        regs = (11, 12, RC, RA, RB)
+        for reg, a in zip(regs, addrs):
+            self.emit_load(a, self.addr_size(a), reg)
+        self.emit(opname, *regs)
 
     def gen_blit(self, call):
         # blit(x, y, w, h, src, srcx, srcy, stride, flags, palette, transparent)
@@ -2202,18 +2384,18 @@ class Compiler:
             raise NotImplementedError("getpixel(x, y) takes exactly 2 arguments")
         x_addr = self.gen_expr(args[0])
         y_addr = self.gen_expr(args[1])
-        self.emit_load(x_addr, self.addr_size(x_addr), 10)
-        self.emit_load(y_addr, self.addr_size(y_addr), 11)
-        self.emit("getpixel", 10, 11, 12)
+        self.emit_load(x_addr, self.addr_size(x_addr), RA)
+        self.emit_load(y_addr, self.addr_size(y_addr), RB)
+        self.emit("getpixel", RA, RB, RA)
         dest = self.alloc_temp(1)
-        self.emit_store(12, dest, 1)
+        self.emit_store(RA, dest, 1)
         return dest
 
     def gen_getkey(self):
         self.uses_graphics = True
-        self.emit("getkeyboard", 12)
+        self.emit("getkeyboard", RA)
         dest = self.alloc_temp(1)
-        self.emit_store(12, dest, 1)
+        self.emit_store(RA, dest, 1)
         return dest
 
     def gen_isflagsupported(self, call):
@@ -2224,9 +2406,9 @@ class Compiler:
             raise NotImplementedError("isflagsupported(flag, val) requires constant arguments")
         flag = self.const_value(args[0])
         val = self.const_value(args[1])
-        self.emit("isflagsupported", flag, val, 12)
+        self.emit("isflagsupported", flag, val, RA)
         dest = self.alloc_temp(1)
-        self.emit_store(12, dest, 1)
+        self.emit_store(RA, dest, 1)
         return dest
 
     def gen_rand(self, call):
@@ -2260,9 +2442,9 @@ class Compiler:
         self.emit("srandreg", RA)
 
     def gen_gettime(self):
-        self.emit("gettime", 12)
+        self.emit("gettime", RA)
         dest = self.alloc_temp(INT_SIZE)
-        self.emit_store(12, dest, INT_SIZE)
+        self.emit_store(RA, dest, INT_SIZE)
         return dest
 
     def gen_numtostr(self, call):
@@ -2277,13 +2459,13 @@ class Compiler:
         buf_addr = self.var_addr(buf_node.name)
         val_r = self.resolve_operand(val_node)
         self.load_resolved(val_r, RA)
-        self.emit("numtostr", RA, buf_addr, 12)
+        self.emit("numtostr", RA, buf_addr, RB)
         dest = self.alloc_temp(1)
-        self.emit_store(12, dest, 1)
+        self.emit_store(RB, dest, 1)
         return dest
 
     # -- text drawing (drawchar/drawstring) ------------------------------------
-    # Scratch registers 8-13 are used here (never RA/RB) since these calls are
+    # Registers 9-13 carry the inputs here (never RA/RB) since these calls are
     # always self-contained statements/expressions: every input register is
     # loaded immediately before emitting "drawstring", and the two output
     # registers (14, 15) are discarded right after -- no value needs to
@@ -2291,19 +2473,16 @@ class Compiler:
     def gen_draw_common(self, x_node, y_node, addr_kind, addr_val, length, src, color_node=None):
         x_r = self.resolve_operand(x_node)
         y_r = self.resolve_operand(y_node)
-        self.load_resolved(x_r, 8)
-        self.load_resolved(y_r, 9)
-        if color_node is None:
-            self.emit_set_const(10, 1)
-        else:
-            color_r = self.resolve_operand(color_node)
-            self.load_resolved(color_r, 10)
+        color_r = self.resolve_operand(color_node) if color_node is not None else ("const", 1)
+        self.load_resolved(x_r, 9)
+        self.load_resolved(y_r, 10)
+        self.load_resolved(color_r, 11)
         if addr_kind == "const":
-            self.emit_set_const(11, addr_val)
+            self.emit_set_const(12, addr_val)
         else:  # "load" -- addr_val is a RAM address whose runtime VALUE is the actual address/ROM offset
-            self.emit_load(addr_val, INT_SIZE, 11)
-        self.emit_set_const(12, length)
-        self.emit("drawstring", 8, 9, 10, 11, 12, src, 14, 15)
+            self.emit_load(addr_val, INT_SIZE, 12)
+        self.emit_set_const(RC, length)
+        self.emit("drawstring", 9, 10, 11, 12, RC, src, 14, 15)
 
     def gen_drawchar(self, call):
         self.uses_graphics = True
@@ -2735,12 +2914,36 @@ class Compiler:
         after_alloc = self.next_addr  # temporaries used by the initializer are freed afterwards
         if elem_for_array is not None:
             self.gen_array_init(node, addr, elem_for_array, size // elem_for_array)
-            self.next_addr = after_alloc
-            return
-        if ptr_pointee is not None:
-            self.check_not_rom(node.init)
-        self.emit_copy(self.gen_expr(node.init), addr)
-        self.next_addr = after_alloc
+        else:
+            if ptr_pointee is not None:
+                self.check_not_rom(node.init)
+            if not self.store_int_constant(node.init, addr):
+                self.emit_copy(self.gen_expr(node.init), addr)
+        self.free_temps_above(after_alloc)
+
+    def store_int_constant(self, expr, dest):
+        """`int i = 0;` / `x = 5;`: when an integer variable gets a
+        compile-time constant, store it directly (setreg + store) instead of
+        going through a temporary. Returns False when that doesn't apply."""
+        fmt = self.addr_formats.get(dest)
+        size = self.addr_size(dest)
+        if fmt not in INT_FMT_SIZE or INT_FMT_SIZE[fmt] != size or self.expr_float_size(expr):
+            return False
+        value = self.try_const(expr)
+        if value is None:
+            return False
+        self.emit_store_const(dest, size, value & ((1 << (8 * size)) - 1))
+        return True
+
+    def free_temps_above(self, mark):
+        """Frees what an initializer allocated above `mark`. At global scope the
+        memory itself is not handed out again: later globals rely on starting
+        out zeroed, and a reused temporary would leave its value behind."""
+        if self.at_global_scope:
+            while self.live_slots and self.live_slots[-1].addr >= mark:
+                self.live_slots.pop().end = len(self.code)
+        else:
+            self.next_addr = mark
 
     def gen_loop_test(self, cond, end_label):
         value = 1 if cond is None else self.try_const(cond)
@@ -3046,14 +3249,21 @@ class Compiler:
         # prologue's placeholder "required bytes" value. Graphics/keyboard no
         # longer share the addressable memory space (they have their own
         # dedicated VM-side buffers), so only the program's own variables count.
+        self.next_addr = VARS_START  # close the slots still open (they live until the end)
+        for slot in self.slots:
+            if slot.end is None or slot.end >= len(self.code):
+                slot.end = None
+                slot.permanent = True
         required_bytes = self.max_addr
-        pos = self.required_bytes_patch_pos
-        self.buf[pos:pos + 4] = required_bytes.to_bytes(4, "big")
+        if self.optimize:
+            from optimizer import optimize_program
+            required_bytes = optimize_program(self)
+        self.required_bytes_ins.args[1] = required_bytes
 
         return self.finalize()
 
 
-USAGE = "Usage: python compiler.py input.c|input_dir [input.c|input_dir ...] [-o output.ulc] [-I dir]... [-D NAME[=value]]..."
+USAGE = "Usage: python compiler.py input.c|input_dir [input.c|input_dir ...] [-o output.ulc] [-I dir]... [-D NAME[=value]]... [-O0]"
 
 
 def _collect_sources(paths):
@@ -3098,10 +3308,13 @@ def main():
     out_path = None
     include_dirs = [os.path.join(os.path.dirname(os.path.abspath(__file__)), "include")]
     defines = {}
+    optimize = True
     i = 0
     while i < len(args):
         a = args[i]
-        if a[:2] in ("-o", "-I", "-D"):
+        if a in ("-O0", "-O1", "-O2"):
+            optimize = a != "-O0"
+        elif a[:2] in ("-o", "-I", "-D"):
             flag, value = a[:2], a[2:]
             if not value:
                 i += 1
@@ -3138,7 +3351,7 @@ def main():
         else:
             out_path = os.path.join(os.getcwd(), "combined.ulc")
 
-    compiler = Compiler()
+    compiler = Compiler(optimize=optimize)
     try:
         bytecode = compiler.compile(source, label, include_dirs, defines)
     except (PreprocessorError, NotImplementedError, pycparser.c_parser.ParseError) as e:

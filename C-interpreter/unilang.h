@@ -408,8 +408,16 @@ static inline void ULVM_set_rom(UnilangVM *vm, const uint8_t *rom, uint32_t size
     vm->rom_size = size;
 }
 
+// The fetch helpers below run several times per VM instruction; GCC at -O2
+// did not inline ulvm_next4f (a fifth of the run time was spent calling it).
+#if defined(__GNUC__)
+#define ULVM_HOT static inline __attribute__((always_inline))
+#else
+#define ULVM_HOT static inline
+#endif
+
 // Instruction fetch. Used inside ULVM_run with pc/rom/rom_size held in locals.
-static inline uint32_t ulvm_fetch(UnilangVM *vm, const uint8_t *rom, uint32_t rom_size, uint32_t pc)
+ULVM_HOT uint32_t ulvm_fetch(UnilangVM *vm, const uint8_t *rom, uint32_t rom_size, uint32_t pc)
 {
     if (rom)
         return pc < rom_size ? (uint32_t)READ_FLASH_BYTE(rom + pc) : 0u;
@@ -432,7 +440,7 @@ static inline uint32_t ulvm_next4(UnilangVM *vm, const uint8_t *rom, uint32_t ro
 
 // Fast path: `fast` is computed once per instruction (>= 16 bytes of ROM left), so the
 // per-byte bounds checks are skipped for all but the last few instructions of a program.
-static inline uint32_t ulvm_next2f(UnilangVM *vm, const uint8_t *rom, uint32_t rom_size, uint32_t *pc, int fast)
+ULVM_HOT uint32_t ulvm_next2f(UnilangVM *vm, const uint8_t *rom, uint32_t rom_size, uint32_t *pc, int fast)
 {
     if (fast)
     {
@@ -443,7 +451,7 @@ static inline uint32_t ulvm_next2f(UnilangVM *vm, const uint8_t *rom, uint32_t r
     return ulvm_next2(vm, rom, rom_size, pc);
 }
 
-static inline uint32_t ulvm_next4f(UnilangVM *vm, const uint8_t *rom, uint32_t rom_size, uint32_t *pc, int fast)
+ULVM_HOT uint32_t ulvm_next4f(UnilangVM *vm, const uint8_t *rom, uint32_t rom_size, uint32_t *pc, int fast)
 {
     if (fast)
     {
@@ -834,7 +842,7 @@ static inline uint8_t ulvm_itoa(UnilangVM *vm, uint32_t v, uint32_t addr)
    duration, so a large budget is much cheaper per instruction than calling
    ULVM_handlenextinstruction() in a loop. Pick a budget that matches how often
    the host must do other work (event pumping, watchdog, ...). */
-static inline int ulvm_cond(uint8_t c, uint32_t a, uint32_t b)
+ULVM_HOT int ulvm_cond(uint8_t c, uint32_t a, uint32_t b)
 {
     switch (c)
     {
@@ -945,17 +953,190 @@ static inline void ulvm_blit(UnilangVM *vm, uint32_t d)
     }
 }
 
+// Dispatch. By default the interpreter loop is a plain switch. Defining
+// ULVM_COMPUTED_GOTO=1 (GCC only) switches to computed goto ("labels as
+// values") with threaded dispatch: every handler fetches the next opcode and
+// jumps straight to its handler. Measured on x86-64 with GCC 13 this was
+// 0-30% SLOWER than the switch at -O2 and about even at -O3, so it is off by
+// default; it is kept for targets where it may pay off (try it on yours).
+// Clang 18 crashes while optimizing the threaded loop, so it is never
+// enabled there.
+#ifndef ULVM_COMPUTED_GOTO
+#define ULVM_COMPUTED_GOTO 0
+#endif
+#if ULVM_COMPUTED_GOTO && (!defined(__GNUC__) || defined(__clang__))
+#undef ULVM_COMPUTED_GOTO
+#define ULVM_COMPUTED_GOTO 0
+#endif
+
+#if ULVM_COMPUTED_GOTO
+#define ULVM_CASE(op) case op: ulvm_l_##op:
+#define ULVM_DISPATCH_TABLE \
+    [OP_ADDREG] = &&ulvm_l_OP_ADDREG, \
+    [OP_ADDREGV] = &&ulvm_l_OP_ADDREGV, \
+    [OP_ANDREG] = &&ulvm_l_OP_ANDREG, \
+    [OP_ANDREGV] = &&ulvm_l_OP_ANDREGV, \
+    [OP_BLIT] = &&ulvm_l_OP_BLIT, \
+    [OP_CMPREGV] = &&ulvm_l_OP_CMPREGV, \
+    [OP_COMPREG] = &&ulvm_l_OP_COMPREG, \
+    [OP_CUR] = &&ulvm_l_OP_CUR, \
+    [OP_DIVREG] = &&ulvm_l_OP_DIVREG, \
+    [OP_DRAWLINE] = &&ulvm_l_OP_DRAWLINE, \
+    [OP_DRAWSTRING] = &&ulvm_l_OP_DRAWSTRING, \
+    [OP_EQREG] = &&ulvm_l_OP_EQREG, \
+    [OP_EXIT] = &&ulvm_l_OP_EXIT, \
+    [OP_FILLRECT] = &&ulvm_l_OP_FILLRECT, \
+    [OP_FLAG] = &&ulvm_l_OP_FLAG, \
+    [OP_FLAGS] = &&ulvm_l_OP_FLAGS, \
+    [OP_FLOATCAST] = &&ulvm_l_OP_FLOATCAST, \
+    [OP_FLOATOP] = &&ulvm_l_OP_FLOATOP, \
+    [OP_GEREG] = &&ulvm_l_OP_GEREG, \
+    [OP_GETFLAG] = &&ulvm_l_OP_GETFLAG, \
+    [OP_GETKEYBOARD] = &&ulvm_l_OP_GETKEYBOARD, \
+    [OP_GETMEMSIZE] = &&ulvm_l_OP_GETMEMSIZE, \
+    [OP_GETPIXEL] = &&ulvm_l_OP_GETPIXEL, \
+    [OP_GETTIME] = &&ulvm_l_OP_GETTIME, \
+    [OP_GTREG] = &&ulvm_l_OP_GTREG, \
+    [OP_IFNOTREG] = &&ulvm_l_OP_IFNOTREG, \
+    [OP_IFNOTSUBREG] = &&ulvm_l_OP_IFNOTSUBREG, \
+    [OP_IFREG] = &&ulvm_l_OP_IFREG, \
+    [OP_IFSUBREG] = &&ulvm_l_OP_IFSUBREG, \
+    [OP_INPUT] = &&ulvm_l_OP_INPUT, \
+    [OP_ISFLAGSUPPORTED] = &&ulvm_l_OP_ISFLAGSUPPORTED, \
+    [OP_JCMP] = &&ulvm_l_OP_JCMP, \
+    [OP_JCMPV] = &&ulvm_l_OP_JCMPV, \
+    [OP_LEREG] = &&ulvm_l_OP_LEREG, \
+    [OP_LOADREG16] = &&ulvm_l_OP_LOADREG16, \
+    [OP_LOADREG32] = &&ulvm_l_OP_LOADREG32, \
+    [OP_LOADREG8] = &&ulvm_l_OP_LOADREG8, \
+    [OP_LOADREGI16] = &&ulvm_l_OP_LOADREGI16, \
+    [OP_LOADREGI32] = &&ulvm_l_OP_LOADREGI32, \
+    [OP_LOADREGI8] = &&ulvm_l_OP_LOADREGI8, \
+    [OP_LTREG] = &&ulvm_l_OP_LTREG, \
+    [OP_MEMORY] = &&ulvm_l_OP_MEMORY, \
+    [OP_MODREG] = &&ulvm_l_OP_MODREG, \
+    [OP_MOVREG] = &&ulvm_l_OP_MOVREG, \
+    [OP_MULREG] = &&ulvm_l_OP_MULREG, \
+    [OP_MULREGV] = &&ulvm_l_OP_MULREGV, \
+    [OP_NANDREG] = &&ulvm_l_OP_NANDREG, \
+    [OP_NEQREG] = &&ulvm_l_OP_NEQREG, \
+    [OP_NOP] = &&ulvm_l_OP_NOP, \
+    [OP_NORREG] = &&ulvm_l_OP_NORREG, \
+    [OP_NOTREG] = &&ulvm_l_OP_NOTREG, \
+    [OP_NUMTOSTR] = &&ulvm_l_OP_NUMTOSTR, \
+    [OP_ORREG] = &&ulvm_l_OP_ORREG, \
+    [OP_ORREGV] = &&ulvm_l_OP_ORREGV, \
+    [OP_OUT] = &&ulvm_l_OP_OUT, \
+    [OP_OUTC] = &&ulvm_l_OP_OUTC, \
+    [OP_OUTREG] = &&ulvm_l_OP_OUTREG, \
+    [OP_OUTREGSIGNED] = &&ulvm_l_OP_OUTREGSIGNED, \
+    [OP_PRINT] = &&ulvm_l_OP_PRINT, \
+    [OP_PRINTN] = &&ulvm_l_OP_PRINTN, \
+    [OP_PRINTV] = &&ulvm_l_OP_PRINTV, \
+    [OP_PRINTVN] = &&ulvm_l_OP_PRINTVN, \
+    [OP_RANDREG] = &&ulvm_l_OP_RANDREG, \
+    [OP_REFRESHSCREEN] = &&ulvm_l_OP_REFRESHSCREEN, \
+    [OP_RETURN] = &&ulvm_l_OP_RETURN, \
+    [OP_ROMREAD16] = &&ulvm_l_OP_ROMREAD16, \
+    [OP_ROMREAD32] = &&ulvm_l_OP_ROMREAD32, \
+    [OP_ROMREAD64] = &&ulvm_l_OP_ROMREAD64, \
+    [OP_ROMREAD8] = &&ulvm_l_OP_ROMREAD8, \
+    [OP_SDIVREG] = &&ulvm_l_OP_SDIVREG, \
+    [OP_SETBYTE] = &&ulvm_l_OP_SETBYTE, \
+    [OP_SETPC] = &&ulvm_l_OP_SETPC, \
+    [OP_SETPIXEL] = &&ulvm_l_OP_SETPIXEL, \
+    [OP_SETREG] = &&ulvm_l_OP_SETREG, \
+    [OP_SGEREG] = &&ulvm_l_OP_SGEREG, \
+    [OP_SGTREG] = &&ulvm_l_OP_SGTREG, \
+    [OP_SHLREG] = &&ulvm_l_OP_SHLREG, \
+    [OP_SHLREGV] = &&ulvm_l_OP_SHLREGV, \
+    [OP_SHRREG] = &&ulvm_l_OP_SHRREG, \
+    [OP_SHRREGV] = &&ulvm_l_OP_SHRREGV, \
+    [OP_SLEEP] = &&ulvm_l_OP_SLEEP, \
+    [OP_SLEREG] = &&ulvm_l_OP_SLEREG, \
+    [OP_SLTREG] = &&ulvm_l_OP_SLTREG, \
+    [OP_SMODREG] = &&ulvm_l_OP_SMODREG, \
+    [OP_SRANDREG] = &&ulvm_l_OP_SRANDREG, \
+    [OP_SSHRREG] = &&ulvm_l_OP_SSHRREG, \
+    [OP_SSHRREGV] = &&ulvm_l_OP_SSHRREGV, \
+    [OP_STOREREG16] = &&ulvm_l_OP_STOREREG16, \
+    [OP_STOREREG32] = &&ulvm_l_OP_STOREREG32, \
+    [OP_STOREREG8] = &&ulvm_l_OP_STOREREG8, \
+    [OP_STOREREGI16] = &&ulvm_l_OP_STOREREGI16, \
+    [OP_STOREREGI32] = &&ulvm_l_OP_STOREREGI32, \
+    [OP_STOREREGI8] = &&ulvm_l_OP_STOREREGI8, \
+    [OP_SUBREG] = &&ulvm_l_OP_SUBREG, \
+    [OP_SUBREGV] = &&ulvm_l_OP_SUBREGV, \
+    [OP_SUBROUTINE] = &&ulvm_l_OP_SUBROUTINE, \
+    [OP_WRITE] = &&ulvm_l_OP_WRITE, \
+    [OP_XNORREG] = &&ulvm_l_OP_XNORREG, \
+    [OP_XORREG] = &&ulvm_l_OP_XORREG, \
+    [OP_XORREGV] = &&ulvm_l_OP_XORREGV, \
+
+// Ends a handler: fetch the next opcode and jump to its handler directly.
+// Only used where vm->running is known to still be 1.
+#define ULVM_NEXT() \
+    do { \
+        if (!budget) goto ulvm_out; \
+        budget--; \
+        fast = pc <= fast_end; \
+        if (!fast && rom && pc >= rom_size) \
+        { \
+            vm->faulted = 1; \
+            vm->fault_pc = pc; \
+            vm->fault_opcode = 0; \
+            vm->running = 0; \
+            goto ulvm_out; \
+        } \
+        instruction_pc = pc; \
+        if (hits && instruction_pc < rom_size) \
+            hits[instruction_pc]++; \
+        opbyte = (uint8_t)ULVM_NEXTBYTE(); \
+        goto *ulvm_dispatch[opbyte]; \
+    } while (0)
+#else
+#define ULVM_CASE(op) case op:
+#define ULVM_NEXT() break
+#endif
+
 static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
 {
     uint32_t pc = vm->pc;
     const uint8_t *rom = vm->rom;
     const uint32_t rom_size = vm->rom_size;
     uint32_t *const hits = vm->instruction_hits;
+    // last pc with 16 bytes of ROM after it; UINT32_MAX-free sentinel when
+    // there is no flat ROM (or it is tiny): then pc <= fast_end never holds
+    const int have_fast = rom != NULL && rom_size >= 16u;
+    const uint32_t fast_end = have_fast ? rom_size - 16u : 0u;
+    uint32_t instruction_pc;
+    int fast;
+    uint8_t opbyte;
+
+#if ULVM_COMPUTED_GOTO
+    /* One indirect jump per handler instead of one shared switch jump: the
+       branch predictor gets a separate history for every opcode. */
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Woverride-init"
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
+    static const void *const ulvm_dispatch[256] = {
+        [0 ... 255] = &&ulvm_l_default,   /* unknown opcode: fault */
+        ULVM_DISPATCH_TABLE
+    };
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+#endif
 
     while (budget && vm->running)
     {
     budget--;
-    if (rom && pc >= rom_size)
+    // fast: at least 16 bytes of flat ROM left, so operand reads skip their
+    // bounds checks. One comparison covers the common case.
+    fast = pc <= fast_end;
+    if (!fast && rom && pc >= rom_size)
     {
         vm->faulted = 1;
         vm->fault_pc = pc;
@@ -963,18 +1144,20 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
         vm->running = 0;
         break;
     }
-    uint32_t instruction_pc = pc;
+    instruction_pc = pc;
     if (hits && instruction_pc < rom_size)
         hits[instruction_pc]++;
-    const int fast = (rom != NULL) && (pc + 16u <= rom_size);
-    uint8_t opbyte = (uint8_t)ULVM_NEXTBYTE();
+    opbyte = (uint8_t)ULVM_NEXTBYTE();
+#if ULVM_COMPUTED_GOTO
+    goto *ulvm_dispatch[opbyte];
+#endif
 
     switch (opbyte)
     {
-    case OP_NOP:
-        break;
+    ULVM_CASE(OP_NOP)
+        ULVM_NEXT();
 
-    case OP_FLAG:
+    ULVM_CASE(OP_FLAG)
     {
         uint8_t flag = (uint8_t)ULVM_NEXTBYTE();
         uint8_t val = (uint8_t)ULVM_NEXTBYTE();
@@ -1000,10 +1183,10 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
             }
             vm->graphics_mode = val;
         }
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_ISFLAGSUPPORTED:
+    ULVM_CASE(OP_ISFLAGSUPPORTED)
     {
         uint8_t flag = (uint8_t)ULVM_NEXTBYTE();
         uint8_t val = (uint8_t)ULVM_NEXTBYTE();
@@ -1014,19 +1197,19 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
         else
             supported = vm->isflagsupported ? vm->isflagsupported(flag, val) : 0;
         ULVM_R(r) = supported ? 1u : 0u;
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_SETBYTE:
+    ULVM_CASE(OP_SETBYTE)
     {
         uint32_t addr = ULVM_NEXT4BYTES();
         uint8_t byte = (uint8_t)ULVM_NEXTBYTE();
         if (ULVM_INBOUNDS(addr, 1))
             vm->mem[addr] = byte;
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_WRITE:
+    ULVM_CASE(OP_WRITE)
     {
         uint32_t addr = ULVM_NEXT4BYTES();
         uint32_t len = ULVM_NEXT2BYTES();
@@ -1038,26 +1221,26 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
             if (i < available)
                 vm->mem[addr + i] = b;
         }
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_OUTC:
+    ULVM_CASE(OP_OUTC)
     {
         uint32_t addr = ULVM_NEXT4BYTES();
         if (ULVM_INBOUNDS(addr, 1))
             vm->outputchar((char)vm->mem[addr]);
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_OUT:
+    ULVM_CASE(OP_OUT)
     {
         uint32_t addr = ULVM_NEXT4BYTES();
         if (ULVM_INBOUNDS(addr, 1))
             ulvm_print_uint(vm, vm->mem[addr]);
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_INPUT:
+    ULVM_CASE(OP_INPUT)
     {
         uint32_t chars = ULVM_NEXT4BYTES();
         uint32_t addr = ULVM_NEXT4BYTES();
@@ -1069,22 +1252,22 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
                 maxchars = available;
             vm->input((char *)&vm->mem[addr], maxchars);
         }
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_PRINT:
-    case OP_PRINTN:
+    ULVM_CASE(OP_PRINT)
+    ULVM_CASE(OP_PRINTN)
     {
         uint32_t len = ULVM_NEXT2BYTES();
         for (uint32_t i = 0; i < len; i++)
             vm->outputchar((char)ULVM_NEXTBYTE());
         if (opbyte == OP_PRINT)
             vm->outputchar('\n');
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_PRINTV:
-    case OP_PRINTVN:
+    ULVM_CASE(OP_PRINTV)
+    ULVM_CASE(OP_PRINTVN)
     {
         uint32_t chars = ULVM_NEXT4BYTES();
         uint32_t addr = ULVM_NEXT4BYTES();
@@ -1096,14 +1279,14 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
             vm->outputchar((char)vm->mem[addr + i]);
         if (opbyte == OP_PRINTV)
             vm->outputchar('\n');
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_CUR:
+    ULVM_CASE(OP_CUR)
         ulvm_print_uint(vm, pc);
-        break;
+        ULVM_NEXT();
 
-    case OP_MEMORY:
+    ULVM_CASE(OP_MEMORY)
     {
         const uint32_t columns = 16;
         for (uint32_t row = 0; row < ULVM_MEM_SIZE; row += columns)
@@ -1117,10 +1300,10 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
             }
             vm->outputchar('\n');
         }
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_FLAGS:
+    ULVM_CASE(OP_FLAGS)
         for (uint8_t f = 0; f < ULVM_FLAG_NUM; f++)
         {
             uint8_t v = ulvm_getflag(vm, f);
@@ -1128,53 +1311,53 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
                 vm->outputchar((char)('0' + ((v >> b) & 1)));
         }
         vm->outputchar('\n');
-        break;
+        ULVM_NEXT();
 
-    case OP_SETPC:
+    ULVM_CASE(OP_SETPC)
         pc = ULVM_NEXT4BYTES();
-        break;
+        ULVM_NEXT();
 
-    case OP_SUBROUTINE:
+    ULVM_CASE(OP_SUBROUTINE)
     {
         uint32_t pos = ULVM_NEXT4BYTES();
         if (vm->callsp < ULVM_CALLSTACK_SIZE)
             vm->callstack[vm->callsp++] = pc;
         pc = pos;
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_RETURN:
+    ULVM_CASE(OP_RETURN)
         if (vm->callsp > 0)
             pc = vm->callstack[--vm->callsp];
-        break;
+        ULVM_NEXT();
 
-    case OP_SLEEP:
+    ULVM_CASE(OP_SLEEP)
     {
         uint32_t ms = ULVM_NEXT4BYTES();
         if (vm->sleep)
             vm->sleep(ms);
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_REFRESHSCREEN:
+    ULVM_CASE(OP_REFRESHSCREEN)
         if (vm->refreshscreen)
             vm->refreshscreen();
         if (vm->clearscreen)
             vm->clearscreen();
-        break;
+        ULVM_NEXT();
 
-    case OP_ROMREAD8:
-    case OP_ROMREAD16:
-    case OP_ROMREAD32:
+    ULVM_CASE(OP_ROMREAD8)
+    ULVM_CASE(OP_ROMREAD16)
+    ULVM_CASE(OP_ROMREAD32)
     {
         uint8_t ra = (uint8_t)ULVM_NEXTBYTE();
         uint8_t rd = (uint8_t)ULVM_NEXTBYTE();
         int size = (opbyte == OP_ROMREAD8) ? 1 : (opbyte == OP_ROMREAD16) ? 2 : 4;
         ULVM_R(rd) = ulvm_rom_read(vm, ULVM_R(ra), size);
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_ROMREAD64:
+    ULVM_CASE(OP_ROMREAD64)
     {
         uint8_t ra = (uint8_t)ULVM_NEXTBYTE();
         uint8_t rhi = (uint8_t)ULVM_NEXTBYTE();
@@ -1185,58 +1368,58 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
             value = (value << 8) | (uint64_t)ulvm_rom_byte(vm, addr + i);
         ULVM_R(rhi) = (uint32_t)(value >> 32);
         ULVM_R(rlo) = (uint32_t)value;
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_SETPIXEL:
+    ULVM_CASE(OP_SETPIXEL)
     {
         uint8_t rx = (uint8_t)ULVM_NEXTBYTE();
         uint8_t ry = (uint8_t)ULVM_NEXTBYTE();
         uint8_t rc = (uint8_t)ULVM_NEXTBYTE();
         if (vm->setpixel)
             vm->setpixel((uint8_t)ULVM_R(rx), (uint8_t)ULVM_R(ry), (uint16_t)ULVM_R(rc));
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_GETPIXEL:
+    ULVM_CASE(OP_GETPIXEL)
     {
         uint8_t rx = (uint8_t)ULVM_NEXTBYTE();
         uint8_t ry = (uint8_t)ULVM_NEXTBYTE();
         uint8_t rdst = (uint8_t)ULVM_NEXTBYTE();
         ULVM_R(rdst) = vm->getpixel ? vm->getpixel((uint8_t)ULVM_R(rx), (uint8_t)ULVM_R(ry)) : 0;
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_GETKEYBOARD:
+    ULVM_CASE(OP_GETKEYBOARD)
     {
         uint8_t r = (uint8_t)ULVM_NEXTBYTE();
         ULVM_R(r) = vm->getkeyboard ? vm->getkeyboard() : 0;
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_GETTIME:
+    ULVM_CASE(OP_GETTIME)
     {
         uint8_t r = (uint8_t)ULVM_NEXTBYTE();
         ULVM_R(r) = vm->gettime ? vm->gettime() : 0;
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_GETMEMSIZE:
+    ULVM_CASE(OP_GETMEMSIZE)
     {
         uint8_t r = (uint8_t)ULVM_NEXTBYTE();
         ULVM_R(r) = ULVM_MEM_SIZE;
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_GETFLAG:
+    ULVM_CASE(OP_GETFLAG)
     {
         uint8_t flag = (uint8_t)ULVM_NEXTBYTE();
         uint8_t r = (uint8_t)ULVM_NEXTBYTE();
         ULVM_R(r) = ulvm_getflag(vm, flag);
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_RANDREG:
+    ULVM_CASE(OP_RANDREG)
     {
         uint8_t r1 = (uint8_t)ULVM_NEXTBYTE();
         uint8_t r2 = (uint8_t)ULVM_NEXTBYTE();
@@ -1245,17 +1428,17 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
         uint32_t max = ULVM_R(r2);
         if (max > min)
             ULVM_R(dst) = min + (ulvm_rand(vm) % (max - min));
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_SRANDREG:
+    ULVM_CASE(OP_SRANDREG)
     {
         uint8_t r = (uint8_t)ULVM_NEXTBYTE();
         ulvm_srand(vm, ULVM_R(r));
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_DRAWSTRING:
+    ULVM_CASE(OP_DRAWSTRING)
     {
         uint8_t regx = (uint8_t)ULVM_NEXTBYTE();
         uint8_t regy = (uint8_t)ULVM_NEXTBYTE();
@@ -1270,19 +1453,19 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
                             ULVM_R(regaddr), ULVM_R(reglen), src, &retx, &rety);
         ULVM_R(regreturnx) = retx;
         ULVM_R(regreturny) = rety;
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_NUMTOSTR:
+    ULVM_CASE(OP_NUMTOSTR)
     {
         uint8_t r = (uint8_t)ULVM_NEXTBYTE();
         uint32_t addr = ULVM_NEXT4BYTES();
         uint8_t rlen = (uint8_t)ULVM_NEXTBYTE();
         ULVM_R(rlen) = ulvm_itoa(vm, ULVM_R(r), addr);
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_FLOATOP:
+    ULVM_CASE(OP_FLOATOP)
     {
         uint8_t operation = (uint8_t)ULVM_NEXTBYTE();
         uint8_t format = (uint8_t)ULVM_NEXTBYTE();
@@ -1342,10 +1525,10 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
             }
             ulvm_store_numeric(vm, dest, 8, result);
         }
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_FLOATCAST:
+    ULVM_CASE(OP_FLOATCAST)
     {
         uint8_t src_format = (uint8_t)ULVM_NEXTBYTE();
         uint8_t dst_format = (uint8_t)ULVM_NEXTBYTE();
@@ -1367,56 +1550,56 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
         }
         double value = ulvm_load_numeric(vm, ULVM_R(rsrc), src_format);
         ulvm_store_numeric(vm, ULVM_R(rdst), dst_format, value);
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_SETREG:
+    ULVM_CASE(OP_SETREG)
     {
         uint8_t r = (uint8_t)ULVM_NEXTBYTE();
         uint32_t val = ULVM_NEXT4BYTES();
         ULVM_R(r) = val;
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_MOVREG:
+    ULVM_CASE(OP_MOVREG)
     {
         uint8_t dst = (uint8_t)ULVM_NEXTBYTE();
         uint8_t src = (uint8_t)ULVM_NEXTBYTE();
         ULVM_R(dst) = ULVM_R(src);
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_LOADREG8:
+    ULVM_CASE(OP_LOADREG8)
     {
         uint8_t r = (uint8_t)ULVM_NEXTBYTE();
         uint32_t addr = ULVM_NEXT4BYTES();
         ULVM_R(r) = (addr < (uint32_t)ULVM_MEM_SIZE) ? (uint32_t)vm->mem[addr] : 0u;
-        break;
+        ULVM_NEXT();
     }
-    case OP_LOADREG16:
+    ULVM_CASE(OP_LOADREG16)
     {
         uint8_t r = (uint8_t)ULVM_NEXTBYTE();
         uint32_t addr = ULVM_NEXT4BYTES();
         ULVM_R(r) = ULVM_INBOUNDS(addr, 2) ? (((uint32_t)vm->mem[addr] << 8) | vm->mem[addr + 1]) : 0u;
-        break;
+        ULVM_NEXT();
     }
-    case OP_LOADREG32:
+    ULVM_CASE(OP_LOADREG32)
     {
         uint8_t r = (uint8_t)ULVM_NEXTBYTE();
         uint32_t addr = ULVM_NEXT4BYTES();
         ULVM_R(r) = ULVM_INBOUNDS(addr, 4)
             ? (((uint32_t)vm->mem[addr] << 24) | ((uint32_t)vm->mem[addr + 1] << 16) | ((uint32_t)vm->mem[addr + 2] << 8) | vm->mem[addr + 3])
             : 0u;
-        break;
+        ULVM_NEXT();
     }
-    case OP_STOREREG8:
+    ULVM_CASE(OP_STOREREG8)
     {
         uint8_t r = (uint8_t)ULVM_NEXTBYTE();
         uint32_t addr = ULVM_NEXT4BYTES();
         if (addr < (uint32_t)ULVM_MEM_SIZE) vm->mem[addr] = (uint8_t)ULVM_R(r);
-        break;
+        ULVM_NEXT();
     }
-    case OP_STOREREG16:
+    ULVM_CASE(OP_STOREREG16)
     {
         uint8_t r = (uint8_t)ULVM_NEXTBYTE();
         uint32_t addr = ULVM_NEXT4BYTES();
@@ -1426,9 +1609,9 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
             vm->mem[addr] = (uint8_t)(v >> 8);
             vm->mem[addr + 1] = (uint8_t)v;
         }
-        break;
+        ULVM_NEXT();
     }
-    case OP_STOREREG32:
+    ULVM_CASE(OP_STOREREG32)
     {
         uint8_t r = (uint8_t)ULVM_NEXTBYTE();
         uint32_t addr = ULVM_NEXT4BYTES();
@@ -1440,18 +1623,18 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
             vm->mem[addr + 2] = (uint8_t)(v >> 8);
             vm->mem[addr + 3] = (uint8_t)v;
         }
-        break;
+        ULVM_NEXT();
     }
 
 #define ULVM_BINOP(OPC, EXPR) \
-    case OPC: \
+    ULVM_CASE(OPC) \
     { \
         uint8_t r1 = (uint8_t)ULVM_NEXTBYTE(); \
         uint8_t r2 = (uint8_t)ULVM_NEXTBYTE(); \
         uint8_t dst = (uint8_t)ULVM_NEXTBYTE(); \
         uint32_t a = ULVM_R(r1), b = ULVM_R(r2); \
         ULVM_R(dst) = (EXPR); \
-        break; \
+        ULVM_NEXT(); \
     }
     ULVM_BINOP(OP_ADDREG, a + b)
     ULVM_BINOP(OP_SUBREG, a - b)
@@ -1472,16 +1655,16 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
     ULVM_BINOP(OP_SHLREG, (b < 32) ? (a << b) : 0u)
 #undef ULVM_BINOP
 
-    case OP_DIVREG:
-    case OP_MODREG:
-    case OP_COMPREG:
-    case OP_NORREG:
-    case OP_NANDREG:
-    case OP_XORREG:
-    case OP_XNORREG:
-    case OP_SDIVREG:
-    case OP_SMODREG:
-    case OP_SSHRREG:
+    ULVM_CASE(OP_DIVREG)
+    ULVM_CASE(OP_MODREG)
+    ULVM_CASE(OP_COMPREG)
+    ULVM_CASE(OP_NORREG)
+    ULVM_CASE(OP_NANDREG)
+    ULVM_CASE(OP_XORREG)
+    ULVM_CASE(OP_XNORREG)
+    ULVM_CASE(OP_SDIVREG)
+    ULVM_CASE(OP_SMODREG)
+    ULVM_CASE(OP_SSHRREG)
     {
         uint8_t r1 = (uint8_t)ULVM_NEXTBYTE();
         uint8_t r2 = (uint8_t)ULVM_NEXTBYTE();
@@ -1529,15 +1712,15 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
             break;
         default: break;
         }
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_ADDREGV:
-    case OP_SUBREGV:
-    case OP_MULREGV:
-    case OP_ANDREGV:
-    case OP_ORREGV:
-    case OP_XORREGV:
+    ULVM_CASE(OP_ADDREGV)
+    ULVM_CASE(OP_SUBREGV)
+    ULVM_CASE(OP_MULREGV)
+    ULVM_CASE(OP_ANDREGV)
+    ULVM_CASE(OP_ORREGV)
+    ULVM_CASE(OP_XORREGV)
     {
         uint8_t r1 = (uint8_t)ULVM_NEXTBYTE();
         uint32_t val = ULVM_NEXT4BYTES();
@@ -1549,12 +1732,12 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
         else if (opbyte == OP_ANDREGV) ULVM_R(dst) = a & val;
         else if (opbyte == OP_ORREGV) ULVM_R(dst) = a | val;
         else ULVM_R(dst) = a ^ val;
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_SHLREGV:
-    case OP_SHRREGV:
-    case OP_SSHRREGV:
+    ULVM_CASE(OP_SHLREGV)
+    ULVM_CASE(OP_SHRREGV)
+    ULVM_CASE(OP_SSHRREGV)
     {
         uint8_t r1 = (uint8_t)ULVM_NEXTBYTE();
         uint32_t imm = ULVM_NEXTBYTE();
@@ -1565,40 +1748,40 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
         else if (imm >= 32) ULVM_R(dst) = (a & 0x80000000u) ? UINT32_MAX : 0u;
         else if (imm == 0) ULVM_R(dst) = a;
         else ULVM_R(dst) = (a >> imm) | ((a & 0x80000000u) ? (UINT32_MAX << (32 - imm)) : 0u);
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_CMPREGV:
+    ULVM_CASE(OP_CMPREGV)
     {
         uint8_t r1 = (uint8_t)ULVM_NEXTBYTE();
         uint32_t val = ULVM_NEXT4BYTES();
         uint8_t dst = (uint8_t)ULVM_NEXTBYTE();
         uint8_t cond = (uint8_t)ULVM_NEXTBYTE();
         ULVM_R(dst) = ulvm_cond(cond, ULVM_R(r1), val) ? 1u : 0u;
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_JCMP:
+    ULVM_CASE(OP_JCMP)
     {
         uint8_t r1 = (uint8_t)ULVM_NEXTBYTE();
         uint8_t r2 = (uint8_t)ULVM_NEXTBYTE();
         uint8_t cond = (uint8_t)ULVM_NEXTBYTE();
         uint32_t pos = ULVM_NEXT4BYTES();
         if (ulvm_cond(cond, ULVM_R(r1), ULVM_R(r2))) pc = pos;
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_JCMPV:
+    ULVM_CASE(OP_JCMPV)
     {
         uint8_t r1 = (uint8_t)ULVM_NEXTBYTE();
         uint32_t val = ULVM_NEXT4BYTES();
         uint8_t cond = (uint8_t)ULVM_NEXTBYTE();
         uint32_t pos = ULVM_NEXT4BYTES();
         if (ulvm_cond(cond, ULVM_R(r1), val)) pc = pos;
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_FILLRECT:
+    ULVM_CASE(OP_FILLRECT)
     {
         uint8_t rx = (uint8_t)ULVM_NEXTBYTE();
         uint8_t ry = (uint8_t)ULVM_NEXTBYTE();
@@ -1606,10 +1789,10 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
         uint8_t rh = (uint8_t)ULVM_NEXTBYTE();
         uint8_t rc = (uint8_t)ULVM_NEXTBYTE();
         ulvm_fillrect(vm, (int32_t)ULVM_R(rx), (int32_t)ULVM_R(ry), (int32_t)ULVM_R(rw), (int32_t)ULVM_R(rh), (uint8_t)ULVM_R(rc));
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_DRAWLINE:
+    ULVM_CASE(OP_DRAWLINE)
     {
         uint8_t rx0 = (uint8_t)ULVM_NEXTBYTE();
         uint8_t ry0 = (uint8_t)ULVM_NEXTBYTE();
@@ -1617,20 +1800,20 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
         uint8_t ry1 = (uint8_t)ULVM_NEXTBYTE();
         uint8_t rc = (uint8_t)ULVM_NEXTBYTE();
         ulvm_drawline(vm, (int32_t)ULVM_R(rx0), (int32_t)ULVM_R(ry0), (int32_t)ULVM_R(rx1), (int32_t)ULVM_R(ry1), (uint8_t)ULVM_R(rc));
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_BLIT:
+    ULVM_CASE(OP_BLIT)
     {
         uint32_t d = ULVM_NEXT4BYTES();
         ulvm_blit(vm, d);
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_IFREG:
-    case OP_IFNOTREG:
-    case OP_IFSUBREG:
-    case OP_IFNOTSUBREG:
+    ULVM_CASE(OP_IFREG)
+    ULVM_CASE(OP_IFNOTREG)
+    ULVM_CASE(OP_IFSUBREG)
+    ULVM_CASE(OP_IFNOTSUBREG)
     {
         uint8_t r = (uint8_t)ULVM_NEXTBYTE();
         uint32_t pos = ULVM_NEXT4BYTES();
@@ -1641,60 +1824,63 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
                 vm->callstack[vm->callsp++] = pc;
             pc = pos;
         }
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_NOTREG:
+    ULVM_CASE(OP_NOTREG)
     {
         uint8_t r1 = (uint8_t)ULVM_NEXTBYTE();
         uint8_t dst = (uint8_t)ULVM_NEXTBYTE();
         ULVM_R(dst) = ~ULVM_R(r1);
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_LOADREGI8:
-    case OP_LOADREGI16:
-    case OP_LOADREGI32:
+    ULVM_CASE(OP_LOADREGI8)
+    ULVM_CASE(OP_LOADREGI16)
+    ULVM_CASE(OP_LOADREGI32)
     {
         uint8_t ra = (uint8_t)ULVM_NEXTBYTE();
         uint8_t rd = (uint8_t)ULVM_NEXTBYTE();
         uint8_t size = (opbyte == OP_LOADREGI8) ? 1 : (opbyte == OP_LOADREGI16) ? 2 : 4;
         uint32_t addr = ULVM_R(ra);
         ULVM_R(rd) = ulvm_load_memory(vm, addr, size);
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_STOREREGI8:
-    case OP_STOREREGI16:
-    case OP_STOREREGI32:
+    ULVM_CASE(OP_STOREREGI8)
+    ULVM_CASE(OP_STOREREGI16)
+    ULVM_CASE(OP_STOREREGI32)
     {
         uint8_t ra = (uint8_t)ULVM_NEXTBYTE();
         uint8_t rv = (uint8_t)ULVM_NEXTBYTE();
         uint8_t size = (opbyte == OP_STOREREGI8) ? 1 : (opbyte == OP_STOREREGI16) ? 2 : 4;
         uint32_t addr = ULVM_R(ra);
         ulvm_store_memory(vm, addr, size, ULVM_R(rv));
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_OUTREG:
+    ULVM_CASE(OP_OUTREG)
     {
         uint8_t r = (uint8_t)ULVM_NEXTBYTE();
         ulvm_print_uint(vm, ULVM_R(r));
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_OUTREGSIGNED:
+    ULVM_CASE(OP_OUTREGSIGNED)
     {
         uint8_t r = (uint8_t)ULVM_NEXTBYTE();
         ulvm_print_int(vm, (int32_t)ULVM_R(r));
-        break;
+        ULVM_NEXT();
     }
 
-    case OP_EXIT:
+    ULVM_CASE(OP_EXIT)
         vm->running = 0;
         break;
 
     default:
+#if ULVM_COMPUTED_GOTO
+    ulvm_l_default:
+#endif
         vm->faulted = 1;
         vm->fault_pc = instruction_pc;
         vm->fault_opcode = opbyte;
@@ -1703,6 +1889,9 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
     }
     }
 
+#if ULVM_COMPUTED_GOTO
+ulvm_out:
+#endif
     vm->pc = pc;
     return !vm->running;
 }

@@ -142,7 +142,7 @@ operation selectors are `1` add, `2` subtract, `3` multiply, `4` divide,
 
 ```
 python -m pip install pycparser
-python compiler.py input.c -o output.ulc [-I dir] [-D NAME=value]
+python compiler.py input.c -o output.ulc [-I dir] [-D NAME=value] [-O0]
 python compiler.py examples/microcity -o examples/microcity/microcity.ulc
 ```
 
@@ -285,16 +285,42 @@ copy." This sidesteps the ISA's limited call-stack support entirely, so:
 - **Blocks are properly scoped.** A variable declared inside an
   `if`/`while`/function body is only visible until the closing `}`. This is
   scoping of *visibility* only — the underlying address a variable was
-  allocated is never freed/reused, so heavy use of short-lived block-local
-  variables still costs memory for the whole program's run.
+  allocated is not reused by the code generator itself, but the optimizer
+  (below) repacks RAM afterwards, so short-lived block-local variables and
+  temporaries only cost memory while they are alive.
+
+### Optimizer (`optimizer.py`)
+
+On by default; `-O0` turns it off. It is a post-pass over the instruction
+list and is behaviour-preserving (verified by comparing output of `-O0` and
+optimized builds on all examples, plus `tools/fuzz_opt.py`). It does:
+
+- jump cleanup, store-to-load forwarding and dead temp-store removal,
+- constant propagation for never-reassigned variables,
+- register promotion of locals into `r0`-`r12` (loop-depth weighted;
+  variables whose address escapes stay in RAM),
+- folding into `*regv`/`cmpregv`/`jcmpv` forms, loop rotation,
+- RAM repacking by variable lifetime.
+
+The compiler also emits plain load/store for integer narrowing instead of
+`floatcast`, `x = x + 1` as `addregv`, and shifts/masks for division by
+powers of two. Typical result: 2-3.8x fewer VM instructions and about half
+the bytecode size. Debug with `UNILANG_OPT_DEBUG=1` or
+`UNILANG_OPT_SKIP=jumps,forward,dse,promote,regs,reloc,constvars,rotate`.
+
+Testing tools: `tools/headless.c` (deterministic host that prints a digest
+of the framebuffer/output; `cc -O2 -std=c11 -I C-interpreter tools/headless.c
+-o tools/headless`) and `tools/fuzz_opt.py` (random-program differential
+test, `--gcc` to also compare with gcc).
 
 ### Other limitations
 
 - 64-bit integer types (`long long`, `int64_t`, and `uint64_t`), `long double`,
   unions, and direct `printf("%f", value)` formatting are not supported.
-- **Variables are never freed.** Every declaration (globals, function-call
-  locals, compiler-generated temporaries) permanently owns its address for
-  the program's whole lifetime.
+- **Variable lifetime.** Without the optimizer (`-O0`) every declaration
+  permanently owns its address. With it, variables and temporaries that are
+  dead or never read are dropped and the rest of RAM is repacked by
+  lifetime; globals and anything whose address is taken stay put.
 
 ### Example
 
