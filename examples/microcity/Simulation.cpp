@@ -12,11 +12,7 @@ enum SimulationSteps
 	SimulateNextMonth
 };
 
-#ifdef _WIN32
-void DebugBuildingScore(Building* building, int score, int crime, int pollution, int localInfluence, int populationEffect, int randomEffect);
-#else
 inline void DebugBuildingScore(Building* building, int score, int crime, int pollution, int localInfluence, int populationEffect, int randomEffect) {}
-#endif
 
 #define SIM_INCREMENT_POP_THRESHOLD 20				// Score must be more than this to grow
 #define SIM_DECREMENT_POP_THRESHOLD -30				// Score must be less than this to shrink

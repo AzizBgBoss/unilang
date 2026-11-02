@@ -205,8 +205,10 @@ void HandleInput(uint8_t input)
 			switch (UIState.selection)
 			{
 			case 0:
-				SaveCity();
-				UIState.state = InGame;
+				if (SaveCity())
+				{
+					UIState.state = InGame;
+				}
 				break;
 			case 1:
 				if (LoadCity())

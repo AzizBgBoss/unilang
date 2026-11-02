@@ -52,11 +52,8 @@ static uint8_t my_readbyte(uint32_t addr)
     return 0;
 }
 
-static void my_setpixel(uint8_t x, uint8_t y, uint16_t color)
+static uint16_t my_normalize_pixel_color(uint16_t color)
 {
-    if (!graphics_colorsize || x >= graphics_width || y >= graphics_height)
-        return;
-
     if (graphics_colorsize & 0x80)
         color &= (graphics_colorsize == 0x82) ? 0x03 : 0xFF;
     else if (graphics_colorsize == 1)
@@ -67,8 +64,42 @@ static void my_setpixel(uint8_t x, uint8_t y, uint16_t color)
         color &= 0xFF;
     else if (graphics_colorsize == 16)
         color &= 0x7FFF;
+    return color;
+}
 
-    framebuffer[(size_t)y * FRAMEBUFFER_WIDTH + x] = color;
+static void my_setpixel(uint8_t x, uint8_t y, uint16_t color)
+{
+    if (!graphics_colorsize || x >= graphics_width || y >= graphics_height)
+        return;
+
+    framebuffer[(size_t)y * FRAMEBUFFER_WIDTH + x] = my_normalize_pixel_color(color);
+}
+
+static void my_fillrect_fast(uint8_t x, uint8_t y, uint16_t w, uint16_t h, uint16_t color)
+{
+    if (!graphics_colorsize || x >= graphics_width || y >= graphics_height)
+        return;
+    if (w > graphics_width - x) w = (uint16_t)(graphics_width - x);
+    if (h > graphics_height - y) h = (uint16_t)(graphics_height - y);
+    color = my_normalize_pixel_color(color);
+    for (uint16_t row = 0; row < h; ++row)
+    {
+        size_t start = (size_t)(y + row) * FRAMEBUFFER_WIDTH + x;
+        for (uint16_t col = 0; col < w; ++col)
+            framebuffer[start + col] = color;
+    }
+}
+
+static void my_blitrow_fast(uint8_t x, uint8_t y, uint16_t count,
+                            const uint16_t *colors, const uint8_t *opaque)
+{
+    if (!graphics_colorsize || y >= graphics_height || x >= graphics_width)
+        return;
+    if (count > graphics_width - x) count = (uint16_t)(graphics_width - x);
+    size_t start = (size_t)y * FRAMEBUFFER_WIDTH + x;
+    for (uint16_t col = 0; col < count; ++col)
+        if (opaque[col])
+            framebuffer[start + col] = my_normalize_pixel_color(colors[col]);
 }
 
 static uint16_t my_getpixel(uint8_t x, uint8_t y)
@@ -581,6 +612,7 @@ int main(int argc, char **argv)
     }
     ULVM_set_rom(&vm, rom, (uint32_t)romsize);  // fast instruction fetch, no callback per byte
     ULVM_set_graphics(&vm, my_setpixel, my_getpixel, my_refreshscreen, my_enablegraphics, my_disablegraphics, my_clearscreen);
+    ULVM_set_graphics_fast(&vm, my_fillrect_fast, my_blitrow_fast);
     ULVM_set_keyboard(&vm, my_getkeyboard);
     ULVM_set_time(&vm, my_gettime, my_sleep);
     ULVM_set_flagsupport(&vm, my_isflagsupported);

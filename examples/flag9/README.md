@@ -7,13 +7,13 @@ comet. Press Enter to exit.
 Compile from the repository root:
 
 ```sh
-python compiler.py examples/flag6/flag6.c -o examples/flag6/flag6.ulc
+python compiler.py examples/flag9/flag9.c -o examples/flag9/flag9.ulc
 ```
 
 Run it with the SDL C interpreter:
 
 ```sh
-C-interpreter/main examples/flag6/flag6.ulc
+C-interpreter/main examples/flag9/flag9.ulc
 ```
 
 See the root [README](../../README.md#quick-start) for build and setup

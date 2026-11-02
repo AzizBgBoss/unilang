@@ -45,9 +45,8 @@ uint16_t GetRand();
 void InitGame(void);
 void TickGame(void);
 
-void SaveCity(void);
+bool SaveCity(void);
 bool LoadCity(void);
 
 void FocusTile(uint8_t x, uint8_t y);
-
 

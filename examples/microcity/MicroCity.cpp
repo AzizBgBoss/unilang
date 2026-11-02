@@ -1,16 +1,18 @@
 /* https://github.com/jhhoward/MicroCity */
 
+#define _WIN32 1
+
 #include <stdint.h>
 #include <stdbool.h>
+#if !defined(_WIN32)
 #include <avr/pgmspace.h>
+#endif
 #include "Draw.h"
 #include "Interface.h"
 #include "Game.h"
 #include "Simulation.h"
 
 uint8_t PowerGrid[1024];
-uint8_t SavedCity[sizeof(GameState)];
-uint8_t SavedValid = 0;
 
 uint8_t GetInput()
 {
@@ -38,7 +40,7 @@ void DrawBitmap(const uint8_t* bmp, uint8_t x, uint8_t y, uint8_t w, uint8_t h)
   {
     for (uint8_t row = 0; row < h; ++row)
     {
-      const uint8_t byteIndex = (row >> 3) * w + column;
+      const uint16_t byteIndex = (row >> 3) * w + column;
       const uint8_t pixels = pgm_read_byte(bmp + byteIndex);
       if (pixels & (1u << (row & 7)))
       {
@@ -48,31 +50,19 @@ void DrawBitmap(const uint8_t* bmp, uint8_t x, uint8_t y, uint8_t w, uint8_t h)
   }
 }
 
-void SaveCity()
+bool SaveCity()
 {
-  // uniClang has no EEPROM, so this is a RAM-only fake save slot.
-  uint8_t* ptr = (uint8_t*)&State;
-  for (size_t n = 0; n < sizeof(GameState); ++n)
+  if (!save(&State, sizeof(State)))
   {
-    SavedCity[n] = ptr[n];
+    printf("Could not save city\n");
+    return false;
   }
-  SavedValid = 1;
+  return true;
 }
 
 bool LoadCity()
 {
-  if (!SavedValid)
-  {
-    return false;
-  }
-
-  uint8_t* ptr = (uint8_t*)&State;
-  for (size_t n = 0; n < sizeof(GameState); ++n)
-  {
-    ptr[n] = SavedCity[n];
-  }
-
-  return true;
+  return load(&State, sizeof(State)) != 0;
 }
 
 uint8_t* GetPowerGrid()
@@ -82,19 +72,20 @@ uint8_t* GetPowerGrid()
 
 int main()
 {
-  if (isflagsupported(0, 4))
+  if (isflagsupported(0, 6))
   {
-    flag(0, 4);
+    flag(0, 6);
   }
   flag(1, 1);
 
   InitGame();
+  LoadCity();
 
   while (1)
   {
     TickGame();
     refreshscreen();
-    sleep(40);
+    sleep(16);
   }
 
   return 0;

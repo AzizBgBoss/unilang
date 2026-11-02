@@ -5,10 +5,18 @@
 #include <string.h>
 #define PROGMEM
 #define PSTR
-#define pgm_read_byte(x) (*((uint8_t*)x))
-#define pgm_read_word(x) (*((uint16_t*)x))
-#define pgm_read_ptr(x) (*((uintptr_t*)x))
-#define strlen_P(x) strlen(x)
+#define pgm_read_byte(x) romread((x), 1)
+#define pgm_read_word(x) romread((x), 2)
+#define pgm_read_ptr(x) romread((x), 4)
+static inline uint32_t strlen_P(const char* text)
+{
+	uint32_t length = 0;
+	while (romread(text + length, 1))
+	{
+		length++;
+	}
+	return length;
+}
 #else
 #include <avr/pgmspace.h>
 //#define pgm_read_ptr pgm_read_word

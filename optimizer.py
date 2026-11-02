@@ -59,8 +59,13 @@ ROLES = {
     "drawstring": "rrrrriww", "numtostr": "rMw", "floatop": "iirrr",
     "floatcast": "iirr", "romread64": "rww", "fillrect": "rrrrr",
     "drawline": "rrrrr", "blit": "M", "setpalette": "rr",
+    "fillscreen": "r", "fillcircle": "rrrr", "drawrect": "rrrrr",
+    "jmpreg": "r", "callreg": "r",
+    "pushr": "r", "popr": "w",
+    "outfmt": "Miiiii",
     "save": "rrw", "load": "rrw", "beep": "rr",
-    "audio_command": "irrw", "audio_load": "rrrriw",
+    "audio_command": "irrw", "audio_load": "rrrriw", "memcpy": "rrri", "memset": "rrr",
+    "minreg": "rrwi", "maxreg": "rrwi", "absreg": "rw", "mul64": "rrwwi",
     "setreg": "wi", "movreg": "wr",
     "loadreg8": "wm", "loadreg16": "wm", "loadreg32": "wm",
     "storereg8": "rs", "storereg16": "rs", "storereg32": "rs",
@@ -169,6 +174,10 @@ class Optimizer:
                 for a in ins.args:
                     if isinstance(a, Label):
                         refs[a] = refs.get(a, 0) + 1
+        for item in self.c.rom_data:
+            for _, target in item["relocations"]:
+                if isinstance(target, Label):
+                    refs[target] = refs.get(target, 0) + 1
         return refs
 
     def next_real(self, i):

@@ -5,7 +5,7 @@ Generates small C programs in the subset compiler.py supports, compiles each
 with -O0 and with the optimizer, runs both on the headless VM host and
 compares the printed output. Optionally (--gcc) also compares with gcc.
 
-    cc -O2 -std=c11 -I C-interpreter tools/headless.c -o tools/headless
+    cc -O2 -std=c11 -I C-interpreter tools/headless.c -o tools/headless -lm
     python3 tools/fuzz_opt.py --count 200 [--seed 1] [--gcc] [--keep DIR]
 """
 
@@ -182,7 +182,7 @@ def main():
     ap.add_argument("--host", default=str(ROOT / "tools" / "headless"))
     args = ap.parse_args()
     if not os.path.exists(args.host):
-        print(f"build the headless host first: cc -O2 -std=c11 -I C-interpreter tools/headless.c -o {args.host}")
+        print(f"build the headless host first: cc -O2 -std=c11 -I C-interpreter tools/headless.c -o {args.host} -lm")
         return 2
     fails = gcc_diffs = skipped = 0
     with tempfile.TemporaryDirectory() as tmp:

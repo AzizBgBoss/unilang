@@ -15,6 +15,8 @@ static uint8_t saved_block[4];
 static int saved_block_valid;
 static int save_failure;
 static int load_failure;
+static char output_buffer[512];
+static size_t output_length;
 
 static int save_callback(uint8_t *data, uint32_t len)
 {
@@ -45,7 +47,39 @@ static void set_pixel(uint8_t x, uint8_t y, uint16_t color)
 }
 
 static uint8_t read_byte(uint32_t addr) { (void)addr; return 0; }
-static void output_char(char c) { (void)c; }
+static void output_char(char c)
+{
+    if (output_length < sizeof(output_buffer))
+        output_buffer[output_length++] = c;
+}
+
+static void test_formatted_output(void)
+{
+    static const uint8_t program[] = {
+        0x3B, 0, 0, 0, 0, 5, 'd', 5, 255, 0,
+        0x3B, 0, 0, 0, 4, 8, 'f', 0, 2, 0,
+        0xFF
+    };
+    static const uint8_t invalid_program[] = {
+        0x3B, 0, 0, 0, 0, 5, 'q', 0, 255, 0,
+        0xFF
+    };
+    UnilangVM vm;
+    ULVM_init(&vm, output_char, read_byte);
+    ulvm_store_memory(&vm, 0, 4, (uint32_t)-42);
+    ulvm_store_memory64(&vm, 4, UINT64_C(0x400921FB54442D18));
+    output_length = 0;
+    ULVM_set_rom(&vm, program, sizeof(program));
+    ULVM_run(&vm, 100);
+    assert(!vm.faulted);
+    assert(output_length == strlen("  -423.14"));
+    assert(memcmp(output_buffer, "  -423.14", output_length) == 0);
+
+    ULVM_init(&vm, output_char, read_byte);
+    ULVM_set_rom(&vm, invalid_program, sizeof(invalid_program));
+    ULVM_run(&vm, 10);
+    assert(vm.faulted && vm.fault_opcode == 0x3B);
+}
 
 static void reset_pixels(void)
 {
@@ -196,6 +230,7 @@ static void test_save_load_opcodes(void)
         0x29, 0, 1, 3,       /* load r0, r1, r3 */
         0xFF                  /* exit */
     };
+
     UnilangVM vm;
     ULVM_init(&vm, output_char, read_byte);
     vm.rom = program;
@@ -250,6 +285,91 @@ static void test_save_load_opcodes(void)
     assert(!vm.faulted && vm.reg[2] == 0);
     for (unsigned i = 0; i < 4; i++) assert(vm.mem[i] == 0xAA);
     load_failure = 0;
+}
+
+static void test_indirect_control_flow(void)
+{
+    uint8_t call_program[] = {
+        0x40, 0, 0, 0, 0, 9, /* setreg r0, subroutine address */
+        0x38, 0,             /* callreg r0 */
+        0xFF,                /* exit */
+        0x40, 1, 0, 0, 0, 42,
+        0x11                 /* return */
+    };
+    UnilangVM vm;
+    ULVM_init(&vm, output_char, read_byte);
+    ULVM_set_rom(&vm, call_program, sizeof(call_program));
+    ULVM_run(&vm, 100);
+    assert(!vm.faulted && !vm.running && vm.reg[1] == 42 && vm.callsp == 0);
+
+    uint8_t jump_program[] = {
+        0x40, 0, 0, 0, 0, 14,
+        0x37, 0,
+        0x40, 1, 0, 0, 0, 99,
+        0xFF
+    };
+    ULVM_init(&vm, output_char, read_byte);
+    ULVM_set_rom(&vm, jump_program, sizeof(jump_program));
+    ULVM_run(&vm, 100);
+    assert(!vm.faulted && !vm.running && vm.reg[1] == 0);
+
+    uint8_t invalid_target[] = {
+        0x40, 0, 0, 0, 0, 0xFF,
+        0x37, 0,
+        0xFF
+    };
+    ULVM_init(&vm, output_char, read_byte);
+    ULVM_set_rom(&vm, invalid_target, sizeof(invalid_target));
+    ULVM_run(&vm, 100);
+    assert(vm.faulted && vm.fault_opcode == 0x37);
+
+    uint8_t overflow_program[] = {0x10, 0, 0, 0, 0}; /* call self */
+    ULVM_init(&vm, output_char, read_byte);
+    ULVM_set_rom(&vm, overflow_program, sizeof(overflow_program));
+    ULVM_run(&vm, 100);
+    assert(vm.faulted && vm.fault_opcode == 0x10 &&
+           vm.callsp == ULVM_CALLSTACK_SIZE);
+
+    uint8_t return_underflow[] = {0x11};
+    ULVM_init(&vm, output_char, read_byte);
+    ULVM_set_rom(&vm, return_underflow, sizeof(return_underflow));
+    ULVM_run(&vm, 10);
+    assert(vm.faulted && vm.fault_opcode == 0x11);
+}
+
+static void test_value_stack(void)
+{
+    uint8_t program[] = {
+        0x40, 0, 0, 0, 0, 123,
+        0x39, 0,
+        0x40, 0, 0, 0, 0, 0,
+        0x3A, 1,
+        0xFF
+    };
+    UnilangVM vm;
+    ULVM_init(&vm, output_char, read_byte);
+    ULVM_set_rom(&vm, program, sizeof(program));
+    ULVM_run(&vm, 100);
+    assert(!vm.faulted && !vm.running && vm.reg[1] == 123 && vm.valuesp == 0);
+
+    uint8_t underflow[] = {0x3A, 0, 0xFF};
+    ULVM_init(&vm, output_char, read_byte);
+    ULVM_set_rom(&vm, underflow, sizeof(underflow));
+    ULVM_run(&vm, 10);
+    assert(vm.faulted && vm.fault_opcode == 0x3A && vm.valuesp == 0);
+
+    uint8_t overflow[ULVM_VALUESTACK_SIZE * 2 + 1];
+    for (unsigned i = 0; i < ULVM_VALUESTACK_SIZE; i++)
+    {
+        overflow[i * 2] = 0x39;
+        overflow[i * 2 + 1] = 0;
+    }
+    overflow[ULVM_VALUESTACK_SIZE * 2] = 0x39;
+    ULVM_init(&vm, output_char, read_byte);
+    ULVM_set_rom(&vm, overflow, sizeof(overflow));
+    ULVM_run(&vm, 1000);
+    assert(vm.faulted && vm.fault_opcode == 0x39 &&
+           vm.valuesp == ULVM_VALUESTACK_SIZE);
 }
 
 static void test_audio_engine(void)
@@ -321,6 +441,7 @@ static void test_music_markers(void)
 
 int main(void)
 {
+    test_formatted_output();
     UnilangVM vm;
     ULVM_init(&vm, output_char, read_byte);
     vm.gfx_w = 8;
@@ -332,6 +453,8 @@ int main(void)
     test_clipped_string(&vm);
     test_clipped_blit(&vm);
     test_save_load_opcodes();
+    test_indirect_control_flow();
+    test_value_stack();
     test_audio_engine();
     test_music_markers();
     puts("VM feature tests passed");

@@ -3,15 +3,25 @@
 ## Current status
 
 The source is an experimental multi-file, VM-compatible port of an Arduboy
-city-builder. It uses ROM-backed tiles and keeps save data in RAM for the
-duration of a run; the VM does not provide EEPROM persistence.
+city-builder. It uses ROM-backed tiles and the VM host's save/load callbacks
+to persist the `GameState` structure across runs.
 
-The current compiler fails while generating a struct-member lvalue in this
-project, so the source does not compile yet. The checked-in
-`microcity.ulc` is retained as a reference artifact and may not match the
-current sources.
+Compile the project from the repository root with the compatibility define:
+
+```sh
+python compiler.py examples/microcity -o examples/microcity/microcity.ulc -D _WIN32=1
+C-interpreter/main examples/microcity/microcity.ulc
+```
+
+In the game, open the toolbar's Save/Load option. Choose Save to write the
+current city to the host's `.uls` file, or Load to restore it. A saved city is
+also loaded automatically at startup when one exists. On the SDL host, the
+save file is next to the `.ulc` file; see the root README for its format.
 
 Controls in the game: Up/Down/Left/Right move the cursor; A and B select or
 build.
 
-See the root [README](../../README.md#quick-start) for compiler and VM setup.
+The `_WIN32` define selects this port's VM `PROGMEM` compatibility macros,
+including ROM reads for bitmap, tile, font, and string data; it does not select
+a different graphics mode. MicroCity uses graphics flag 0 value `6`
+(monochrome 128x64), with keyboard flag 1 value `1`.

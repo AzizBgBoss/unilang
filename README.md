@@ -14,6 +14,8 @@ portable C VM with an SDL2 desktop host and embedded-target callbacks.
   desktop window
 - `examples/` — programs demonstrating games, graphics, numeric types, and
   multi-file projects; see [the examples index](examples/README.md)
+- `docs/` — navigable C-like language, bytecode, instruction, and VM host
+  references; start at [the documentation index](docs/README.md)
 
 ## Quick start
 
@@ -128,6 +130,15 @@ raw bytes.
 | 0x2A | `beep` | regfreq, regms | play a tone when audio flag 2 is 1 or 2 |
 | 0x2B | `audio_command` | command, rega, regb, regresult | issue an audio command (see builtins below) |
 | 0x2C | `audio_load` | regkind, regindex, regaddr, reglen, source, regresult | copy audio data from RAM (`source=0`) or ROM (`source=1`) |
+| 0x2D | `memcpy` | regdst, regsrc, reglen, source | copy RAM or ROM bytes into RAM, after range validation |
+| 0x2E | `memset` | regdst, regvalue, reglen | fill a VM RAM byte range, after range validation |
+| 0x2F | `fillscreen` | regcolor | fill the active framebuffer |
+| 0x31 | `fillcircle` | regx, regy, regradius, regcolor | fill a clipped circle |
+| 0x32 | `drawrect` | regx, regy, regw, regh, regcolor | draw a clipped outline rectangle |
+| 0x33-0x36 | `minreg`/`maxreg`/`absreg`/`mul64` | registers and signedness | integer min/max/absolute value and 32×32-bit product |
+| 0x37-0x38 | `jmpreg`/`callreg` | regtarget | validated indirect jump/call; call uses the bounded VM return stack |
+| 0x39-0x3A | `pushr`/`popr` | reg | push/pop a 32-bit value on a separate, bounded 64-entry value stack |
+| 0x3B | `outfmt` | addr, format, conversion, width, precision, flags | print a formatted integer, character, or binary32/binary64 value |
 | 0x40 | `setreg` | reg, val | reg = val |
 | 0x41 | `movreg` | dst, src | dst = src |
 | 0x42-0x44 | `loadreg8/16/32` | reg, addr | reg = mem at addr (zero-extended) |
@@ -160,13 +171,12 @@ operation selectors are `1` add, `2` subtract, `3` multiply, `4` divide,
 ```
 python -m pip install pycparser
 python compiler.py input.c -o output.ulc [-I dir] [-D NAME=value] [-O0]
-python compiler.py examples/microcity -o examples/microcity/microcity.ulc
+python compiler.py examples/microcity -o examples/microcity/microcity.ulc -D _WIN32=1
 ```
 
 Directory and multi-file inputs are supported. MicroCity is an experimental
-port; its current source hits a compiler limitation while generating a struct
-member lvalue and does not compile yet. The regression script reports it as a
-known skip.
+port; compile it with `_WIN32=1` to select its host-side `PROGMEM`
+compatibility macros. The regression script includes it using this define.
 
 It parses a **deliberately small subset of C-like syntax** with `pycparser`
 and emits `.ulc` bytecode directly (no separate assembler step). Codegen
@@ -222,12 +232,17 @@ live across statements.
 - Comparisons: `== != < > <= >=` — usable directly in `if`/`while`
   conditions, and also as expressions (`uint8_t b = a < c;` works).
 - Control flow: `if (...) { } else { }`, `while (...) { }`, `for (...) { }`
+- `switch` uses a ROM jump table for dense case ranges and a comparison chain
+  for sparse ranges; both preserve `default`, `break`, and fallthrough.
 - Functions: `uint32_t add(uint32_t a, uint32_t b) { return a + b; }` — see
   caveats below.
-- `printf("literal text\n");` and `printf("...%d...\n", expr);` — `%d`, `%i`,
-  `%u`, `%c`, `%s`, and `%%` are supported without width/precision modifiers.
-  `%d`/`%i` print signed values; floating-point values can be cast to an
-  integer for output (direct `%f` formatting is not implemented).
+- `printf("literal text\n", ...);` supports `%d`, `%i`, `%u`, `%o`, `%x`,
+  `%X`, `%c`, `%s`, `%%`, and floating-point `%f`, `%F`, `%e`, `%E`, `%g`,
+  `%G`. Numeric conversions support `-`, `+`, space, `#`, and `0` flags and
+  literal width/precision from 0 to 99; `h` and `hh` narrow integer
+  conversions. `%s` is supported without formatting modifiers. `*` width and
+  precision, `ll`, `l`, and `z` integer conversions, and other conversions
+  are rejected. Floating conversion uses the host C library's `snprintf`.
 - `exit();` — halts immediately (statement only, not an expression).
 - Comments: `// line` and `/* block */`, stripped before parsing
   (string/char literals containing `//`/`/*` are left alone).
@@ -242,30 +257,65 @@ live across statements.
   function-like macro call must fit on one line.
 - **C compatibility**: standard type names (`int`, `unsigned`, `short`,
   `long`, `uint8_t`..`uint32_t`, `size_t`, `_Bool`, `void`), `typedef`,
-  `enum`, `const` scalars (compile-time constants), pointers (`T *p`, `&x`,
+  `enum`, `const` scalars (compile-time constants), structs and unions with
+  shared union storage, pointers (`T *p`, `&x`,
   `*p`, `p[i]`, scaled pointer arithmetic, arrays decaying to pointers,
   pointer parameters), casts, `sizeof`, `?:`, unary `- + ! ~`, short-circuit
   `&&`/`||`, compound assignment (`+= <<= ...`), `++`/`--` on any lvalue,
   the comma operator, `do`/`while`, `switch`/`case`/`default`, `break`,
   `continue`, function prototypes, `static` globals, early `return` from
-  `main`, array initializers of any constant expression (`{0}` zero-fills),
+  `main`, `void` functions with bare `return;` or no explicit return, array
+  initializers of any constant expression (`{0}` zero-fills), and
   `char s[] = "text"`. Constant expressions are folded at compile time.
-- `printf` supports `%d %i %u %c %s %%` (no width/precision); also `puts`,
-  `putchar`, and C-style `rand()` (0..32767) besides `rand(min, max)`.
+- `printf` supports the numeric formats and modifiers listed above; also
+  `puts`, `putchar`, and C-style `rand()` (0..32767) besides `rand(min, max)`.
+- General variadic functions are rejected with a compiler diagnostic; `printf`
+  is handled by the compiler's fixed-format builtin, not the C varargs ABI.
 - **Compatibility notes**: the compiler supports a broader C-like subset used
   by the MicroCity project, including struct and bitfield access, multi-file
   directory inputs, AVR-style `pgmspace` shims, C++-style tag names, and
-  constant ROM arrays. MicroCity currently has a compiler limitation noted
-  above. The compiler still keeps the VM's simplified memory model: pointers
-  are byte-addressed, `const` ROM data is read-only, and functions are inlined
-  instead of recursively called.
+  constant ROM arrays. The compiler still keeps the VM's simplified memory
+  model: pointers are byte-addressed, `const` ROM data is read-only, and
+  functions are inlined instead of recursively called. Union members share
+  storage sized for the largest member; positional initialization initializes
+  the first union member. `goto` and
+  function-scoped labels are supported. `long double` maps to binary64 and
+  does not provide precision beyond `double`.
   `alloc N x;` and `MEMORY[a:b]` remain legacy non-C extensions.
 - **Builtins** for hardware access:
+  - `push(value)` and `pop()` — save and restore 32-bit values on the VM's
+    separate 64-entry value stack. `pop()` returns the most recently pushed
+    value. Overflow and underflow fault the VM; this stack is separate from
+    the return-address stack.
+  - `memcpy(dst, src, length)` and `memset(dst, value, length)` — bulk-copy
+    or fill a VM RAM range. Both return `dst`; `memcpy` also accepts a const
+    ROM array or string literal as its source. RAM ranges are validated before
+    any write, and overlapping RAM copies behave like `memmove`.
   - `flag(index, value);` — raw `flag` opcode. Statement only.
   - `setpixel(x, y, val);` — plots a pixel via the native `setpixel` opcode.
     `x`/`y` may be any supported integer width; `val` is passed as an 8-bit
     pixel value, which carries the RGB332 color in 8-bit graphics mode.
     Statement only.
+  - `fillrect(x, y, width, height, color);` and `fillscreen(color);` — fill
+    half-open rectangles and the whole active framebuffer. Coordinates are
+    clipped to the screen; non-positive rectangle dimensions draw nothing.
+  - `fillcircle(x, y, radius, color);` — fills an integer-radius circle,
+    including pixels whose centers are within the radius. Negative radii draw
+    nothing, and partially off-screen circles are clipped.
+  - `drawrect(x, y, width, height, color);` — draws the outline of a
+    width-by-height rectangle with its right and bottom edges at
+    `x + width - 1` and `y + height - 1`. Non-positive dimensions draw
+    nothing; each edge is clipped independently.
+  - `min(a, b)`, `max(a, b)`, and `abs(value)` — integer operations;
+    `min`/`max` follow the operands' signedness, and `abs` uses 32-bit
+    two's-complement behavior (so `abs(INT32_MIN)` remains `INT32_MIN`).
+    `mul64(a, b, &high, &low);` stores the 64-bit product as two 32-bit
+    words; signedness is selected from the input types.
+  - Signed right shift (`>>`) uses arithmetic shift for signed integer
+    operands and logical shift for unsigned operands.
+  - `sin`, `cos`, and `sqrt` take one floating-point argument; `atan2(y, x)`
+    takes two. Results use binary64, angles are in radians, and operations use
+    the C math library's floating-point behavior.
   - `drawchar(c, x, y[, color])` and
     `drawstring(text, x, y[, color])` — draw glyphs with the optional pixel
     color; the default color is `1` for existing programs.
@@ -280,6 +330,9 @@ live across statements.
   - `isflagsupported(flag, val)` — both arguments must be compile-time
     constants. Returns a value.
   - `sleep(ms);` — `ms` must be a constant (the opcode takes a literal).
+  - `gettime()` — returns the host's elapsed-time value in milliseconds.
+    Its resolution and epoch are host-dependent.
+  - `srand(seed);` — seeds the VM's deterministic pseudo-random generator.
   - `refreshscreen();` — flips the display and clears the framebuffer for
     the next frame. Call once per frame, after your `setpixel` calls.
   - `input(&name);` — reads external input into a variable.
@@ -362,6 +415,10 @@ optimized builds on all examples, plus `tools/fuzz_opt.py`). It does:
 - folding into `*regv`/`cmpregv`/`jcmpv` forms, loop rotation,
 - RAM repacking by variable lifetime.
 
+Programs using computed `switch` jump tables currently bypass this optimizer:
+its control-flow analysis cannot yet prove which indirect targets are reachable,
+so preserving the unoptimized code is safer than making unsound assumptions.
+
 The compiler also emits plain load/store for integer narrowing instead of
 `floatcast`, `x = x + 1` as `addregv`, and shifts/masks for division by
 powers of two. Typical result: 2-3.8x fewer VM instructions and about half
@@ -370,14 +427,19 @@ the bytecode size. Debug with `UNILANG_OPT_DEBUG=1` or
 
 Testing tools: `tools/headless.c` (deterministic host that prints a digest
 of the framebuffer/output; `cc -O2 -std=c11 -I C-interpreter tools/headless.c
--o tools/headless`; add `-wav out.wav` to render host audio) and
+-o tools/headless -lm`; add `-wav out.wav` to render host audio) and
 `tools/fuzz_opt.py` (random-program differential test, `--gcc` to also compare
 with gcc).
 
 ### Other limitations
 
-- 64-bit integer types (`long long`, `int64_t`, and `uint64_t`), `long double`,
-  unions, and direct `printf("%f", value)` formatting are not supported.
+- 64-bit integer types (`long long`, `int64_t`, and `uint64_t`), recursive
+  functions, and indirect function calls (such as calls through
+  function pointers) are not supported. Function calls must resolve to a
+  named function known to the compiler.
+- General C variadic declarations are rejected with a compiler diagnostic;
+  `printf` is a compiler builtin with the fixed conversions documented above,
+  not the C varargs ABI.
 - **Variable lifetime.** Without the optimizer (`-O0`) every declaration
   permanently owns its address. With it, variables and temporaries that are
   dead or never read are dropped and the rest of RAM is repacked by
@@ -457,6 +519,7 @@ UnilangVM vm;
 ULVM_init(&vm, my_outputchar, my_readbyte);   // required
 ULVM_set_graphics(&vm, my_setpixel, my_getpixel, my_refreshscreen,
                    my_enablegraphics, my_disablegraphics, my_clearscreen);
+ULVM_set_graphics_fast(&vm, my_fillrect_fast, my_blitrow_fast); // optional
 ULVM_set_keyboard(&vm, my_getkeyboard);
 ULVM_set_time(&vm, my_gettime, my_sleep);
 ULVM_set_input(&vm, my_input);
@@ -474,6 +537,9 @@ while (!ULVM_handlenextinstruction(&vm)) { /* runs until OP_EXIT */ }
   ROM-paged targets that isn't necessarily a flat pointer into RAM.
 - Any other callback left `NULL` makes that opcode a safe no-op / return-0
   — a program that never touches graphics needs none of the graphics hooks.
+- `ULVM_set_graphics_fast` optionally registers host bulk operations for
+  clipped rectangles and sprite rows. When omitted, the VM falls back to
+  `setpixel`; fast callbacks must apply the host's normal color format.
 - `save`/`load` callbacks receive a pointer to the selected VM RAM block and
   its byte length, and return nonzero only when the operation succeeds.
   Audio callbacks are host-owned; `audio_load` receives one validated SFX or

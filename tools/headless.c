@@ -45,6 +45,11 @@ static uint64_t hash_all = 1469598103934665603ull;
 static UnilangVM vm;
 static int count_instr;
 
+static uint16_t normalize_pixel_color(uint16_t c)
+{
+    return (gbits & 0x80) ? (c & (gbits == 0x82 ? 3 : 0xFF)) : gbits == 1 ? (c ? 1 : 0) : gbits == 4 ? (c & 3) : gbits == 8 ? (c & 0xFF) : (c & 0x7FFF);
+}
+
 static void advance_audio_ms(uint32_t ms)
 {
     if (!wav_path || wav_error)
@@ -94,7 +99,27 @@ static uint8_t read_byte(uint32_t a) { return a < (uint32_t)romsize ? rom[a] : 0
 static void set_pixel(uint8_t x, uint8_t y, uint16_t c)
 {
     if (!gbits || x >= gw || y >= gh) return;
-    fb[y * 256 + x] = (gbits & 0x80) ? (c & (gbits == 0x82 ? 3 : 0xFF)) : gbits == 1 ? (c ? 1 : 0) : gbits == 4 ? (c & 3) : gbits == 8 ? (c & 0xFF) : (c & 0x7FFF);
+    fb[y * 256 + x] = normalize_pixel_color(c);
+}
+static void fill_rect_fast(uint8_t x, uint8_t y, uint16_t w, uint16_t h, uint16_t c)
+{
+    if (!gbits || x >= gw || y >= gh) return;
+    if (w > gw - x) w = (uint16_t)(gw - x);
+    if (h > gh - y) h = (uint16_t)(gh - y);
+    c = normalize_pixel_color(c);
+    for (uint16_t row = 0; row < h; row++)
+        for (uint16_t col = 0; col < w; col++)
+            fb[(size_t)(y + row) * 256 + x + col] = c;
+}
+static void blit_row_fast(uint8_t x, uint8_t y, uint16_t count,
+                          const uint16_t *colors, const uint8_t *opaque)
+{
+    if (!gbits || x >= gw || y >= gh) return;
+    if (count > gw - x) count = (uint16_t)(gw - x);
+    size_t start = (size_t)y * 256 + x;
+    for (uint16_t col = 0; col < count; col++)
+        if (opaque[col])
+            fb[start + col] = normalize_pixel_color(colors[col]);
 }
 static uint16_t get_pixel(uint8_t x, uint8_t y) { return (!gbits || x >= gw || y >= gh) ? 0 : fb[y * 256 + x]; }
 static void clear_screen(void) { memset(fb, 0, sizeof fb); }
@@ -275,6 +300,9 @@ int main(int argc, char **argv)
     uniaudio_init(&audio_engine);
     ULVM_set_rom(&vm, rom, (uint32_t)romsize);
     ULVM_set_graphics(&vm, set_pixel, get_pixel, refresh, enable_gfx, disable_gfx, clear_screen);
+#ifndef ULVM_DISABLE_GRAPHICS_FAST
+    ULVM_set_graphics_fast(&vm, fill_rect_fast, blit_row_fast);
+#endif
     ULVM_set_keyboard(&vm, get_keys);
     ULVM_set_time(&vm, get_time, do_sleep);
     ULVM_set_flagsupport(&vm, flag_ok);
