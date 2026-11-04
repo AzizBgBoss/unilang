@@ -24,14 +24,13 @@ python compiler.py examples/network/pong_multiplayer.c -D PONG_HOST=0 -o /tmp/po
 - `udp_ports.c` demonstrates independent local and remote ports. Start one
   copy with `-D LOCAL_PORT=9000 -D REMOTE_PORT=9001`, and the other with those
   values reversed.
-- `pong_multiplayer.c` is a small authoritative host/join game. The host
-  announces its session on startup. **A** toggles discovery, **V** rejects the next peer the host accepts,
-  **Enter** disconnects the selected peer, and left/right selects a peer. A
-  joiner listens for sessions by default, **A** toggles listening, arrows
-  select a discovered session, and **V** joins. The host can manage seven
-  remote handles plus its local player, for eight total players; extra accepted
-  clients are closed. The first remote player controls the opposing Pong
-  paddle and additional connected players observe the same game state.
+- `pong_multiplayer.c` supports single player, hosting, and joining. In the
+  join list, Up/Down selects a discovered game or the manual IP entry. The IP
+  editor changes the selected octet with Up/Down and moves between octets with
+  Left/Right. A or Start confirms; B or Select goes back. The host runs the
+  match and sends its state to one joiner. On desktop, C maps to A, V to B,
+  Enter to Start, and Backspace to Select. Run the SDL host with `--net` to
+  enable networking.
 
 The test smoke source is compiled by `python tools/regress.py`. Run it through
 the headless host after building that host with your C compiler:

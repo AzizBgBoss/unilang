@@ -3,10 +3,9 @@
 from pathlib import Path
 
 source = (Path(__file__).resolve().parents[1] / "examples/network/pong_multiplayer.c").read_text()
-assert "connection_status == NET_CONNECTED || connection_status == NET_READY" in source
-loop_start = source.index("i = 0;\n        while (i < count)")
-loop_end = source.index("#else", loop_start)
-loop = source[loop_start:loop_end]
-assert "count = count - 1;\n                continue;" in loop
-assert "i = i + 1;" in loop
+assert "return s == NET_CONNECTED || s == NET_READY;" in source
+assert "drawstring(tmp, 10, ry, c);" in source
+assert "drawstring(tmp, 76, ry, cDim);" in source
+assert "uint32_t digits = put_num(tmp, 0, ipo[k]);" in source
+assert "drawchar('.', ox + digits * 4, 29, cDim);" in source
 print("Pong networking contract passed")
