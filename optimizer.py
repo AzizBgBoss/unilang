@@ -65,6 +65,15 @@ ROLES = {
     "outfmt": "Miiiii",
     "save": "rrw", "load": "rrw", "beep": "rr",
     "audio_command": "irrw", "audio_load": "rrrriw", "memcpy": "rrri", "memset": "rrr",
+    # Networking builtins are side-effecting VM operations; their register
+    # arguments are read and the final result register is written.
+    "net_open": "rrrrrw", "net_status": "rw", "net_send": "rrrw",
+    "net_recv": "rrrw", "net_accept": "rw", "net_close": "rw",
+    "net_option": "rrrw", "net_avail": "rw", "net_localip": "rw",
+    "net_peer": "rrrw", "net_lasterror": "w", "net_http": "rrrrrrw",
+    "net_http_status": "rw", "net_discovery": "rrrrw",
+    "net_discovery_count": "w", "net_discovery_get": "rrrrrw",
+    "net_localport": "rw",
     "minreg": "rrwi", "maxreg": "rrwi", "absreg": "rw", "mul64": "rrwwi",
     "setreg": "wi", "movreg": "wr",
     "loadreg8": "wm", "loadreg16": "wm", "loadreg32": "wm",

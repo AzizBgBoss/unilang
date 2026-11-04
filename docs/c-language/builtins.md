@@ -16,6 +16,62 @@ must be compile-time constants.
 `isflagsupported(index, value)` returns whether the host supports a requested
 mode; both arguments must be compile-time constants.
 
+### Networking
+
+Networking builtins lower directly to the optional VM opcodes. Arguments are
+integer values unless stated otherwise. Handles are signed `int`-like values;
+`-1` indicates failure. `netopen(kind, local_port, remote_port, host_addr,
+flags)` takes a VM RAM address for a NUL-terminated host string (use a
+`char *` pointing into a RAM array). Kinds are `NET_TCP=1`, `NET_UDP=2`, and
+`NET_HTTP=3`; zero local port requests a host-selected port.
+
+`netstatus(handle)`, `netsend(handle, buffer_addr, length)`,
+`netrecv(handle, buffer_addr, capacity)`, `netaccept(listener)`,
+`netclose(handle)`, `netoption(handle, option, value)`,
+`netavail(handle)`, `netlocalip(buffer_addr)`,
+`netpeer(handle, host_buffer_addr, port_addr)`, and `netlasterror()` are also
+available. `netrecv` never waits and returns zero when no bytes are ready.
+`netpeer` writes a NUL-terminated host string and a big-endian 16-bit port.
+`netlocalport(handle)` reports the actual local port, including a port chosen
+by the OS when zero was passed to `netopen`.
+`netlocalip`/`netpeer` return 1 on success; close/option return 1 on success.
+Open returns a handle. Send and receive return byte counts. Failure is
+`0xffffffff` (C `-1`) except `netstatus` (zero for closed/invalid) and
+`netavail` (zero if invalid). `netlasterror` uses NONE=0, INVALID_HANDLE=1,
+BAD_KIND=2, NO_BUFFER=3, TIMEOUT=4, IO=5, UNSUPPORTED=6, LIMIT=7.
+
+The capability flag is 15: `isflagsupported(15, 1)` reports whether the host
+installed networking with `ULVM_set_net`; `isflagsupported(15, 0)` is always
+true. Limits are 8 handles and 2048 bytes per buffer/transfer. Option IDs are
+timeout-ms=1, TCP_NODELAY=2, frame-size=3, HTTP headers=4, and UDP
+broadcast=5. `NET_OPEN_LISTEN=1` opens a TCP listener and
+`NET_OPEN_BROADCAST=2` enables UDP broadcast at open.
+
+`nethttp(handle, method, path_addr, headers_addr, body_addr, body_length)`
+starts an HTTP request on an HTTP handle. `NET_HTTP_GET=1` and
+`NET_HTTP_POST=2` select the method. Path and headers are NUL-terminated RAM
+strings; the body is a RAM byte range (pass `NULL, 0` for no body).
+`nethttpstatus(handle)` returns zero while pending and then the HTTP status
+code. Read response bytes using `netavail` and `netrecv`.
+
+LAN discovery is controlled by `netdiscovery(flags, game_port, game_id,
+name_addr)`. `NET_DISCOVERY_LISTEN=1` listens and `NET_DISCOVERY_ANNOUNCE=2`
+also broadcasts an announcement; pass their bitwise OR to do both, or zero to
+stop. Names are NUL-terminated RAM strings, up to 31 bytes. The fixed UDP
+discovery port is `NET_DISCOVERY_PORT=45678`. `netdiscoverycount()` returns
+the nonexpired session count. `netdiscoveryget(index, name_addr, host_addr,
+port_addr, game_id_addr)` writes a session's name, numeric address, big-endian
+port, and game ID to RAM; it returns 1 on success.
+
+The SDL desktop host supports TCP, UDP, HTTP and TCP framing over numeric
+IPv4/IPv6 addresses; DNS names and URL strings are rejected. Its HTTP
+implementation uses plain HTTP over TCP; HTTPS/TLS is unsupported. HTTP status
+is the parsed three-digit code, zero while pending, and zero if no status line
+was received. A response is buffered up to 2048 bytes; chunked decoding is not
+implemented. The in-memory backend supports UDP only. Desktop timeout options
+are checked during polling. See [host networking](../vm/host-integration.md#optional-networking)
+for details and the [network examples](../../examples/network/README.md).
+
 ### Flag 0: graphics
 
 | Value | Mode |

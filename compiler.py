@@ -118,6 +118,23 @@ OPS = {
     "beep":            (0x2A, [1, 1]),                 # regfreq, regms
     "audio_command":   (0x2B, [1, 1, 1, 1]),           # command, rega, regb, regresult
     "audio_load":      (0x2C, [1, 1, 1, 1, 1, 1]),     # kind, index, regaddr, reglen, source, regresult
+    "net_open":        (0x90, [1, 1, 1, 1, 1, 1]),     # regkind, reglocal, regremote, reghostaddr, regflags, regresult
+    "net_status":      (0x91, [1, 1]),
+    "net_send":        (0x92, [1, 1, 1, 1]),
+    "net_recv":        (0x93, [1, 1, 1, 1]),
+    "net_accept":      (0x94, [1, 1]),
+    "net_close":       (0x95, [1, 1]),
+    "net_option":      (0x96, [1, 1, 1, 1]),
+    "net_avail":       (0x97, [1, 1]),
+    "net_localip":     (0x98, [1, 1]),
+    "net_peer":        (0x99, [1, 1, 1, 1]),
+    "net_lasterror":   (0x9A, [1]),
+    "net_http":        (0x9B, [1, 1, 1, 1, 1, 1, 1]),
+    "net_http_status": (0x9C, [1, 1]),
+    "net_discovery":   (0x9D, [1, 1, 1, 1, 1]),
+    "net_discovery_count": (0x9E, [1]),
+    "net_discovery_get": (0x9F, [1, 1, 1, 1, 1, 1]),
+    "net_localport": (0xA0, [1, 1]),
     "memcpy":          (0x2D, [1, 1, 1, 1]),           # regdst, regsrc, reglen, source (0=RAM,1=ROM)
     "memset":          (0x2E, [1, 1, 1]),              # regdst, regvalue, reglen
     "fillscreen":      (0x2F, [1]),                    # regcolor
@@ -357,7 +374,23 @@ class Compiler:
         self.typedef_formats = {}    # user scalar typedef name -> numeric format
         self.structs = {}            # struct tag or typedef name -> {"size": n, "fields": {name: {"offset": o, "size": s}}}
         self.struct_defs = {}        # struct tag or typedef name -> original Struct AST node
-        self.constants = {}          # enum constants and const scalars -> int value
+        self.constants = {
+            "ULVM_FLAG_NETWORK": 15,
+            "NET_TCP": 1, "NET_UDP": 2, "NET_HTTP": 3,
+            "NET_CLOSED": 0, "NET_LISTENING": 1, "NET_CONNECTING": 2,
+            "NET_CONNECTED": 3, "NET_READY": 4,
+            "NET_OPEN_LISTEN": 1, "NET_OPEN_BROADCAST": 2,
+            "NET_HTTP_GET": 1, "NET_HTTP_POST": 2,
+            "NET_DISCOVERY_LISTEN": 1, "NET_DISCOVERY_ANNOUNCE": 2,
+            "NET_DISCOVERY_PORT": 45678,
+            "NET_ERR_NONE": 0, "NET_ERR_INVALID_HANDLE": 1,
+            "NET_ERR_BAD_KIND": 2, "NET_ERR_NO_BUFFER": 3,
+            "NET_ERR_TIMEOUT": 4, "NET_ERR_IO": 5,
+            "NET_ERR_UNSUPPORTED": 6, "NET_ERR_LIMIT": 7,
+            "NET_OPT_TIMEOUT_MS": 1, "NET_OPT_TCP_NODELAY": 2,
+            "NET_OPT_FRAME_SIZE": 3, "NET_OPT_HTTP_HEADERS": 4,
+            "NET_OPT_UDP_BROADCAST": 5,
+        }          # shared builtin constants plus enum constants and const scalars
         self.ptr_elem = {}           # address of a pointer variable -> pointee byte size
         self.array_by_addr = {}      # base address of a RAM array -> element byte size
         self.var_types = {}          # variable name -> declared type AST node
@@ -2174,6 +2207,8 @@ class Compiler:
                 return self.gen_getpixel(node)
             if name == "isflagsupported":
                 return self.gen_isflagsupported(node)
+            if name.startswith("net"):
+                return self.gen_network_builtin(node, name)
             if name == "rand":
                 return self.gen_rand(node)
             if name == "numtostr":
@@ -2546,6 +2581,82 @@ class Compiler:
         self.emit("isflagsupported", flag, val, RA)
         dest = self.alloc_temp(1)
         self.emit_store(RA, dest, 1)
+        return dest
+
+    def gen_network_builtin(self, call, name):
+        # Network opcodes use register operands. Resolve every source first so
+        # evaluating a later argument cannot clobber an earlier register.
+        specs = {
+            "netopen": ("net_open", 5, (0, 1, 2, 3, 4)),
+            "netstatus": ("net_status", 1, (0,)),
+            "netsend": ("net_send", 3, (0, 1, 2)),
+            "netrecv": ("net_recv", 3, (0, 1, 2)),
+            "netaccept": ("net_accept", 1, (0,)),
+            "netclose": ("net_close", 1, (0,)),
+            "netoption": ("net_option", 3, (0, 1, 2)),
+            "netavail": ("net_avail", 1, (0,)),
+            "netlocalip": ("net_localip", 1, (0,)),
+            "netpeer": ("net_peer", 3, (0, 1, 2)),
+            "netlasterror": ("net_lasterror", 0, ()),
+            "nethttp": ("net_http", 6, (0, 1, 2, 3, 4, 5)),
+            "nethttpstatus": ("net_http_status", 1, (0,)),
+            "netdiscovery": ("net_discovery", 4, (0, 1, 2, 3)),
+            "netdiscoverycount": ("net_discovery_count", 0, ()),
+            "netdiscoveryget": ("net_discovery_get", 5, (0, 1, 2, 3, 4)),
+            "netlocalport": ("net_localport", 1, (0,)),
+        }
+        if name not in specs:
+            raise NotImplementedError(f"unknown networking builtin '{name}'")
+        opcode, argc, arg_regs = specs[name]
+        args = call.args.exprs if call.args else []
+        if len(args) != argc:
+            raise NotImplementedError(f"{name}() takes exactly {argc} argument(s)")
+        pointer_args = {
+            "netopen": (3,), "netsend": (1,), "netrecv": (1,),
+            "netlocalip": (0,), "netpeer": (1, 2),
+            "nethttp": (2, 3, 4),
+            "netdiscovery": (3,), "netdiscoveryget": (1, 2, 3, 4),
+        }.get(name, ())
+        for i, arg in enumerate(args):
+            if self.expr_float_size(arg):
+                raise NotImplementedError(f"{name}() does not accept floating-point arguments")
+            arg_type = self.resolve_type_for_expr(arg) or self.expr_type(arg)
+            arg_is_pointer = isinstance(arg, c_ast.UnaryOp) and arg.op == "&"
+            arg_is_pointer = arg_is_pointer or (
+                isinstance(arg, c_ast.ID) and
+                (arg.name in self.array_elem_bytes or arg.name in self.const_arrays)
+            )
+            arg_is_pointer = arg_is_pointer or isinstance(arg_type, (c_ast.PtrDecl, c_ast.ArrayDecl))
+            arg_is_pointer = arg_is_pointer or (
+                isinstance(arg_type, c_ast.TypeDecl)
+                and isinstance(arg_type.type, (c_ast.PtrDecl, c_ast.ArrayDecl))
+            )
+            if i in pointer_args:
+                optional_pointer = ((name == "nethttp" and i == 4) or
+                                    (name == "netopen" and i == 3) or
+                                    (name == "netdiscovery" and i == 3))
+                if optional_pointer and (
+                    (isinstance(arg, c_ast.ID) and arg.name in ("NULL", "nullptr")) or
+                    self.try_const(arg) == 0
+                ):
+                    continue
+                if not arg_is_pointer:
+                    raise NotImplementedError(f"{name}() argument {i + 1} must be a pointer or array")
+                if self.expr_is_rom(arg):
+                    raise NotImplementedError(f"{name}() buffer arguments must point to VM RAM")
+                self.check_not_rom(arg)
+            elif arg_is_pointer:
+                raise NotImplementedError(f"{name}() argument {i + 1} must be an integer value")
+        values = [self.gen_expr(arg) for arg in args]
+        for value, reg in zip(values, arg_regs):
+            self.emit_load(value, self.addr_size(value), reg)
+        result_reg = 5
+        operands = list(arg_regs) + [result_reg]
+        if name == "netlasterror":
+            operands = [result_reg]
+        self.emit(opcode, *operands)
+        dest = self.alloc_temp(INT_SIZE)
+        self.emit_store(result_reg, dest, INT_SIZE)
         return dest
 
     def gen_rand(self, call):

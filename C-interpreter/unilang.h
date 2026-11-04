@@ -215,6 +215,23 @@ enum OP_CODES
     OP_BEEP,             // start a host-side tone - parameters: regfreq(1), regms(1)
     OP_AUDIO_COMMAND,    // send a host audio command - parameters: command(1), rega(1), regb(1), regresult(1)
     OP_AUDIO_LOAD,       // copy audio data to the host - parameters: regkind(1), regindex(1), regaddr(1), reglen(1), source(1), regresult(1)
+    OP_NET_OPEN = 0x90,  // open a host network handle - parameters: regkind(1), reglocal(1), regremote(1), reghostaddr(1), regflags(1), regresult(1)
+    OP_NET_STATUS,       // query a handle state - parameters: reghandle(1), regresult(1)
+    OP_NET_SEND,         // send memory bytes through a handle - parameters: reghandle(1), regaddr(1), reglen(1), regresult(1)
+    OP_NET_RECV,         // receive bytes into VM memory - parameters: reghandle(1), regaddr(1), regcap(1), regresult(1)
+    OP_NET_ACCEPT,       // accept a peer on a listening handle - parameters: reghandle(1), regresult(1)
+    OP_NET_CLOSE,        // close a handle - parameters: reghandle(1), regresult(1)
+    OP_NET_OPTION,       // set a handle option - parameters: reghandle(1), regoption(1), regvalue(1), regresult(1)
+    OP_NET_AVAIL,        // how many bytes are pending - parameters: reghandle(1), regresult(1)
+    OP_NET_LOCALIP,      // store the local IP string at regaddr - parameters: regaddr(1), regresult(1)
+    OP_NET_PEER,         // copy the peer host/port into VM memory - parameters: reghandle(1), reghostaddr(1), regportaddr(1), regresult(1)
+    OP_NET_LASTERROR,    // get the last network error - parameters: regresult(1)
+    OP_NET_HTTP_REQUEST = 0x9B, // parameters: reghandle, regmethod, regpath, regheaders, regbody, reglen, regresult
+    OP_NET_HTTP_STATUS,  // parameters: reghandle, regresult
+    OP_NET_DISCOVERY,    // parameters: regflags, regport, reggameid, regnameaddr, regresult
+    OP_NET_DISCOVERY_COUNT, // parameters: regresult
+    OP_NET_DISCOVERY_GET, // parameters: regindex, regnameaddr, reghostaddr, regportaddr, reggameidaddr, regresult
+    OP_NET_LOCALPORT = 0xA0, // parameters: reghandle, regresult
     OP_MEMCPY,           // copy VM memory to RAM or ROM to RAM; validates ranges before copying - parameters: regdst(1), regsrc(1), reglen(1), source(1) [0=RAM,1=ROM]
     OP_MEMSET,           // fill a VM memory range; validates the range before writing - parameters: regdst(1), regvalue(1), reglen(1)
     OP_FILL_SCREEN = 0x2F, // fill the active framebuffer - parameters: regcolor(1)
@@ -327,6 +344,135 @@ typedef void     (*vm_beep)(uint32_t frequency, uint32_t duration_ms);
 typedef uint32_t (*vm_audio_command)(uint8_t command, uint32_t a, uint32_t b);
 typedef int      (*vm_audio_load)(uint8_t kind, uint8_t index, const uint8_t *data, uint32_t len);
 
+#define ULVM_NET_MAX_HANDLES 8u
+#define ULVM_NET_MAX_BUFFER 2048u
+#define ULVM_NET_MAX_HOST 64u
+#define ULVM_NET_MAX_TRANSFER ULVM_NET_MAX_BUFFER
+#define ULVM_NET_DEFAULT_LOCAL_PORT 0u
+#define ULVM_NET_OPEN_LISTEN 1u
+#define ULVM_NET_OPEN_BROADCAST 2u
+#define ULVM_NET_DISCOVERY_PORT 45678u
+#define ULVM_NET_MAX_HTTP_HEADERS 512u
+#define ULVM_NET_MAX_SESSIONS 8u
+#define ULVM_NET_DISCOVERY_TTL_MS 5000u
+#define ULVM_NET_DISCOVERY_LISTEN 1u
+#define ULVM_NET_DISCOVERY_ANNOUNCE 2u
+
+enum ULVM_NET_KIND
+{
+    ULVM_NET_KIND_NONE = 0,
+    ULVM_NET_KIND_TCP = 1,
+    ULVM_NET_KIND_UDP = 2,
+    ULVM_NET_KIND_HTTP = 3
+};
+
+enum ULVM_NET_STATUS
+{
+    ULVM_NET_STATUS_CLOSED = 0,
+    ULVM_NET_STATUS_LISTENING = 1,
+    ULVM_NET_STATUS_CONNECTING = 2,
+    ULVM_NET_STATUS_CONNECTED = 3,
+    ULVM_NET_STATUS_READY = 4
+};
+
+enum ULVM_NET_ERRORS
+{
+    ULVM_NET_ERR_NONE = 0,
+    ULVM_NET_ERR_INVALID_HANDLE,
+    ULVM_NET_ERR_BAD_KIND,
+    ULVM_NET_ERR_NO_BUFFER,
+    ULVM_NET_ERR_TIMEOUT,
+    ULVM_NET_ERR_IO,
+    ULVM_NET_ERR_UNSUPPORTED,
+    ULVM_NET_ERR_LIMIT
+};
+
+enum ULVM_NET_OPTIONS
+{
+    ULVM_NET_OPT_TIMEOUT_MS = 1,
+    ULVM_NET_OPT_TCP_NODELAY = 2,
+    ULVM_NET_OPT_FRAME_SIZE = 3,
+    ULVM_NET_OPT_HTTP_HEADERS = 4,
+    ULVM_NET_OPT_UDP_BROADCAST = 5
+};
+
+enum ULVM_NET_HTTP_METHOD
+{
+    ULVM_NET_HTTP_GET = 1,
+    ULVM_NET_HTTP_POST = 2
+};
+
+typedef struct ULVMNetHandle
+{
+    uint8_t active;
+    uint8_t kind;
+    uint8_t status;
+    uint8_t flags;
+    uint16_t local_port;
+    uint16_t remote_port;
+    uint32_t last_error;
+    uint8_t peer_host[ULVM_NET_MAX_HOST];
+    uint16_t peer_port;
+    uint16_t http_status;
+    uint32_t timeout_ms;
+    uint16_t frame_size;
+    char http_headers[ULVM_NET_MAX_HTTP_HEADERS];
+    uint8_t rx[ULVM_NET_MAX_BUFFER];
+    uint32_t rx_len;
+    uint8_t tx[ULVM_NET_MAX_BUFFER];
+    uint32_t tx_len;
+    void *host_data;
+} ULVMNetHandle;
+
+struct ULVMNet;
+
+typedef struct ULVMNetOps
+{
+    int (*open)(void *context, ULVMNetHandle *handle, uint8_t kind,
+                uint16_t local_port, const char *remote_host,
+                uint16_t remote_port, uint32_t flags);
+    void (*poll)(void *context, ULVMNetHandle *handle);
+    int (*send)(void *context, ULVMNetHandle *handle, const void *data, uint32_t len);
+    int (*recv)(void *context, ULVMNetHandle *handle, void *dest, uint32_t cap);
+    int (*accept)(void *context, ULVMNetHandle *listener, ULVMNetHandle *peer);
+    int (*option)(void *context, ULVMNetHandle *handle, uint8_t option, uint32_t value);
+    int (*http_request)(void *context, ULVMNetHandle *handle, uint8_t method,
+                        const char *path, const char *headers,
+                        const void *body, uint32_t body_len);
+    void (*close)(void *context, ULVMNetHandle *handle);
+    int (*peer)(void *context, ULVMNetHandle *handle, char *host,
+                size_t host_size, uint16_t *port);
+    int (*localip)(void *context, char *address, size_t address_size);
+    int (*discovery)(void *context, struct ULVMNet *net, uint8_t flags,
+                     uint16_t game_port, uint32_t game_id, const char *name);
+    void (*shutdown)(void *context, struct ULVMNet *net);
+    void (*service)(void *context, struct ULVMNet *net);
+} ULVMNetOps;
+
+typedef struct ULVMNetSession
+{
+    uint8_t active;
+    char name[32];
+    char host[ULVM_NET_MAX_HOST];
+    uint16_t port;
+    uint32_t game_id;
+    uint32_t last_seen_ms;
+} ULVMNetSession;
+
+typedef struct ULVMNet
+{
+    ULVMNetHandle handles[ULVM_NET_MAX_HANDLES];
+    uint32_t last_error;
+    char local_ip[32];
+    const ULVMNetOps *ops;
+    void *ops_context;
+    uint8_t discovery_flags;
+    uint16_t discovery_game_port;
+    uint32_t discovery_game_id;
+    char discovery_name[32];
+    ULVMNetSession sessions[ULVM_NET_MAX_SESSIONS];
+} ULVMNet;
+
 #define ULVM_AUDIO_LOAD_MAX 68
 #define ULVM_AUDIO_SFX_BYTES (4u + 32u * 2u)
 #define ULVM_AUDIO_MUSIC_BYTES 4u
@@ -350,6 +496,7 @@ enum ULVM_AUDIO_DATA_KINDS
 
 #define ULVM_FLAG_NUM 16
 #define ULVM_FLAG_SIZE 4
+#define ULVM_FLAG_NETWORK 15u
 
 #ifndef ULVM_MEM_SIZE
 #define ULVM_MEM_SIZE 64 // in bytes
@@ -402,6 +549,7 @@ struct UnilangVM
     vm_beep beep;
     vm_audio_command audio_command;
     vm_audio_load audio_load;
+    ULVMNet *net;
 
     uint32_t rand_state;
     uint16_t gfx_w, gfx_h;
@@ -490,6 +638,432 @@ static inline void ULVM_set_input(UnilangVM *vm, vm_input input)
 static inline void ULVM_set_flagsupport(UnilangVM *vm, vm_isflagsupported isflagsupported)
 {
     vm->isflagsupported = isflagsupported;
+}
+
+static inline void ULVM_set_net(UnilangVM *vm, ULVMNet *net)
+{
+    vm->net = net;
+}
+
+static inline void ULVM_net_set_ops(ULVMNet *net, const ULVMNetOps *ops, void *context)
+{
+    if (!net) return;
+    net->ops = ops;
+    net->ops_context = context;
+}
+
+static inline void ULVM_net_init(ULVMNet *net)
+{
+    if (!net)
+        return;
+    memset(net, 0, sizeof(*net));
+    snprintf(net->local_ip, sizeof(net->local_ip), "127.0.0.1");
+}
+
+static inline const ULVMNetHandle *ulvm_net_get_handle(const ULVMNet *net, int handle)
+{
+    if (!net || handle < 0 || (uint32_t)handle >= ULVM_NET_MAX_HANDLES)
+        return NULL;
+    return &net->handles[handle];
+}
+
+static inline int ULVM_net_open(ULVMNet *net, uint8_t kind, uint16_t local_port,
+                                const char *remote_host, uint16_t remote_port, uint32_t flags)
+{
+    if (!net)
+        return -1;
+    if (kind < ULVM_NET_KIND_TCP || kind > ULVM_NET_KIND_HTTP)
+    {
+        net->last_error = ULVM_NET_ERR_BAD_KIND;
+        return -1;
+    }
+
+    if (!net->ops && kind != ULVM_NET_KIND_UDP)
+    {
+        net->last_error = ULVM_NET_ERR_UNSUPPORTED;
+        return -1;
+    }
+
+    for (uint32_t i = 0; i < ULVM_NET_MAX_HANDLES; ++i)
+    {
+        ULVMNetHandle *slot = &net->handles[i];
+        if (slot->active)
+            continue;
+        memset(slot, 0, sizeof(*slot));
+        slot->active = 1;
+        slot->kind = kind;
+        slot->flags = (uint8_t)flags;
+        slot->local_port = local_port;
+        slot->remote_port = remote_port;
+        slot->status = ULVM_NET_STATUS_READY;
+        if (remote_host && *remote_host)
+        {
+            if (strlen(remote_host) >= sizeof(slot->peer_host))
+            {
+                memset(slot, 0, sizeof(*slot));
+                net->last_error = ULVM_NET_ERR_NO_BUFFER;
+                return -1;
+            }
+            strncpy((char *)slot->peer_host, remote_host, sizeof(slot->peer_host) - 1);
+            slot->peer_host[sizeof(slot->peer_host) - 1] = '\0';
+        }
+        if (net->ops)
+        {
+            if (!net->ops->open || !net->ops->open(net->ops_context, slot, kind,
+                                                   local_port, remote_host,
+                                                   remote_port, flags))
+            {
+                net->last_error = slot->last_error ? slot->last_error : ULVM_NET_ERR_IO;
+                memset(slot, 0, sizeof(*slot));
+                return -1;
+            }
+        }
+        net->last_error = ULVM_NET_ERR_NONE;
+        return (int)i;
+    }
+
+    net->last_error = ULVM_NET_ERR_LIMIT;
+    return -1;
+}
+
+static inline uint32_t ULVM_net_avail(const ULVMNet *net, int handle)
+{
+    ULVMNetHandle *slot = (ULVMNetHandle *)ulvm_net_get_handle(net, handle);
+    if (slot && slot->active && net->ops && net->ops->poll)
+        net->ops->poll(net->ops_context, slot);
+    if (slot && slot->last_error && net) ((ULVMNet *)net)->last_error = slot->last_error;
+    if (slot && slot->active && slot->frame_size)
+    {
+        if (slot->rx_len < 2) return 0;
+        uint32_t frame_len = ((uint32_t)slot->rx[0] << 8) | slot->rx[1];
+        if (frame_len > slot->frame_size) return 0;
+        return slot->rx_len >= frame_len + 2u ? frame_len : 0u;
+    }
+    return slot ? slot->rx_len : 0u;
+}
+
+static inline int ULVM_net_close(ULVMNet *net, int handle)
+{
+    if (!net)
+        return -1;
+    ULVMNetHandle *slot = (ULVMNetHandle *)ulvm_net_get_handle(net, handle);
+    if (!slot || !slot->active)
+    {
+        net->last_error = ULVM_NET_ERR_INVALID_HANDLE;
+        return -1;
+    }
+    if (net->ops && net->ops->close)
+        net->ops->close(net->ops_context, slot);
+    slot->active = 0;
+    slot->status = ULVM_NET_STATUS_CLOSED;
+    slot->rx_len = 0;
+    slot->tx_len = 0;
+    slot->last_error = ULVM_NET_ERR_NONE;
+    net->last_error = ULVM_NET_ERR_NONE;
+    return 1;
+}
+
+static inline void ULVM_net_shutdown(ULVMNet *net)
+{
+    if (!net) return;
+    for (uint32_t i = 0; i < ULVM_NET_MAX_HANDLES; ++i)
+        if (net->handles[i].active)
+            ULVM_net_close(net, (int)i);
+    if (net->ops && net->ops->shutdown)
+        net->ops->shutdown(net->ops_context, net);
+}
+
+static inline int ULVM_net_discovery(ULVMNet *net, uint8_t flags, uint16_t game_port,
+                                     uint32_t game_id, const char *name)
+{
+    if (!net || !net->ops || !net->ops->discovery)
+    { if (net) net->last_error = ULVM_NET_ERR_UNSUPPORTED; return -1; }
+    if (flags & (uint8_t)~(ULVM_NET_DISCOVERY_LISTEN | ULVM_NET_DISCOVERY_ANNOUNCE))
+    { net->last_error = ULVM_NET_ERR_BAD_KIND; return -1; }
+    if ((flags & ULVM_NET_DISCOVERY_ANNOUNCE) && game_port == 0)
+    { net->last_error = ULVM_NET_ERR_BAD_KIND; return -1; }
+    if ((flags & ULVM_NET_DISCOVERY_ANNOUNCE) && (!name || strlen(name) >= sizeof(net->discovery_name)))
+    { net->last_error = ULVM_NET_ERR_NO_BUFFER; return -1; }
+    int ok = net->ops->discovery(net->ops_context, net, flags, game_port, game_id, name ? name : "");
+    if (ok <= 0)
+    { net->last_error = ULVM_NET_ERR_UNSUPPORTED; return -1; }
+    net->discovery_flags = flags;
+    net->discovery_game_port = game_port;
+    net->discovery_game_id = game_id;
+    snprintf(net->discovery_name, sizeof(net->discovery_name), "%s", name ? name : "");
+    net->last_error = ok == 2 ? ULVM_NET_ERR_UNSUPPORTED : ULVM_NET_ERR_NONE;
+    return 1;
+}
+
+static inline uint32_t ULVM_net_discovery_count(ULVMNet *net)
+{
+    if (!net || !net->ops || !net->ops->discovery)
+    { if (net) net->last_error = ULVM_NET_ERR_UNSUPPORTED; return UINT32_MAX; }
+    net->ops->discovery(net->ops_context, net, net->discovery_flags,
+                        net->discovery_game_port, net->discovery_game_id,
+                        net->discovery_name);
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < ULVM_NET_MAX_SESSIONS; ++i)
+        if (net->sessions[i].active) ++count;
+    return count;
+}
+
+static inline int ULVM_net_discovery_get(ULVMNet *net, uint32_t index,
+                                         ULVMNetSession *session)
+{
+    if (!net || !session) return -1;
+    if (!net->ops || !net->ops->discovery)
+    { net->last_error = ULVM_NET_ERR_UNSUPPORTED; return -1; }
+    (void)ULVM_net_discovery_count(net);
+    for (uint32_t i = 0; i < ULVM_NET_MAX_SESSIONS; ++i)
+    {
+        if (!net->sessions[i].active) continue;
+        if (index-- == 0) { *session = net->sessions[i]; return 1; }
+    }
+    return 0;
+}
+
+static inline int ULVM_net_status(const ULVMNet *net, int handle)
+{
+    ULVMNetHandle *slot = (ULVMNetHandle *)ulvm_net_get_handle(net, handle);
+    if (slot && slot->active && net->ops && net->ops->poll)
+        net->ops->poll(net->ops_context, slot);
+    if (slot && slot->last_error && net) ((ULVMNet *)net)->last_error = slot->last_error;
+    return slot ? (int)slot->status : ULVM_NET_STATUS_CLOSED;
+}
+
+static inline uint32_t ULVM_net_lasterror(const ULVMNet *net)
+{
+    return net ? net->last_error : ULVM_NET_ERR_NONE;
+}
+
+static inline int ULVM_net_http_request(ULVMNet *net, int handle, uint8_t method,
+                                        const char *path, const char *headers,
+                                        const void *body, uint32_t body_len)
+{
+    ULVMNetHandle *slot = (ULVMNetHandle *)ulvm_net_get_handle(net, handle);
+    if (!slot || !slot->active)
+    { if (net) net->last_error = ULVM_NET_ERR_INVALID_HANDLE; return -1; }
+    if (slot->kind != ULVM_NET_KIND_HTTP || !net->ops || !net->ops->http_request)
+    { net->last_error = ULVM_NET_ERR_UNSUPPORTED; return -1; }
+    if (!path || !headers || (!body && body_len) || body_len > ULVM_NET_MAX_TRANSFER)
+    { net->last_error = ULVM_NET_ERR_NO_BUFFER; return -1; }
+    int rc = net->ops->http_request(net->ops_context, slot, method, path, headers, body, body_len);
+    net->last_error = rc > 0 ? ULVM_NET_ERR_NONE :
+                      (slot->last_error ? slot->last_error : ULVM_NET_ERR_IO);
+    return rc > 0 ? 1 : -1;
+}
+
+static inline uint32_t ULVM_net_http_status(const ULVMNet *net, int handle)
+{
+    ULVMNetHandle *slot = (ULVMNetHandle *)ulvm_net_get_handle(net, handle);
+    if (!slot || !slot->active || slot->kind != ULVM_NET_KIND_HTTP) return 0u;
+    if (net->ops && net->ops->poll) net->ops->poll(net->ops_context, slot);
+    if (slot->last_error && net) ((ULVMNet *)net)->last_error = slot->last_error;
+    return slot->http_status;
+}
+
+static inline const char *ULVM_net_localip(ULVMNet *net)
+{
+    if (net && net->ops && net->ops->localip)
+    {
+        if (!net->ops->localip(net->ops_context, net->local_ip, sizeof(net->local_ip)))
+            net->last_error = ULVM_NET_ERR_IO;
+    }
+    return net ? net->local_ip : "0.0.0.0";
+}
+
+static inline uint32_t ULVM_net_localport(const ULVMNet *net, int handle)
+{
+    const ULVMNetHandle *slot = ulvm_net_get_handle(net, handle);
+    return slot && slot->active ? slot->local_port : UINT32_MAX;
+}
+
+static inline int ULVM_net_peer(const ULVMNet *net, int handle, char *host, size_t host_size,
+                               uint16_t *port)
+{
+    ULVMNetHandle *slot = (ULVMNetHandle *)ulvm_net_get_handle(net, handle);
+    if (!slot || !slot->active)
+        return -1;
+    if (net->ops && net->ops->peer)
+        return net->ops->peer(net->ops_context, slot, host, host_size, port);
+    if (host && host_size > 0)
+    {
+        snprintf(host, host_size, "%s", (const char *)slot->peer_host);
+    }
+    if (port)
+        *port = slot->remote_port;
+    return 1;
+}
+
+static inline int ULVM_net_send(ULVMNet *net, int handle, const void *data, uint32_t len)
+{
+    if (!net || !data || len == 0)
+        return -1;
+    ULVMNetHandle *sender = (ULVMNetHandle *)ulvm_net_get_handle(net, handle);
+    if (!sender || !sender->active)
+    {
+        net->last_error = ULVM_NET_ERR_INVALID_HANDLE;
+        return -1;
+    }
+
+    if (len > ULVM_NET_MAX_BUFFER)
+    {
+        net->last_error = ULVM_NET_ERR_NO_BUFFER;
+        return -1;
+    }
+
+    if (net->ops)
+    {
+        int sent = net->ops->send ? net->ops->send(net->ops_context, sender, data, len) : -1;
+        if (sent >= 0 && !sender->last_error) net->last_error = ULVM_NET_ERR_NONE;
+        else if (!net->last_error) net->last_error = sender->last_error ? sender->last_error : ULVM_NET_ERR_IO;
+        return sent;
+    }
+
+    for (uint32_t i = 0; i < ULVM_NET_MAX_HANDLES; ++i)
+    {
+        ULVMNetHandle *peer = &net->handles[i];
+        if (!peer->active || peer == sender)
+            continue;
+        if (peer->kind != sender->kind)
+            continue;
+        if (peer->local_port != sender->remote_port)
+            continue;
+        if (peer->local_port == 0 || sender->local_port == 0)
+            continue;
+        if (peer->rx_len + len > ULVM_NET_MAX_BUFFER)
+        {
+            net->last_error = ULVM_NET_ERR_NO_BUFFER;
+            return -1;
+        }
+        memcpy(peer->rx + peer->rx_len, data, len);
+        peer->rx_len += len;
+        peer->status = ULVM_NET_STATUS_READY;
+        sender->tx_len = len;
+        memcpy(sender->tx, data, len);
+        sender->status = ULVM_NET_STATUS_READY;
+        net->last_error = ULVM_NET_ERR_NONE;
+        return (int)len;
+    }
+
+    net->last_error = ULVM_NET_ERR_IO;
+    return -1;
+}
+
+static inline int ULVM_net_recv(ULVMNet *net, int handle, void *dest, uint32_t cap)
+{
+    if (!net || !dest || cap == 0)
+        return 0;
+    ULVMNetHandle *slot = (ULVMNetHandle *)ulvm_net_get_handle(net, handle);
+    if (!slot || !slot->active)
+    {
+        net->last_error = ULVM_NET_ERR_INVALID_HANDLE;
+        return -1;
+    }
+
+    if (slot->frame_size)
+    {
+        if (net->ops && net->ops->poll) net->ops->poll(net->ops_context, slot);
+        if (slot->rx_len < 2) return 0;
+        uint32_t frame_len = ((uint32_t)slot->rx[0] << 8) | slot->rx[1];
+        if (frame_len > slot->frame_size || frame_len > ULVM_NET_MAX_TRANSFER)
+        { net->last_error = ULVM_NET_ERR_NO_BUFFER; return -1; }
+        if (slot->rx_len < frame_len + 2u) return 0;
+        if (cap < frame_len) { net->last_error = ULVM_NET_ERR_NO_BUFFER; return -1; }
+        memcpy(dest, slot->rx + 2, frame_len);
+        memmove(slot->rx, slot->rx + frame_len + 2u, slot->rx_len - frame_len - 2u);
+        slot->rx_len -= frame_len + 2u;
+        if (!slot->rx_len && slot->kind != ULVM_NET_KIND_UDP && slot->status == ULVM_NET_STATUS_READY)
+            slot->status = ULVM_NET_STATUS_CONNECTED;
+        net->last_error = ULVM_NET_ERR_NONE;
+        return (int)frame_len;
+    }
+
+    if (net->ops)
+    {
+        int got = net->ops->recv ? net->ops->recv(net->ops_context, slot, dest, cap) : -1;
+        if (got >= 0 && !slot->last_error) net->last_error = ULVM_NET_ERR_NONE;
+        else if (!net->last_error) net->last_error = slot->last_error ? slot->last_error : ULVM_NET_ERR_IO;
+        return got;
+    }
+
+    if (slot->rx_len == 0)
+        return 0;
+
+    uint32_t copied = (slot->rx_len < cap) ? slot->rx_len : cap;
+    memcpy(dest, slot->rx, copied);
+    memmove(slot->rx, slot->rx + copied, slot->rx_len - copied);
+    slot->rx_len -= copied;
+    slot->status = ULVM_NET_STATUS_READY;
+    net->last_error = ULVM_NET_ERR_NONE;
+    return (int)copied;
+}
+
+static inline int ULVM_net_listen(ULVMNet *net, uint8_t kind, uint16_t port)
+{
+    return ULVM_net_open(net, kind, port, NULL, 0, ULVM_NET_OPEN_LISTEN);
+}
+
+static inline int ULVM_net_accept(ULVMNet *net, int handle)
+{
+    ULVMNetHandle *slot = (ULVMNetHandle *)ulvm_net_get_handle(net, handle);
+    if (!net || !slot || !slot->active)
+    {
+        if (net) net->last_error = ULVM_NET_ERR_INVALID_HANDLE;
+        return -1;
+    }
+    if (!net->ops || !net->ops->accept)
+    {
+        net->last_error = ULVM_NET_ERR_UNSUPPORTED;
+        return -1;
+    }
+    for (uint32_t i = 0; i < ULVM_NET_MAX_HANDLES; ++i)
+    {
+        ULVMNetHandle *peer = &net->handles[i];
+        if (peer->active) continue;
+        memset(peer, 0, sizeof(*peer));
+        int accepted = net->ops->accept(net->ops_context, slot, peer);
+        if (accepted > 0)
+        {
+            peer->active = 1;
+            net->last_error = ULVM_NET_ERR_NONE;
+            return (int)i;
+        }
+        memset(peer, 0, sizeof(*peer));
+        if (accepted < 0)
+            net->last_error = slot->last_error ? slot->last_error : ULVM_NET_ERR_IO;
+        else
+            net->last_error = ULVM_NET_ERR_NONE;
+        return -1;
+    }
+    net->last_error = ULVM_NET_ERR_LIMIT;
+    return -1;
+}
+
+static inline int ULVM_net_option(ULVMNet *net, int handle, uint8_t option, uint32_t value)
+{
+    ULVMNetHandle *slot = (ULVMNetHandle *)ulvm_net_get_handle(net, handle);
+    if (!net || !slot || !slot->active)
+    {
+        if (net) net->last_error = ULVM_NET_ERR_INVALID_HANDLE;
+        return -1;
+    }
+    (void)value;
+    if (net->ops)
+    {
+        int ok = net->ops->option && net->ops->option(net->ops_context, slot, option, value);
+        net->last_error = ok ? ULVM_NET_ERR_NONE :
+                          (slot->last_error ? slot->last_error : ULVM_NET_ERR_UNSUPPORTED);
+        return ok ? 1 : -1;
+    }
+    if (slot->kind != ULVM_NET_KIND_UDP || option != ULVM_NET_OPT_UDP_BROADCAST)
+    {
+        net->last_error = ULVM_NET_ERR_UNSUPPORTED;
+        return -1;
+    }
+    net->last_error = ULVM_NET_ERR_UNSUPPORTED;
+    return -1;
 }
 
 // Optional fast path: point the VM at bytecode that is directly addressable
@@ -1035,6 +1609,41 @@ static inline int ulvm_print_formatted(UnilangVM *vm, uint32_t addr, uint8_t for
     return 1;
 }
 
+static inline int ulvm_mem_write_string(UnilangVM *vm, uint32_t addr, const char *text, uint32_t max_len)
+{
+    if (!vm || !text || max_len == 0 || addr >= (uint32_t)ULVM_MEM_SIZE)
+        return 0;
+    uint32_t out = 0;
+    while (out + 1u < max_len && out + 1u < (uint32_t)ULVM_MEM_SIZE - addr)
+    {
+        char ch = text[out];
+        vm->mem[addr + out] = (uint8_t)ch;
+        if (ch == '\0')
+            return 1;
+        out++;
+    }
+    if (addr + out < (uint32_t)ULVM_MEM_SIZE)
+        vm->mem[addr + out] = 0;
+    return 1;
+}
+
+static inline int ulvm_mem_read_string(UnilangVM *vm, uint32_t addr, char *buf, uint32_t max_len)
+{
+    if (!vm || !buf || max_len == 0 || addr >= (uint32_t)ULVM_MEM_SIZE)
+        return 0;
+    uint32_t i = 0;
+    while (i + 1u < max_len && i < (uint32_t)ULVM_MEM_SIZE - addr)
+    {
+        char ch = (char)vm->mem[addr + i];
+        buf[i] = ch;
+        if (ch == '\0')
+            return 1;
+        i++;
+    }
+    buf[0] = '\0';
+    return 0;
+}
+
 /* Runs up to `budget` instructions (or until the program exits) and returns
    nonzero once the VM has halted. pc and the ROM pointer live in locals for the
    duration, so a large budget is much cheaper per instruction than calling
@@ -1335,6 +1944,23 @@ static inline void ulvm_blit(UnilangVM *vm, uint32_t d)
     [OP_BEEP] = &&ulvm_l_OP_BEEP, \
     [OP_AUDIO_COMMAND] = &&ulvm_l_OP_AUDIO_COMMAND, \
     [OP_AUDIO_LOAD] = &&ulvm_l_OP_AUDIO_LOAD, \
+    [OP_NET_ACCEPT] = &&ulvm_l_OP_NET_ACCEPT, \
+    [OP_NET_AVAIL] = &&ulvm_l_OP_NET_AVAIL, \
+    [OP_NET_CLOSE] = &&ulvm_l_OP_NET_CLOSE, \
+    [OP_NET_LASTERROR] = &&ulvm_l_OP_NET_LASTERROR, \
+    [OP_NET_LOCALIP] = &&ulvm_l_OP_NET_LOCALIP, \
+    [OP_NET_OPEN] = &&ulvm_l_OP_NET_OPEN, \
+    [OP_NET_OPTION] = &&ulvm_l_OP_NET_OPTION, \
+    [OP_NET_PEER] = &&ulvm_l_OP_NET_PEER, \
+    [OP_NET_RECV] = &&ulvm_l_OP_NET_RECV, \
+    [OP_NET_SEND] = &&ulvm_l_OP_NET_SEND, \
+    [OP_NET_STATUS] = &&ulvm_l_OP_NET_STATUS, \
+    [OP_NET_HTTP_REQUEST] = &&ulvm_l_OP_NET_HTTP_REQUEST, \
+    [OP_NET_HTTP_STATUS] = &&ulvm_l_OP_NET_HTTP_STATUS, \
+    [OP_NET_DISCOVERY] = &&ulvm_l_OP_NET_DISCOVERY, \
+    [OP_NET_DISCOVERY_COUNT] = &&ulvm_l_OP_NET_DISCOVERY_COUNT, \
+    [OP_NET_DISCOVERY_GET] = &&ulvm_l_OP_NET_DISCOVERY_GET, \
+    [OP_NET_LOCALPORT] = &&ulvm_l_OP_NET_LOCALPORT, \
     [OP_OUTFMT] = &&ulvm_l_OP_OUTFMT, \
     [OP_CMPREGV] = &&ulvm_l_OP_CMPREGV, \
     [OP_COMPREG] = &&ulvm_l_OP_COMPREG, \
@@ -1461,6 +2087,8 @@ static inline void ulvm_blit(UnilangVM *vm, uint32_t d)
 
 static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
 {
+    if (vm->net && vm->net->ops && vm->net->ops->service)
+        vm->net->ops->service(vm->net->ops_context, vm->net);
     uint32_t pc = vm->pc;
     const uint8_t *rom = vm->rom;
     const uint32_t rom_size = vm->rom_size;
@@ -1584,9 +2212,268 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
         int supported;
         if (val == 0)
             supported = 1;
+        else if (flag == ULVM_FLAG_NETWORK)
+            supported = vm->net != NULL && val == 1;
         else
             supported = vm->isflagsupported ? vm->isflagsupported(flag, val) : 0;
         ULVM_R(r) = supported ? 1u : 0u;
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_NET_OPEN)
+    {
+        uint8_t kind_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t local_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t remote_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t host_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t flags_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t result_reg = (uint8_t)ULVM_NEXTBYTE();
+
+        if (!vm->net)
+        {
+            ULVM_R(result_reg) = UINT32_MAX;
+            ULVM_NEXT();
+        }
+
+        char host_name[ULVM_NET_MAX_HOST];
+        host_name[0] = '\0';
+        uint32_t host_addr = ULVM_R(host_reg);
+        if (host_addr != 0 && (!ULVM_INBOUNDS(host_addr, 1) || !ulvm_mem_read_string(vm, host_addr, host_name, sizeof(host_name))))
+        {
+            vm->net->last_error = ULVM_NET_ERR_NO_BUFFER;
+            ULVM_R(result_reg) = UINT32_MAX;
+            ULVM_NEXT();
+        }
+
+        int handle = ULVM_net_open(vm->net, (uint8_t)ULVM_R(kind_reg), (uint16_t)ULVM_R(local_reg),
+                                   host_name[0] ? host_name : NULL, (uint16_t)ULVM_R(remote_reg),
+                                   ULVM_R(flags_reg));
+        ULVM_R(result_reg) = (uint32_t)handle;
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_NET_STATUS)
+    {
+        uint8_t handle_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t result_reg = (uint8_t)ULVM_NEXTBYTE();
+        ULVM_R(result_reg) = vm->net ? (uint32_t)ULVM_net_status(vm->net, (int)ULVM_R(handle_reg)) : UINT32_MAX;
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_NET_SEND)
+    {
+        uint8_t handle_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t addr_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t len_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t result_reg = (uint8_t)ULVM_NEXTBYTE();
+
+        uint32_t addr = ULVM_R(addr_reg);
+        uint32_t len = ULVM_R(len_reg);
+        if (!vm->net || !ULVM_INBOUNDS(addr, len))
+        {
+            if (vm->net) vm->net->last_error = ULVM_NET_ERR_NO_BUFFER;
+            ULVM_R(result_reg) = UINT32_MAX;
+            ULVM_NEXT();
+        }
+        int sent = ULVM_net_send(vm->net, (int)ULVM_R(handle_reg), &vm->mem[addr], len);
+        ULVM_R(result_reg) = (uint32_t)sent;
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_NET_RECV)
+    {
+        uint8_t handle_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t addr_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t cap_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t result_reg = (uint8_t)ULVM_NEXTBYTE();
+
+        uint32_t addr = ULVM_R(addr_reg);
+        uint32_t cap = ULVM_R(cap_reg);
+        if (!vm->net || !ULVM_INBOUNDS(addr, cap))
+        {
+            if (vm->net) vm->net->last_error = ULVM_NET_ERR_NO_BUFFER;
+            ULVM_R(result_reg) = UINT32_MAX;
+            ULVM_NEXT();
+        }
+        int got = ULVM_net_recv(vm->net, (int)ULVM_R(handle_reg), &vm->mem[addr], cap);
+        ULVM_R(result_reg) = (uint32_t)got;
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_NET_ACCEPT)
+    {
+        uint8_t handle_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t result_reg = (uint8_t)ULVM_NEXTBYTE();
+        ULVM_R(result_reg) = vm->net ? (uint32_t)ULVM_net_accept(vm->net, (int)ULVM_R(handle_reg)) : UINT32_MAX;
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_NET_CLOSE)
+    {
+        uint8_t handle_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t result_reg = (uint8_t)ULVM_NEXTBYTE();
+        ULVM_R(result_reg) = vm->net ? (uint32_t)ULVM_net_close(vm->net, (int)ULVM_R(handle_reg)) : UINT32_MAX;
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_NET_OPTION)
+    {
+        uint8_t handle_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t opt_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t value_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t result_reg = (uint8_t)ULVM_NEXTBYTE();
+        ULVM_R(result_reg) = vm->net ? (uint32_t)ULVM_net_option(vm->net, (int)ULVM_R(handle_reg), (uint8_t)ULVM_R(opt_reg), ULVM_R(value_reg)) : UINT32_MAX;
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_NET_AVAIL)
+    {
+        uint8_t handle_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t result_reg = (uint8_t)ULVM_NEXTBYTE();
+        ULVM_R(result_reg) = vm->net ? ULVM_net_avail(vm->net, (int)ULVM_R(handle_reg)) : UINT32_MAX;
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_NET_LOCALIP)
+    {
+        uint8_t addr_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t result_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint32_t addr = ULVM_R(addr_reg);
+        const char *ip = vm->net ? ULVM_net_localip(vm->net) : "0.0.0.0";
+        int ok = vm->net && ULVM_INBOUNDS(addr, (uint32_t)strlen(ip) + 1u);
+        if (ok) ulvm_mem_write_string(vm, addr, ip, (uint32_t)strlen(ip) + 1u);
+        else if (vm->net) vm->net->last_error = ULVM_NET_ERR_NO_BUFFER;
+        ULVM_R(result_reg) = ok ? 1u : UINT32_MAX;
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_NET_PEER)
+    {
+        uint8_t handle_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t host_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t port_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t result_reg = (uint8_t)ULVM_NEXTBYTE();
+
+        char hostbuf[ULVM_NET_MAX_HOST];
+        uint16_t port = 0;
+        int peer_found = vm->net ? ULVM_net_peer(vm->net, (int)ULVM_R(handle_reg), hostbuf, sizeof(hostbuf), &port) : -1;
+        int ok = peer_found > 0;
+        if (ok && !ULVM_INBOUNDS(ULVM_R(host_reg), (uint32_t)strlen(hostbuf) + 1u)) ok = 0;
+        if (ok && ULVM_INBOUNDS(ULVM_R(port_reg), 2))
+            ulvm_store_memory(vm, ULVM_R(port_reg), 2, port);
+        else if (ok) ok = 0;
+        if (ok) ulvm_mem_write_string(vm, ULVM_R(host_reg), hostbuf, sizeof(hostbuf));
+        else if (vm->net) vm->net->last_error = peer_found > 0 ? ULVM_NET_ERR_NO_BUFFER : ULVM_NET_ERR_INVALID_HANDLE;
+        ULVM_R(result_reg) = ok ? 1u : UINT32_MAX;
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_NET_LASTERROR)
+    {
+        uint8_t result_reg = (uint8_t)ULVM_NEXTBYTE();
+        ULVM_R(result_reg) = vm->net ? ULVM_net_lasterror(vm->net) : ULVM_NET_ERR_UNSUPPORTED;
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_NET_HTTP_REQUEST)
+    {
+        uint8_t handle_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t method_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t path_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t headers_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t body_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t length_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t result_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint32_t path_addr = ULVM_R(path_reg), headers_addr = ULVM_R(headers_reg);
+        uint32_t body_addr = ULVM_R(body_reg), body_len = ULVM_R(length_reg);
+        char path[256], headers[ULVM_NET_MAX_HTTP_HEADERS];
+        if (!vm->net || !ulvm_mem_read_string(vm, path_addr, path, sizeof(path)) ||
+            !ulvm_mem_read_string(vm, headers_addr, headers, sizeof(headers)) ||
+            !ULVM_INBOUNDS(body_addr, body_len) || body_len > ULVM_NET_MAX_TRANSFER)
+        {
+            if (vm->net) vm->net->last_error = ULVM_NET_ERR_NO_BUFFER;
+            ULVM_R(result_reg) = UINT32_MAX;
+            ULVM_NEXT();
+        }
+        int rc = ULVM_net_http_request(vm->net, (int)ULVM_R(handle_reg),
+                                       (uint8_t)ULVM_R(method_reg), path, headers,
+                                       body_len ? &vm->mem[body_addr] : NULL, body_len);
+        ULVM_R(result_reg) = (uint32_t)rc;
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_NET_HTTP_STATUS)
+    {
+        uint8_t handle_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t result_reg = (uint8_t)ULVM_NEXTBYTE();
+        ULVM_R(result_reg) = vm->net ? ULVM_net_http_status(vm->net, (int)ULVM_R(handle_reg)) : UINT32_MAX;
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_NET_DISCOVERY)
+    {
+        uint8_t flags_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t port_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t game_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t name_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t result_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t flags = (uint8_t)ULVM_R(flags_reg);
+        char name[32] = "";
+        uint32_t name_addr = ULVM_R(name_reg);
+        if ((flags & ULVM_NET_DISCOVERY_ANNOUNCE) && !ulvm_mem_read_string(vm, name_addr, name, sizeof(name)))
+        {
+            if (vm->net) vm->net->last_error = ULVM_NET_ERR_NO_BUFFER;
+            ULVM_R(result_reg) = UINT32_MAX;
+            ULVM_NEXT();
+        }
+        int rc = vm->net ? ULVM_net_discovery(vm->net, flags,
+                        (uint16_t)ULVM_R(port_reg), ULVM_R(game_reg), name) : -1;
+        ULVM_R(result_reg) = (uint32_t)rc;
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_NET_DISCOVERY_COUNT)
+    {
+        uint8_t result_reg = (uint8_t)ULVM_NEXTBYTE();
+        ULVM_R(result_reg) = vm->net ? ULVM_net_discovery_count(vm->net) : UINT32_MAX;
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_NET_DISCOVERY_GET)
+    {
+        uint8_t index_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t name_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t host_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t port_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t game_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t result_reg = (uint8_t)ULVM_NEXTBYTE();
+        ULVMNetSession session;
+        int get_rc = vm->net ? ULVM_net_discovery_get(vm->net, ULVM_R(index_reg), &session) : -1;
+        int ok = get_rc > 0;
+        int memory_error = 0;
+        if (ok && (!ULVM_INBOUNDS(ULVM_R(name_reg), (uint32_t)strlen(session.name) + 1u) ||
+                   !ULVM_INBOUNDS(ULVM_R(host_reg), (uint32_t)strlen(session.host) + 1u) ||
+                   !ULVM_INBOUNDS(ULVM_R(port_reg), 2) || !ULVM_INBOUNDS(ULVM_R(game_reg), 4)))
+        { ok = 0; memory_error = 1; }
+        if (ok)
+        {
+            ulvm_mem_write_string(vm, ULVM_R(name_reg), session.name, sizeof(session.name));
+            ulvm_mem_write_string(vm, ULVM_R(host_reg), session.host, sizeof(session.host));
+            ulvm_store_memory(vm, ULVM_R(port_reg), 2, session.port);
+            ulvm_store_memory(vm, ULVM_R(game_reg), 4, session.game_id);
+        }
+        else if (vm->net && memory_error) vm->net->last_error = ULVM_NET_ERR_NO_BUFFER;
+        else if (vm->net && get_rc == 0) vm->net->last_error = ULVM_NET_ERR_INVALID_HANDLE;
+        ULVM_R(result_reg) = ok ? 1u : UINT32_MAX;
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_NET_LOCALPORT)
+    {
+        uint8_t handle_reg = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t result_reg = (uint8_t)ULVM_NEXTBYTE();
+        ULVM_R(result_reg) = vm->net
+            ? ULVM_net_localport(vm->net, (int)ULVM_R(handle_reg)) : UINT32_MAX;
         ULVM_NEXT();
     }
 

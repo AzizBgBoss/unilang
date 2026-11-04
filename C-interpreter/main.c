@@ -1,3 +1,11 @@
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200112L
+#endif
+
+#if defined(_WIN32)
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
 #include <SDL2/SDL.h>
 #include <errno.h>
 #include <stdio.h>
@@ -7,6 +15,7 @@
 #define ULVM_MEM_SIZE 8192
 #include "unilang.h"
 #include "uniaudio.h"
+#include "net_sockets.h"
 
 #define SCALE 10
 
@@ -588,9 +597,11 @@ int main(int argc, char **argv)
         return 1;
     }
     uniaudio_init(&audio_engine);
+    int net_ready = ULVM_net_socket_init();
     if (SDL_Init(SDL_INIT_VIDEO) != 0)
     {
         printf("SDL_Init failed: %s\n", SDL_GetError());
+        if (net_ready) ULVM_net_socket_quit();
         return 1;
     }
     my_open_audio();
@@ -598,6 +609,16 @@ int main(int argc, char **argv)
     DEBUG_PRINT("[debug] VM RAM configured: %u bytes\n", (unsigned)ULVM_MEM_SIZE);
     UnilangVM vm;
     ULVM_init(&vm, my_outputchar, my_readbyte);
+    ULVMNet net;
+    ULVM_net_init(&net);
+    ULVMDesktopNetContext net_context;
+    ULVM_desktop_net_context_init(&net_context);
+    net_context.owner = &net;
+    if (net_ready)
+    {
+        ULVM_net_set_ops(&net, &ULVM_DESKTOP_NET_OPS, &net_context);
+        ULVM_set_net(&vm, &net);
+    }
     if (debug_enabled)
     {
         vm.instruction_hits = calloc((size_t)romsize, sizeof(*vm.instruction_hits));
@@ -605,7 +626,9 @@ int main(int argc, char **argv)
         {
             fprintf(stderr, "Could not allocate VM instruction profiling data\n");
             my_disablegraphics();
+            if (vm.net) ULVM_net_shutdown(vm.net);
             SDL_Quit();
+            if (net_ready) ULVM_net_socket_quit();
             free(rom);
             return 1;
         }
@@ -654,9 +677,11 @@ int main(int argc, char **argv)
     }
 
     my_disablegraphics();
+    if (vm.net) ULVM_net_shutdown(vm.net);
     if (audio_device)
         SDL_CloseAudioDevice(audio_device);
     SDL_Quit();
+    if (net_ready) ULVM_net_socket_quit();
     free(vm.instruction_hits);
     free(rom);
     free(save_file_path);

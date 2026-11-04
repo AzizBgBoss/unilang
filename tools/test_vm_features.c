@@ -7,6 +7,7 @@
 #define ULVM_MEM_SIZE 256
 #include "../C-interpreter/unilang.h"
 #include "../C-interpreter/uniaudio.h"
+#include "headless_net.h"
 
 static uint16_t pixels[8 * 8];
 static unsigned writes;
@@ -51,6 +52,16 @@ static void output_char(char c)
 {
     if (output_length < sizeof(output_buffer))
         output_buffer[output_length++] = c;
+}
+
+static void emit_setreg(uint8_t *program, size_t *pos, uint8_t reg, uint32_t value)
+{
+    program[(*pos)++] = 0x40;
+    program[(*pos)++] = reg;
+    program[(*pos)++] = (uint8_t)((value >> 24) & 0xFFu);
+    program[(*pos)++] = (uint8_t)((value >> 16) & 0xFFu);
+    program[(*pos)++] = (uint8_t)((value >> 8) & 0xFFu);
+    program[(*pos)++] = (uint8_t)(value & 0xFFu);
 }
 
 static void test_formatted_output(void)
@@ -439,6 +450,168 @@ static void test_music_markers(void)
     assert(!audio.music_playing);
 }
 
+static void test_network_api(void)
+{
+    ULVMNet network;
+    ULVM_net_init(&network);
+
+    int sender = ULVM_net_open(&network, ULVM_NET_KIND_UDP, 5000, "127.0.0.1", 5001, 0);
+    int receiver = ULVM_net_open(&network, ULVM_NET_KIND_UDP, 5001, "127.0.0.1", 5000, 0);
+    assert(sender >= 0 && receiver >= 0);
+    const char payload[] = "ping";
+    assert(ULVM_net_send(&network, sender, payload, (uint32_t)sizeof(payload) - 1u) == (int)(sizeof(payload) - 1u));
+
+    char buffer[16] = {0};
+    int bytes = ULVM_net_recv(&network, receiver, buffer, sizeof(buffer));
+    assert(bytes == (int)(sizeof(payload) - 1u));
+    assert(memcmp(buffer, payload, sizeof(payload) - 1u) == 0);
+    assert(ULVM_net_avail(&network, receiver) == 0);
+    assert(ULVM_net_status(&network, receiver) == ULVM_NET_STATUS_READY);
+    assert(ULVM_net_lasterror(&network) == ULVM_NET_ERR_NONE);
+    assert(ULVM_net_peer(&network, sender, buffer, sizeof(buffer), NULL));
+    assert(strcmp(buffer, "127.0.0.1") == 0);
+
+    ULVM_net_close(&network, sender);
+    ULVM_net_close(&network, receiver);
+}
+
+static void test_network_vm_opcodes(void)
+{
+    UnilangVM vm;
+    static const uint8_t unsupported[] = { OP_ISFLAGSUPPORTED, ULVM_FLAG_NETWORK, 1, 4,
+                                          OP_NET_LASTERROR, 5, OP_EXIT };
+    ULVM_init(&vm, output_char, read_byte);
+    ULVM_set_rom(&vm, unsupported, sizeof(unsupported));
+    ULVM_run(&vm, 20);
+    assert(!vm.faulted && vm.reg[4] == 0 && vm.reg[5] == ULVM_NET_ERR_UNSUPPORTED);
+
+    ULVMNet net; HeadlessNetContext ctx;
+    ULVM_net_init(&net); memset(&ctx, 0, sizeof(ctx));
+    ctx.owner = &net; ctx.broadcast_available = 1;
+    ULVM_net_set_ops(&net, &HEADLESS_NET_OPS, &ctx); ULVM_set_net(&vm, &net);
+    static const uint8_t program[] = {
+        0x40, 0, 0, 0, 0, ULVM_NET_KIND_UDP,
+        0x40, 1, 0, 0, 0x23, 0x28, /* local port 9000 */
+        0x40, 2, 0, 0, 0x23, 0x29, /* remote port 9001 */
+        0x40, 3, 0, 0, 0, 0, 0, 0, /* host is NULL */
+        0x40, 4, 0, 0, 0, 0,
+        OP_NET_OPEN, 0, 1, 2, 3, 4, 6,
+        0x40, 0, 0, 0, 0, 0,
+        0x40, 1, 0, 0, 0, 10,
+        0x40, 2, 0, 0, 0, 4,
+        OP_NET_SEND, 0, 1, 2, 7,
+        OP_NET_STATUS, 0, 8,
+        OP_EXIT
+    };
+    ULVM_net_init(&net); memset(&ctx, 0, sizeof(ctx));
+    ctx.owner = &net; ctx.broadcast_available = 1;
+    ULVM_net_set_ops(&net, &HEADLESS_NET_OPS, &ctx); ULVM_set_net(&vm, &net);
+    memcpy(vm.mem + 10, "ping", 4);
+    ULVM_init(&vm, output_char, read_byte); ULVM_set_net(&vm, &net);
+    ULVM_set_rom(&vm, program, sizeof(program));
+    ULVM_run(&vm, 100);
+    if (vm.faulted || vm.reg[6] != 0 || vm.reg[7] != 4)
+        fprintf(stderr, "network opcode diagnostic: fault=%d opcode=%u r6=%u r7=%u r8=%u last_error=%u\n",
+                vm.faulted, vm.fault_opcode, vm.reg[6], vm.reg[7], vm.reg[8], ULVM_net_lasterror(&net));
+    assert(!vm.faulted && vm.reg[6] == 0 && vm.reg[7] == 4);
+    assert(vm.reg[8] == ULVM_NET_STATUS_READY);
+
+    static const uint8_t out_of_bounds[] = {
+        0x40, 0, 0, 0, 0, 0,
+        0x40, 1, 0, 0, 0, 255,
+        0x40, 2, 0, 0, 0, 2,
+        OP_NET_SEND, 0, 1, 2, 3, OP_EXIT
+    };
+    ULVM_init(&vm, output_char, read_byte); ULVM_set_net(&vm, &net);
+    ULVM_set_rom(&vm, out_of_bounds, sizeof(out_of_bounds)); ULVM_run(&vm, 50);
+    assert(!vm.faulted && vm.reg[3] == UINT32_MAX);
+    assert(ULVM_net_lasterror(&net) == ULVM_NET_ERR_NO_BUFFER);
+    ULVM_net_shutdown(&net);
+}
+
+static void test_headless_network_backend(void)
+{
+    ULVMNet net; HeadlessNetContext ctx;
+    ULVM_net_init(&net); memset(&ctx, 0, sizeof(ctx));
+    ctx.owner = &net; ctx.broadcast_available = 1;
+    ULVM_net_set_ops(&net, &HEADLESS_NET_OPS, &ctx);
+
+    int listener = ULVM_net_listen(&net, ULVM_NET_KIND_TCP, 7000);
+    int c1 = ULVM_net_open(&net, ULVM_NET_KIND_TCP, 0, "127.0.0.1", 7000, 0);
+    assert(listener == 0 && c1 == 1);
+    int p1 = ULVM_net_accept(&net, listener); assert(p1 == 2);
+    const char stream[] = "abcdefgh"; char received[16] = {0};
+    assert(ULVM_net_send(&net, c1, stream, 8) == 3);
+    assert(ULVM_net_send(&net, c1, stream + 3, 5) == 3);
+    assert(ULVM_net_avail(&net, p1) == 6);
+    assert(ULVM_net_recv(&net, p1, received, sizeof(received)) == 6);
+    assert(memcmp(received, "abcdef", 6) == 0);
+    assert(ULVM_net_option(&net, c1, ULVM_NET_OPT_FRAME_SIZE, 64));
+    assert(ULVM_net_option(&net, p1, ULVM_NET_OPT_FRAME_SIZE, 64));
+    assert(ULVM_net_send(&net, c1, "framed", 6) == 6);
+    assert(ULVM_net_avail(&net, p1) == 6);
+    assert(ULVM_net_recv(&net, p1, received, sizeof(received)) == 6);
+    assert(memcmp(received, "framed", 6) == 0);
+
+    int c2 = ULVM_net_open(&net, ULVM_NET_KIND_TCP, 0, "127.0.0.1", 7000, 0);
+    int p2 = ULVM_net_accept(&net, listener); assert(c2 == 3 && p2 == 4);
+    assert(ULVM_net_close(&net, c1) == 1);
+    assert(ULVM_net_status(&net, p1) == ULVM_NET_STATUS_CLOSED);
+    assert(ULVM_net_send(&net, c2, "ok", 2) == 2);
+    assert(ULVM_net_recv(&net, p2, received, sizeof(received)) == 2);
+
+    int http = ULVM_net_open(&net, ULVM_NET_KIND_HTTP, 0, "127.0.0.1", 80, 0);
+    assert(http >= 0);
+    assert(ULVM_net_http_request(&net, http, ULVM_NET_HTTP_POST, "/created",
+                                 "X-Test: yes\r\n", "body", 4) == 1);
+    assert(ULVM_net_http_status(&net, http) == 201);
+    assert(strcmp(ctx.last_http_headers, "X-Test: yes\r\n") == 0);
+    assert(ctx.last_http_method == ULVM_NET_HTTP_POST && ctx.last_http_body_len == 4);
+    assert(ULVM_net_avail(&net, http) == 7);
+    assert(ULVM_net_http_request(&net, http, ULVM_NET_HTTP_GET, "/missing", "", NULL, 0) == 1);
+    assert(ULVM_net_http_status(&net, http) == 404);
+    assert(ULVM_net_avail(&net, http) == 7);
+
+    assert(ULVM_net_option(&net, c2, ULVM_NET_OPT_TIMEOUT_MS, 10));
+    ctx.now_ms += 11; assert(ULVM_net_status(&net, c2) == ULVM_NET_STATUS_CLOSED);
+    assert(ULVM_net_lasterror(&net) == ULVM_NET_ERR_TIMEOUT);
+
+    assert(ULVM_net_discovery(&net, ULVM_NET_DISCOVERY_LISTEN, 0, 42, "") == 1);
+    assert(ULVM_net_discovery_count(&net) == 1);
+    assert(ULVM_net_discovery_count(&net) == 1); /* repeat announcement is deduplicated */
+    ctx.now_ms += ULVM_NET_DISCOVERY_TTL_MS + 1;
+    headless_net_service(&ctx, &net);
+    assert(ULVM_net_discovery_count(&net) == 0);
+    assert(ULVM_net_discovery(&net, 0, 0, 0, "") == 1);
+    assert(ULVM_net_discovery_count(&net) == 0);
+    assert(ULVM_net_discovery(&net, ULVM_NET_DISCOVERY_ANNOUNCE, 7000, 42, "game") == 1);
+    ctx.broadcast_available = 0;
+    assert(ULVM_net_discovery(&net, ULVM_NET_DISCOVERY_ANNOUNCE, 7000, 42, "game") == 1);
+    assert(ULVM_net_lasterror(&net) == ULVM_NET_ERR_UNSUPPORTED);
+
+    int fillers[ULVM_NET_MAX_HANDLES];
+    for (unsigned i = 0; i < ULVM_NET_MAX_HANDLES; ++i)
+        fillers[i] = ULVM_net_open(&net, ULVM_NET_KIND_UDP, (uint16_t)(8000 + i), NULL, 0, 0);
+    assert(ULVM_net_open(&net, ULVM_NET_KIND_UDP, 9000, NULL, 0, 0) == -1);
+    assert(ULVM_net_lasterror(&net) == ULVM_NET_ERR_LIMIT);
+    ULVM_net_shutdown(&net);
+
+    ULVM_net_init(&net); memset(&ctx, 0, sizeof(ctx));
+    ctx.owner = &net; ctx.broadcast_available = 1;
+    ULVM_net_set_ops(&net, &HEADLESS_NET_OPS, &ctx);
+    listener = ULVM_net_listen(&net, ULVM_NET_KIND_TCP, 7100);
+    headless_net_queue_clients(&net, listener, (uint8_t)(ULVM_NET_MAX_HANDLES + 1u));
+    int accepted[ULVM_NET_MAX_HANDLES - 1u];
+    for (unsigned i = 0; i < ULVM_NET_MAX_HANDLES - 1u; ++i)
+    { accepted[i] = ULVM_net_accept(&net, listener); assert(accepted[i] >= 0); }
+    assert(ULVM_net_accept(&net, listener) == -1);
+    assert(ULVM_net_lasterror(&net) == ULVM_NET_ERR_LIMIT);
+    assert(ULVM_net_close(&net, accepted[2]) == 1);
+    assert(ULVM_net_status(&net, accepted[3]) == ULVM_NET_STATUS_CONNECTED);
+    assert(ULVM_net_accept(&net, listener) >= 0);
+    ULVM_net_shutdown(&net);
+}
+
 int main(void)
 {
     test_formatted_output();
@@ -457,6 +630,9 @@ int main(void)
     test_value_stack();
     test_audio_engine();
     test_music_markers();
+    test_network_api();
+    test_network_vm_opcodes();
+    test_headless_network_backend();
     puts("VM feature tests passed");
     return 0;
 }

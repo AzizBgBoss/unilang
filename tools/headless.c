@@ -20,6 +20,7 @@
 #endif
 #include "unilang.h"
 #include "../C-interpreter/uniaudio.h"
+#include "headless_net.h"
 
 static uint8_t *rom;
 static long romsize;
@@ -43,6 +44,8 @@ static uint32_t save_size;
 static int save_valid;
 static uint64_t hash_all = 1469598103934665603ull;
 static UnilangVM vm;
+static ULVMNet headless_net;
+static HeadlessNetContext headless_net_context;
 static int count_instr;
 
 static uint16_t normalize_pixel_color(uint16_t c)
@@ -159,6 +162,7 @@ static void dump_ppm(void)
 static void disable_gfx(void) { gw = gh = 0; gbits = 0; }
 static void refresh(void)
 {
+    headless_net_context.now_ms += 16u;
     uint64_t h = 1469598103934665603ull;
     if (dump_path && frames == dump_frame) dump_ppm();
     for (uint32_t y = 0; y < gh; y++)
@@ -181,8 +185,8 @@ static uint8_t get_keys(void)
     if ((key_seed & 1) && (frames / 6) % 25 == 1) k |= 128;  /* odd seeds press Enter now and then */
     return k;
 }
-static uint32_t get_time(void) { time_calls++; return frames * 16 + time_calls; }
-static void do_sleep(uint32_t ms) { advance_audio_ms(ms); }
+static uint32_t get_time(void) { time_calls++; headless_net_context.now_ms++; return frames * 16 + time_calls; }
+static void do_sleep(uint32_t ms) { headless_net_context.now_ms += ms; advance_audio_ms(ms); }
 static int flag_ok(uint8_t f, uint8_t v)
 {
     return f == 0 ? (v >= 1 && v <= 12) : f == 1 ? v == 1 : f == 2 ? (v == 1 || v == 2) : 0;
@@ -297,6 +301,12 @@ int main(int argc, char **argv)
     fclose(f);
 
     ULVM_init(&vm, out_char, read_byte);
+    ULVM_net_init(&headless_net);
+    memset(&headless_net_context, 0, sizeof(headless_net_context));
+    headless_net_context.owner = &headless_net;
+    headless_net_context.broadcast_available = 1;
+    ULVM_net_set_ops(&headless_net, &HEADLESS_NET_OPS, &headless_net_context);
+    ULVM_set_net(&vm, &headless_net);
     uniaudio_init(&audio_engine);
     ULVM_set_rom(&vm, rom, (uint32_t)romsize);
     ULVM_set_graphics(&vm, set_pixel, get_pixel, refresh, enable_gfx, disable_gfx, clear_screen);
@@ -330,6 +340,7 @@ int main(int argc, char **argv)
             (unsigned long long)hash_all);
     printf("\nDIGEST %016llx frames=%u faulted=%d\n", (unsigned long long)hash_all, (unsigned)frames, vm.faulted);
     int result = write_wav() ? 0 : 2;
+    ULVM_net_shutdown(&headless_net);
     free(wav_samples);
     free(vm.instruction_hits);
     free(rom);

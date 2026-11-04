@@ -37,6 +37,29 @@ C-interpreter/main examples/cube3d/cube3d.ulc
 
 The same commands work in WSL/Linux. Rebuild the SDL host whenever VM or
 interpreter source changes; the checked-in executable may be out of date.
+On Windows, link the Winsock library (`-lws2_32`) when building the desktop
+host. `main.c` enables the POSIX feature declarations it needs before system
+headers, so the command also builds with strict `-std=c11` on Linux and WSL.
+
+## Optional host networking hooks
+
+The VM exposes an optional host-owned network state blob through
+`ULVM_set_net()`. Networking opcodes are nonblocking and RAM-bounded. The
+reference implementation in `C-interpreter/unilang.h` provides an in-memory
+UDP loopback backend. The SDL desktop host installs a nonblocking TCP/UDP/HTTP
+socket backend and LAN discovery from `C-interpreter/net_sockets.h`; bytecode
+detects support with `isflagsupported(15, 1)`. See the [host integration guide](docs/vm/host-integration.md#optional-networking)
+for the current API and limitations.
+
+```c
+ULVMNet net;
+ULVM_net_init(&net);
+UnilangVM vm = {0};
+ULVM_init(&vm, output_char, read_byte);
+ULVM_set_net(&vm, &net);
+
+int handle = ULVM_net_open(&net, ULVM_NET_KIND_UDP, 5000, "127.0.0.1", 5001, 0);
+```
 
 ---
 

@@ -16,6 +16,12 @@ EXAMPLES = [
     ("float", ROOT / "examples" / "float" / "float.c"),
     ("game", ROOT / "examples" / "game" / "game.c"),
     ("pong", ROOT / "examples" / "pong" / "pong.c"),
+    ("network_headless_smoke", ROOT / "examples" / "network" / "headless_smoke.c"),
+    ("network_http_post", ROOT / "examples" / "network" / "http_post.c"),
+    ("network_tcp_framed", ROOT / "examples" / "network" / "tcp_framed.c"),
+    ("network_udp_ports", ROOT / "examples" / "network" / "udp_ports.c"),
+    ("network_pong_host", ROOT / "examples" / "network" / "pong_multiplayer.c"),
+    ("network_pong_join", ROOT / "examples" / "network" / "pong_multiplayer.c"),
     ("audio", ROOT / "examples" / "audio" / "audio.c"),
     ("save_counter", ROOT / "examples" / "save_counter" / "save_counter.c"),
     ("offscreen", ROOT / "examples" / "offscreen" / "offscreen.c"),
@@ -49,6 +55,8 @@ def main() -> int:
             ]
             if name == "microcity":
                 command.extend(["-D", "_WIN32=1"])
+            elif name == "network_pong_join":
+                command.extend(["-D", "PONG_HOST=0"])
             result = subprocess.run(
                 command,
                 cwd=ROOT,

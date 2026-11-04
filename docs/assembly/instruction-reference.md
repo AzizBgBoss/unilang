@@ -58,6 +58,71 @@ a four-byte RAM address; `target` is a four-byte absolute bytecode offset.
 13 cosine, 14 square root, and 15 `atan2(left, right)`. `floatcast` numeric
 format IDs are described in [bytecode format](bytecode-format.md).
 
+## Optional networking (`90`–`A0`)
+
+All operands in this range are one-byte register indices. Networking is
+available only when a host installs `ULVMNet` with `ULVM_set_net`;
+`isflagsupported(15, 1)` detects it. Without networking, result registers
+receive `0xffffffff` and `net_lasterror` reports `UNSUPPORTED`. The same
+sentinel means operation failure. Status zero means closed or invalid.
+
+| Opcode | Mnemonic | Operands | Behavior |
+|---:|---|---|---|
+| `90` | `net_open` | `kind, local_port, remote_port, host_addr, flags, dst` | Open a TCP, UDP, or HTTP endpoint; `host_addr` is zero for no remote host or points to a NUL-terminated RAM string. Flag bit 0 opens a TCP listener; local port zero requests an ephemeral port. |
+| `91` | `net_status` | `handle, dst` | Status: closed 0, listening 1, connecting 2, connected 3, ready 4. |
+| `92` | `net_send` | `handle, addr, length, dst` | Send up to 2048 bytes from RAM. |
+| `93` | `net_recv` | `handle, addr, capacity, dst` | Copy currently available bytes without waiting. |
+| `94` | `net_accept` | `listener, dst` | Accept a pending peer or fail. |
+| `95` | `net_close` | `handle, dst` | Close one handle; returns 1 on success. |
+| `96` | `net_option` | `handle, option, value, dst` | Set a supported option; returns 1 on success. |
+| `97` | `net_avail` | `handle, dst` | Return buffered receive bytes. |
+| `98` | `net_localip` | `addr, dst` | Write a NUL-terminated local address; returns 1 on success. |
+| `99` | `net_peer` | `handle, host_addr, port_addr, dst` | Write peer hostname and big-endian 16-bit port. |
+| `9A` | `net_lasterror` | `dst` | Return the most recent network error code. |
+| `9B` | `net_http` | `handle, method, path, headers, body, length, dst` | Start HTTP GET (`method=1`) or POST (`method=2`) on an HTTP handle; path and headers are NUL-terminated RAM strings. |
+| `9C` | `net_http_status` | `handle, dst` | Return zero while the response status is pending, then the HTTP status code. |
+| `9D` | `net_discovery` | `flags, port, game_id, name_addr, dst` | Start/stop LAN announcements and listening; flags bit 0 listens, bit 1 announces. |
+| `9E` | `net_discovery_count` | `dst` | Return the current nonexpired session count. |
+| `9F` | `net_discovery_get` | `index, name_addr, host_addr, port_addr, game_id_addr, dst` | Write the session name, IPv4 address, big-endian port and game ID. |
+| `A0` | `net_localport` | `handle, dst` | Return the actual local port, including an OS-selected ephemeral port. |
+
+Kinds are TCP=1, UDP=2, HTTP=3. The in-memory reference backend implements
+UDP. The SDL desktop host implements nonblocking TCP, UDP, and HTTP sockets.
+`host_addr` is a
+NUL-terminated RAM string of at most 63 bytes containing a numeric IPv4 or
+IPv6 address, not a URL. DNS names and URL schemes are rejected; DNS lookup
+is not performed. TCP sends and receives may be partial. A zero-length TCP
+receive with status `CLOSED` indicates EOF.
+HTTP is plain HTTP only; HTTPS/TLS is unsupported.
+HTTP opens use port 80 when `remote_port` is zero. HTTP headers and bodies are
+bounded by 512 and 2048 bytes respectively; response bodies are capped at 2048
+bytes. Chunked transfer decoding is not supported.
+
+LAN discovery uses UDP broadcast on fixed port 45678. The wire record is
+`ULND`, version:u8 (=1), type:u8 (1 announce, 2 goodbye), game_id:u32 in
+big-endian order, game_port:u16 big-endian, name_length:u8, then up to 31 UTF-8 name
+bytes. Announcements repeat once per second; sessions expire after 5 seconds.
+Records contain no secrets and remain on the local broadcast network. If
+broadcast setup fails, listening may still operate; `netdiscovery` returns
+success with `netlasterror=UNSUPPORTED` to indicate degraded announce support.
+The SDL backend does not use multicast.
+
+Handle capacity is 8 across listeners and peers; transfer/buffer size is 2048
+bytes. A TCP listener can accept multiple peers while free slots remain.
+Errors are NONE=0,
+INVALID_HANDLE=1, BAD_KIND=2, NO_BUFFER=3, TIMEOUT=4, IO=5, UNSUPPORTED=6,
+LIMIT=7. Option IDs are timeout-ms=1, TCP_NODELAY=2, frame-size=3, HTTP
+headers=4, UDP broadcast=5. TCP_NODELAY applies to TCP and UDP broadcast
+applies to UDP; other kind/option pairs fail. Timeout applies to desktop
+handles and closes an idle or connecting operation after the requested
+milliseconds. Frame-size applies to TCP; positive values enable a 2-byte
+big-endian length prefix, and zero disables it. `net_avail` reports a
+complete framed payload length and `net_recv` consumes one full frame (the
+buffer must fit it). HTTP headers are passed to `net_http`, so option 4 is
+reserved and returns `UNSUPPORTED`. UDP local bind port is given as
+`local_port`; zero asks the OS to select an ephemeral port. `net_peer` reports
+the remote endpoint.
+
 ## Graphics, storage, and audio
 
 | Opcode | Mnemonic | Operands | Behavior |
