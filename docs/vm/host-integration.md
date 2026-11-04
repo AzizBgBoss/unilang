@@ -168,6 +168,11 @@ plain-HTTP GET/POST, framing, broadcast discovery, and up to eight total handles
 See the [network examples](../../examples/network/README.md) for runnable
 polling patterns and host/join samples.
 
+The desktop interpreter leaves networking disabled by default. Pass `--net`
+after the bytecode filename to initialize the SDL socket backend. UDP datagrams
+are concatenated in the receive buffer, so applications must encode boundaries
+if they need to distinguish individual datagrams.
+
 ## Memory and embedded targets
 
 Define `ULVM_MEM_SIZE` before including `unilang.h`. The default is only

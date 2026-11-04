@@ -36,8 +36,10 @@ available. `netrecv` never waits and returns zero when no bytes are ready.
 by the OS when zero was passed to `netopen`.
 `netlocalip`/`netpeer` return 1 on success; close/option return 1 on success.
 Open returns a handle. Send and receive return byte counts. Failure is
-`0xffffffff` (C `-1`) except `netstatus` (zero for closed/invalid) and
-`netavail` (zero if invalid). `netlasterror` uses NONE=0, INVALID_HANDLE=1,
+`0xffffffff` (C `-1`) when networking is unavailable, except `netlasterror`
+which returns `UNSUPPORTED` (6). With networking installed, invalid handles
+return `0xffffffff` for operations, `CLOSED` for `netstatus`, and zero for
+`netavail`. `netlasterror` uses NONE=0, INVALID_HANDLE=1,
 BAD_KIND=2, NO_BUFFER=3, TIMEOUT=4, IO=5, UNSUPPORTED=6, LIMIT=7.
 
 The capability flag is 15: `isflagsupported(15, 1)` reports whether the host
@@ -67,8 +69,9 @@ The SDL desktop host supports TCP, UDP, HTTP and TCP framing over numeric
 IPv4/IPv6 addresses; DNS names and URL strings are rejected. Its HTTP
 implementation uses plain HTTP over TCP; HTTPS/TLS is unsupported. HTTP status
 is the parsed three-digit code, zero while pending, and zero if no status line
-was received. A response is buffered up to 2048 bytes; chunked decoding is not
-implemented. The in-memory backend supports UDP only. Desktop timeout options
+was received. Response headers are buffered separately; response bodies are
+buffered up to 2048 bytes. Requests use HTTP/1.0 to avoid chunk-framed bodies.
+The in-memory backend supports UDP only. Desktop timeout options
 are checked during polling. See [host networking](../vm/host-integration.md#optional-networking)
 for details and the [network examples](../../examples/network/README.md).
 

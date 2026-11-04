@@ -92,19 +92,22 @@ uint32_t main(void)
         if (count && (keys & 4)) selected = selected ? selected - 1 : count - 1;
         if (count && (keys & 8)) selected = (selected + 1) % count;
 
-        for (i = 0; i < count; i++)
+        i = 0;
+        while (i < count)
         {
             if (netstatus(peer[i]) == NET_CLOSED)
             {
                 netclose(peer[i]);
                 for (uint32_t j = i; j + 1 < count; j++) peer[j] = peer[j + 1];
-                count = count - 1; i = i - (i != 0); continue;
+                count = count - 1;
+                continue;
             }
             if (netavail(peer[i]))
             {
                 uint32_t got = netrecv(peer[i], input, 1);
                 if (got == 1) paddle[i + 1] = (uint8_t)input[0];
             }
+            i = i + 1;
         }
         ball_x = dx ? ball_x + 1 : ball_x - 1;
         ball_y = dy ? ball_y + 1 : ball_y - 1;
@@ -143,7 +146,9 @@ uint32_t main(void)
                 if (connection != 0xffffffff) netoption(connection, NET_OPT_FRAME_SIZE, 32);
             }
         }
-        if (connection != 0xffffffff && netstatus(connection) == NET_CONNECTED)
+        uint32_t connection_status = netstatus(connection);
+        if (connection != 0xffffffff &&
+            (connection_status == NET_CONNECTED || connection_status == NET_READY))
         {
             input[0] = (char)paddle[0]; netsend(connection, input, 1);
             if (netavail(connection) >= 4)

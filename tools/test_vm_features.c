@@ -459,11 +459,19 @@ static void test_network_api(void)
     int receiver = ULVM_net_open(&network, ULVM_NET_KIND_UDP, 5001, "127.0.0.1", 5000, 0);
     assert(sender >= 0 && receiver >= 0);
     const char payload[] = "ping";
+    network.handles[sender].last_error = ULVM_NET_ERR_IO;
+    network.last_error = ULVM_NET_ERR_TIMEOUT;
     assert(ULVM_net_send(&network, sender, payload, (uint32_t)sizeof(payload) - 1u) == (int)(sizeof(payload) - 1u));
+    assert(network.handles[sender].last_error == ULVM_NET_ERR_NONE);
+    assert(network.last_error == ULVM_NET_ERR_NONE);
 
     char buffer[16] = {0};
+    network.handles[receiver].last_error = ULVM_NET_ERR_IO;
+    network.last_error = ULVM_NET_ERR_TIMEOUT;
     int bytes = ULVM_net_recv(&network, receiver, buffer, sizeof(buffer));
     assert(bytes == (int)(sizeof(payload) - 1u));
+    assert(network.handles[receiver].last_error == ULVM_NET_ERR_NONE);
+    assert(network.last_error == ULVM_NET_ERR_NONE);
     assert(memcmp(buffer, payload, sizeof(payload) - 1u) == 0);
     assert(ULVM_net_avail(&network, receiver) == 0);
     assert(ULVM_net_status(&network, receiver) == ULVM_NET_STATUS_READY);
@@ -563,9 +571,9 @@ static void test_headless_network_backend(void)
     int http = ULVM_net_open(&net, ULVM_NET_KIND_HTTP, 0, "127.0.0.1", 80, 0);
     assert(http >= 0);
     assert(ULVM_net_http_request(&net, http, ULVM_NET_HTTP_POST, "/created",
-                                 "X-Test: yes\r\n", "body", 4) == 1);
+                                 "X-Test: yes\n", "body", 4) == 1);
     assert(ULVM_net_http_status(&net, http) == 201);
-    assert(strcmp(ctx.last_http_headers, "X-Test: yes\r\n") == 0);
+    assert(strcmp(ctx.last_http_headers, "X-Test: yes\n") == 0);
     assert(ctx.last_http_method == ULVM_NET_HTTP_POST && ctx.last_http_body_len == 4);
     assert(ULVM_net_avail(&net, http) == 7);
     assert(ULVM_net_http_request(&net, http, ULVM_NET_HTTP_GET, "/missing", "", NULL, 0) == 1);
@@ -609,6 +617,22 @@ static void test_headless_network_backend(void)
     assert(ULVM_net_close(&net, accepted[2]) == 1);
     assert(ULVM_net_status(&net, accepted[3]) == ULVM_NET_STATUS_CONNECTED);
     assert(ULVM_net_accept(&net, listener) >= 0);
+    ULVM_net_shutdown(&net);
+
+    ULVM_net_init(&net); memset(&ctx, 0, sizeof(ctx));
+    ctx.owner = &net; ULVM_net_set_ops(&net, &HEADLESS_NET_OPS, &ctx);
+    int malformed_listener = ULVM_net_listen(&net, ULVM_NET_KIND_TCP, 7001);
+    int malformed_client = ULVM_net_open(&net, ULVM_NET_KIND_TCP, 0, "127.0.0.1", 7001, 0);
+    int malformed_peer = ULVM_net_accept(&net, malformed_listener);
+    assert(malformed_client >= 0 && malformed_peer >= 0);
+    int malformed = malformed_client;
+    assert(ULVM_net_option(&net, malformed, ULVM_NET_OPT_FRAME_SIZE, 4));
+    net.handles[malformed].rx[0] = 0;
+    net.handles[malformed].rx[1] = 5;
+    net.handles[malformed].rx_len = 2;
+    assert(ULVM_net_avail(&net, malformed) == 0);
+    assert(ULVM_net_status(&net, malformed) == ULVM_NET_STATUS_CLOSED);
+    assert(ULVM_net_lasterror(&net) == ULVM_NET_ERR_NO_BUFFER);
     ULVM_net_shutdown(&net);
 }
 

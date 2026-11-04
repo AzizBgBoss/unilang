@@ -232,7 +232,7 @@ enum OP_CODES
     OP_NET_DISCOVERY_COUNT, // parameters: regresult
     OP_NET_DISCOVERY_GET, // parameters: regindex, regnameaddr, reghostaddr, regportaddr, reggameidaddr, regresult
     OP_NET_LOCALPORT = 0xA0, // parameters: reghandle, regresult
-    OP_MEMCPY,           // copy VM memory to RAM or ROM to RAM; validates ranges before copying - parameters: regdst(1), regsrc(1), reglen(1), source(1) [0=RAM,1=ROM]
+    OP_MEMCPY = 0x2D,    // copy VM memory to RAM or ROM to RAM; validates ranges before copying - parameters: regdst(1), regsrc(1), reglen(1), source(1) [0=RAM,1=ROM]
     OP_MEMSET,           // fill a VM memory range; validates the range before writing - parameters: regdst(1), regvalue(1), reglen(1)
     OP_FILL_SCREEN = 0x2F, // fill the active framebuffer - parameters: regcolor(1)
     OP_FILL_CIRCLE = 0x31, // fill a clipped circle - parameters: regx(1), regy(1), regradius(1), regc(1)
@@ -736,7 +736,16 @@ static inline uint32_t ULVM_net_avail(const ULVMNet *net, int handle)
     {
         if (slot->rx_len < 2) return 0;
         uint32_t frame_len = ((uint32_t)slot->rx[0] << 8) | slot->rx[1];
-        if (frame_len > slot->frame_size) return 0;
+        if (frame_len > slot->frame_size || frame_len > ULVM_NET_MAX_TRANSFER)
+        {
+            slot->last_error = ULVM_NET_ERR_NO_BUFFER;
+            slot->status = ULVM_NET_STATUS_CLOSED;
+            slot->rx_len = 0;
+            if (net) ((ULVMNet *)net)->last_error = ULVM_NET_ERR_NO_BUFFER;
+            if (net && net->ops && net->ops->close)
+                net->ops->close(net->ops_context, slot);
+            return 0;
+        }
         return slot->rx_len >= frame_len + 2u ? frame_len : 0u;
     }
     return slot ? slot->rx_len : 0u;
@@ -898,8 +907,10 @@ static inline int ULVM_net_peer(const ULVMNet *net, int handle, char *host, size
 
 static inline int ULVM_net_send(ULVMNet *net, int handle, const void *data, uint32_t len)
 {
-    if (!net || !data || len == 0)
+    if (!net)
         return -1;
+    if (!data || len == 0)
+    { net->last_error = ULVM_NET_ERR_NO_BUFFER; return -1; }
     ULVMNetHandle *sender = (ULVMNetHandle *)ulvm_net_get_handle(net, handle);
     if (!sender || !sender->active)
     {
@@ -909,6 +920,7 @@ static inline int ULVM_net_send(ULVMNet *net, int handle, const void *data, uint
 
     if (len > ULVM_NET_MAX_BUFFER)
     {
+        sender->last_error = ULVM_NET_ERR_NO_BUFFER;
         net->last_error = ULVM_NET_ERR_NO_BUFFER;
         return -1;
     }
@@ -916,8 +928,13 @@ static inline int ULVM_net_send(ULVMNet *net, int handle, const void *data, uint
     if (net->ops)
     {
         int sent = net->ops->send ? net->ops->send(net->ops_context, sender, data, len) : -1;
-        if (sent >= 0 && !sender->last_error) net->last_error = ULVM_NET_ERR_NONE;
-        else if (!net->last_error) net->last_error = sender->last_error ? sender->last_error : ULVM_NET_ERR_IO;
+        if (sent >= 0)
+            sender->last_error = net->last_error = ULVM_NET_ERR_NONE;
+        else
+        {
+            if (!sender->last_error) sender->last_error = ULVM_NET_ERR_IO;
+            net->last_error = sender->last_error;
+        }
         return sent;
     }
 
@@ -934,6 +951,7 @@ static inline int ULVM_net_send(ULVMNet *net, int handle, const void *data, uint
             continue;
         if (peer->rx_len + len > ULVM_NET_MAX_BUFFER)
         {
+            sender->last_error = ULVM_NET_ERR_NO_BUFFER;
             net->last_error = ULVM_NET_ERR_NO_BUFFER;
             return -1;
         }
@@ -943,18 +961,20 @@ static inline int ULVM_net_send(ULVMNet *net, int handle, const void *data, uint
         sender->tx_len = len;
         memcpy(sender->tx, data, len);
         sender->status = ULVM_NET_STATUS_READY;
-        net->last_error = ULVM_NET_ERR_NONE;
+        sender->last_error = net->last_error = ULVM_NET_ERR_NONE;
         return (int)len;
     }
 
-    net->last_error = ULVM_NET_ERR_IO;
+    sender->last_error = net->last_error = ULVM_NET_ERR_IO;
     return -1;
 }
 
 static inline int ULVM_net_recv(ULVMNet *net, int handle, void *dest, uint32_t cap)
 {
-    if (!net || !dest || cap == 0)
+    if (!net)
         return 0;
+    if (!dest || cap == 0)
+    { net->last_error = ULVM_NET_ERR_NO_BUFFER; return 0; }
     ULVMNetHandle *slot = (ULVMNetHandle *)ulvm_net_get_handle(net, handle);
     if (!slot || !slot->active)
     {
@@ -965,38 +985,56 @@ static inline int ULVM_net_recv(ULVMNet *net, int handle, void *dest, uint32_t c
     if (slot->frame_size)
     {
         if (net->ops && net->ops->poll) net->ops->poll(net->ops_context, slot);
-        if (slot->rx_len < 2) return 0;
+        if (slot->last_error)
+        { net->last_error = slot->last_error; return -1; }
+        if (slot->rx_len < 2)
+        { slot->last_error = net->last_error = ULVM_NET_ERR_NONE; return 0; }
         uint32_t frame_len = ((uint32_t)slot->rx[0] << 8) | slot->rx[1];
         if (frame_len > slot->frame_size || frame_len > ULVM_NET_MAX_TRANSFER)
-        { net->last_error = ULVM_NET_ERR_NO_BUFFER; return -1; }
-        if (slot->rx_len < frame_len + 2u) return 0;
-        if (cap < frame_len) { net->last_error = ULVM_NET_ERR_NO_BUFFER; return -1; }
+        {
+            slot->last_error = net->last_error = ULVM_NET_ERR_NO_BUFFER;
+            slot->status = ULVM_NET_STATUS_CLOSED;
+            slot->rx_len = 0;
+            if (net->ops && net->ops->close) net->ops->close(net->ops_context, slot);
+            return -1;
+        }
+        if (slot->rx_len < frame_len + 2u)
+        { slot->last_error = net->last_error = ULVM_NET_ERR_NONE; return 0; }
+        if (cap < frame_len)
+        { slot->last_error = net->last_error = ULVM_NET_ERR_NO_BUFFER; return -1; }
         memcpy(dest, slot->rx + 2, frame_len);
         memmove(slot->rx, slot->rx + frame_len + 2u, slot->rx_len - frame_len - 2u);
         slot->rx_len -= frame_len + 2u;
         if (!slot->rx_len && slot->kind != ULVM_NET_KIND_UDP && slot->status == ULVM_NET_STATUS_READY)
             slot->status = ULVM_NET_STATUS_CONNECTED;
-        net->last_error = ULVM_NET_ERR_NONE;
+        slot->last_error = net->last_error = ULVM_NET_ERR_NONE;
         return (int)frame_len;
     }
 
     if (net->ops)
     {
         int got = net->ops->recv ? net->ops->recv(net->ops_context, slot, dest, cap) : -1;
-        if (got >= 0 && !slot->last_error) net->last_error = ULVM_NET_ERR_NONE;
-        else if (!net->last_error) net->last_error = slot->last_error ? slot->last_error : ULVM_NET_ERR_IO;
+        if (got >= 0)
+            slot->last_error = net->last_error = ULVM_NET_ERR_NONE;
+        else
+        {
+            if (!slot->last_error) slot->last_error = ULVM_NET_ERR_IO;
+            net->last_error = slot->last_error;
+        }
         return got;
     }
 
     if (slot->rx_len == 0)
+    { slot->last_error = net->last_error = ULVM_NET_ERR_NONE;
         return 0;
+    }
 
     uint32_t copied = (slot->rx_len < cap) ? slot->rx_len : cap;
     memcpy(dest, slot->rx, copied);
     memmove(slot->rx, slot->rx + copied, slot->rx_len - copied);
     slot->rx_len -= copied;
     slot->status = ULVM_NET_STATUS_READY;
-    net->last_error = ULVM_NET_ERR_NONE;
+    slot->last_error = net->last_error = ULVM_NET_ERR_NONE;
     return (int)copied;
 }
 

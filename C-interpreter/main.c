@@ -11,11 +11,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 
 #define ULVM_MEM_SIZE 8192
 #include "unilang.h"
 #include "uniaudio.h"
 #include "net_sockets.h"
+#include "host_options.h"
 
 #define SCALE 10
 
@@ -533,23 +535,25 @@ static void print_hot_instructions(const UnilangVM *vm)
 int main(int argc, char **argv)
 {
     const char *bytecode_path = NULL;
+    int networking_enabled = ULVM_desktop_network_flag(argc, argv);
     for (int i = 1; i < argc; i++)
     {
         if (strcmp(argv[i], "-debug") == 0)
             debug_enabled = 1;
+        else if (strcmp(argv[i], "--net") == 0) { }
         else if (!bytecode_path)
             bytecode_path = argv[i];
         else
         {
             fprintf(stderr, "Unexpected argument: %s\n", argv[i]);
-            fprintf(stderr, "Usage: %s <bytecode file> [-debug]\n", argv[0]);
+            fprintf(stderr, "Usage: %s <bytecode file> [-debug] [--net]\n", argv[0]);
             return 1;
         }
     }
 
     if (!bytecode_path)
     {
-        fprintf(stderr, "Usage: %s <bytecode file> [-debug]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <bytecode file> [-debug] [--net]\n", argv[0]);
         return 1;
     }
 
@@ -597,7 +601,10 @@ int main(int argc, char **argv)
         return 1;
     }
     uniaudio_init(&audio_engine);
-    int net_ready = ULVM_net_socket_init();
+#if defined(__APPLE__)
+    signal(SIGPIPE, SIG_IGN);
+#endif
+    int net_ready = networking_enabled && ULVM_net_socket_init();
     if (SDL_Init(SDL_INIT_VIDEO) != 0)
     {
         printf("SDL_Init failed: %s\n", SDL_GetError());

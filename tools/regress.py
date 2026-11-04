@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile buildable examples to temporary bytecode as a smoke test."""
+"""Compile and run buildable examples through the deterministic headless host."""
 
 from __future__ import annotations
 
@@ -43,6 +43,28 @@ def main() -> int:
     failures = 0
     with tempfile.TemporaryDirectory(prefix="unilang-regress-") as temp_dir:
         output_dir = Path(temp_dir)
+        opcode_result = subprocess.run([sys.executable, str(ROOT / "tools" / "test_opcode_contract.py")], cwd=ROOT)
+        if opcode_result.returncode:
+            failures += 1
+            print("FAIL opcode contract")
+        else:
+            print("OK   opcode contract")
+        pong_result = subprocess.run([sys.executable, str(ROOT / "tools" / "test_pong_network_contract.py")],
+                                     cwd=ROOT, capture_output=True, text=True)
+        if pong_result.returncode:
+            failures += 1
+            print("FAIL Pong networking contract")
+            print((pong_result.stderr + pong_result.stdout).strip())
+        else:
+            print("OK   Pong networking contract")
+        headless = output_dir / "headless"
+        host_result = subprocess.run(["cc", "-O2", "-std=c11", "-I", str(ROOT / "C-interpreter"),
+                                       str(ROOT / "tools" / "headless.c"), "-lm", "-o", str(headless)],
+                                      cwd=ROOT, capture_output=True, text=True)
+        if host_result.returncode:
+            print(host_result.stderr.strip())
+            return failures + 1
+        compiled: list[tuple[str, Path]] = []
         examples = EXAMPLES + [("microcity", ROOT / "examples" / "microcity")]
         for name, source in examples:
             output = output_dir / f"{name}.ulc"
@@ -71,6 +93,31 @@ def main() -> int:
                 print(details or "compiler exited with a non-zero status")
             else:
                 print(f"OK   {source.relative_to(ROOT)}")
+                compiled.append((name, output))
+
+        netscore = output_dir / "netscore.c"
+        netscore.write_text("uint32_t netscore(uint32_t x) { return x + 1; }\n"
+                            "uint32_t main(void) { return netscore(3); }\n", encoding="utf-8")
+        netscore_result = subprocess.run([sys.executable, str(ROOT / "compiler.py"), str(netscore),
+                                          "-o", str(output_dir / "netscore.ulc")],
+                                         cwd=ROOT, capture_output=True, text=True)
+        if netscore_result.returncode:
+            failures += 1
+            print("FAIL netscore user function")
+            print((netscore_result.stderr + netscore_result.stdout).strip())
+        else:
+            print("OK   netscore user function")
+
+        for name, bytecode in compiled:
+            run = subprocess.run([str(headless), str(bytecode), "-frames", "1", "-instr", "20000000", "-quiet"],
+                                 cwd=ROOT, capture_output=True, text=True, timeout=30)
+            diagnostic = run.stdout + run.stderr
+            if run.returncode or "faulted=1" in diagnostic:
+                failures += 1
+                print(f"FAIL headless {name}")
+                print(diagnostic.strip() or "headless host exited with a non-zero status")
+            else:
+                print(f"OK   headless {name}")
 
         variadic_source = output_dir / "unsupported_variadic.c"
         variadic_source.write_text(

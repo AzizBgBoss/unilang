@@ -33,6 +33,8 @@ build the SDL host, and launch the bytecode:
 cc -std=c11 -O2 C-interpreter/main.c -o C-interpreter/main \
   $(pkg-config --cflags --libs sdl2) -lm
 C-interpreter/main examples/cube3d/cube3d.ulc
+# Add --net after the bytecode filename to enable SDL TCP/UDP/HTTP networking.
+C-interpreter/main examples/network/pong_host.ulc --net
 ```
 
 The same commands work in WSL/Linux. Rebuild the SDL host whenever VM or
@@ -46,8 +48,9 @@ headers, so the command also builds with strict `-std=c11` on Linux and WSL.
 The VM exposes an optional host-owned network state blob through
 `ULVM_set_net()`. Networking opcodes are nonblocking and RAM-bounded. The
 reference implementation in `C-interpreter/unilang.h` provides an in-memory
-UDP loopback backend. The SDL desktop host installs a nonblocking TCP/UDP/HTTP
-socket backend and LAN discovery from `C-interpreter/net_sockets.h`; bytecode
+UDP loopback backend. The SDL desktop host can install a nonblocking
+TCP/UDP/HTTP socket backend and LAN discovery from `C-interpreter/net_sockets.h`
+when launched with `--net`; networking is disabled by default. Bytecode
 detects support with `isflagsupported(15, 1)`. See the [host integration guide](docs/vm/host-integration.md#optional-networking)
 for the current API and limitations.
 

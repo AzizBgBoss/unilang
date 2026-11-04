@@ -96,7 +96,11 @@ receive with status `CLOSED` indicates EOF.
 HTTP is plain HTTP only; HTTPS/TLS is unsupported.
 HTTP opens use port 80 when `remote_port` is zero. HTTP headers and bodies are
 bounded by 512 and 2048 bytes respectively; response bodies are capped at 2048
-bytes. Chunked transfer decoding is not supported.
+bytes. Requests use HTTP/1.0 to avoid chunk-framed response bodies. Without
+networking installed, network operations return `FFFFFFFF` except
+`net_lasterror`, which returns `UNSUPPORTED`. UDP datagrams are appended to the
+receive buffer and their boundaries are not preserved; applications that need
+boundaries should include their own length field.
 
 LAN discovery uses UDP broadcast on fixed port 45678. The wire record is
 `ULND`, version:u8 (=1), type:u8 (1 announce, 2 goodbye), game_id:u32 in

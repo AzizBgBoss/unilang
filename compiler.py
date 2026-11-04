@@ -342,6 +342,26 @@ class Ins:
 
 
 class Compiler:
+    NETWORK_BUILTINS = {
+        "netopen": ("net_open", 5, (0, 1, 2, 3, 4)),
+        "netstatus": ("net_status", 1, (0,)),
+        "netsend": ("net_send", 3, (0, 1, 2)),
+        "netrecv": ("net_recv", 3, (0, 1, 2)),
+        "netaccept": ("net_accept", 1, (0,)),
+        "netclose": ("net_close", 1, (0,)),
+        "netoption": ("net_option", 3, (0, 1, 2)),
+        "netavail": ("net_avail", 1, (0,)),
+        "netlocalip": ("net_localip", 1, (0,)),
+        "netpeer": ("net_peer", 3, (0, 1, 2)),
+        "netlasterror": ("net_lasterror", 0, ()),
+        "nethttp": ("net_http", 6, (0, 1, 2, 3, 4, 5)),
+        "nethttpstatus": ("net_http_status", 1, (0,)),
+        "netdiscovery": ("net_discovery", 4, (0, 1, 2, 3)),
+        "netdiscoverycount": ("net_discovery_count", 0, ()),
+        "netdiscoveryget": ("net_discovery_get", 5, (0, 1, 2, 3, 4)),
+        "netlocalport": ("net_localport", 1, (0,)),
+    }
+
     def __init__(self, optimize=True):
         self.optimize = optimize
         self.code = []             # list of Ins; encoded to bytes by finalize()
@@ -2207,7 +2227,7 @@ class Compiler:
                 return self.gen_getpixel(node)
             if name == "isflagsupported":
                 return self.gen_isflagsupported(node)
-            if name.startswith("net"):
+            if name in self.NETWORK_BUILTINS:
                 return self.gen_network_builtin(node, name)
             if name == "rand":
                 return self.gen_rand(node)
@@ -2586,28 +2606,9 @@ class Compiler:
     def gen_network_builtin(self, call, name):
         # Network opcodes use register operands. Resolve every source first so
         # evaluating a later argument cannot clobber an earlier register.
-        specs = {
-            "netopen": ("net_open", 5, (0, 1, 2, 3, 4)),
-            "netstatus": ("net_status", 1, (0,)),
-            "netsend": ("net_send", 3, (0, 1, 2)),
-            "netrecv": ("net_recv", 3, (0, 1, 2)),
-            "netaccept": ("net_accept", 1, (0,)),
-            "netclose": ("net_close", 1, (0,)),
-            "netoption": ("net_option", 3, (0, 1, 2)),
-            "netavail": ("net_avail", 1, (0,)),
-            "netlocalip": ("net_localip", 1, (0,)),
-            "netpeer": ("net_peer", 3, (0, 1, 2)),
-            "netlasterror": ("net_lasterror", 0, ()),
-            "nethttp": ("net_http", 6, (0, 1, 2, 3, 4, 5)),
-            "nethttpstatus": ("net_http_status", 1, (0,)),
-            "netdiscovery": ("net_discovery", 4, (0, 1, 2, 3)),
-            "netdiscoverycount": ("net_discovery_count", 0, ()),
-            "netdiscoveryget": ("net_discovery_get", 5, (0, 1, 2, 3, 4)),
-            "netlocalport": ("net_localport", 1, (0,)),
-        }
-        if name not in specs:
+        if name not in self.NETWORK_BUILTINS:
             raise NotImplementedError(f"unknown networking builtin '{name}'")
-        opcode, argc, arg_regs = specs[name]
+        opcode, argc, arg_regs = self.NETWORK_BUILTINS[name]
         args = call.args.exprs if call.args else []
         if len(args) != argc:
             raise NotImplementedError(f"{name}() takes exactly {argc} argument(s)")

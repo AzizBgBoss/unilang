@@ -9,6 +9,10 @@
 #include <stdint.h>
 #include <errno.h>
 
+#ifndef ULVM_NET_NOW_MS
+#define ULVM_NET_NOW_MS() SDL_GetTicks()
+#endif
+
 #if defined(_WIN32)
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -75,7 +79,7 @@ static inline void ULVM_desktop_net_context_init(ULVMDesktopNetContext *ctx)
 
 static inline uint32_t ULVM_desktop_net_now(void)
 {
-    return SDL_GetTicks();
+    return ULVM_NET_NOW_MS();
 }
 
 static inline void ULVM_desktop_net_abort(ULVMNetHandle *h)
@@ -299,7 +303,7 @@ static inline void ULVM_desktop_net_poll(void *ctx, ULVMNetHandle *h)
                 { end = i + 4u; break; }
             if (!end)
             {
-                if (s->http_raw_len >= ULVM_NET_MAX_HTTP_HEADERS)
+                if (s->http_raw_len >= sizeof(s->http_raw))
                 { h->last_error = ULVM_NET_ERR_NO_BUFFER; h->status = ULVM_NET_STATUS_CLOSED; ULVM_desktop_net_abort(h); }
                 else if (s->eof)
                 { h->last_error = ULVM_NET_ERR_IO; h->status = ULVM_NET_STATUS_CLOSED; ULVM_desktop_net_abort(h); }
@@ -407,11 +411,13 @@ static inline int ULVM_desktop_http_request(void *ctx, ULVMNetHandle *h, uint8_t
         snprintf(host_header, sizeof(host_header), "[%s]:%u", (const char *)h->peer_host, (unsigned)h->remote_port);
     else
         snprintf(host_header, sizeof(host_header), "%s:%u", (const char *)h->peer_host, (unsigned)h->remote_port);
+    size_t headers_len = strlen(headers);
+    const char *header_end = (!headers_len ||
+        (headers_len >= 2 && strcmp(headers + headers_len - 2, "\r\n") == 0))
+        ? "\r\n" : "\r\n\r\n";
     int n = snprintf((char *)s->http_tx, sizeof(s->http_tx),
-                     "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nContent-Length: %u\r\n%s%s",
-                     verb, path, host_header, (unsigned)body_len, headers,
-                     (strlen(headers) >= 2 && strcmp(headers + strlen(headers) - 2, "\r\n") == 0)
-                         ? "\r\n" : "\r\n\r\n");
+                     "%s %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\nContent-Length: %u\r\n%s%s",
+                     verb, path, host_header, (unsigned)body_len, headers, header_end);
     if (n < 0 || (size_t)n + body_len > sizeof(s->http_tx))
     { h->last_error = ULVM_NET_ERR_NO_BUFFER; s->http_tx_len = 0; return 0; }
     if (body_len) memcpy(s->http_tx + n, body, body_len);
@@ -426,10 +432,14 @@ static inline int ULVM_desktop_http_request(void *ctx, ULVMNetHandle *h, uint8_t
 
 static inline int ULVM_desktop_net_send(void *ctx, ULVMNetHandle *h, const void *data, uint32_t len)
 {
-    (void)ctx;
+    if (h->status == ULVM_NET_STATUS_CONNECTING)
+    {
+        ULVM_desktop_net_poll(ctx, h);
+        if (!h->host_data || h->status == ULVM_NET_STATUS_CLOSED) return -1;
+        if (h->status == ULVM_NET_STATUS_CONNECTING) return 0;
+    }
     ULVMDesktopSocketState *s = (ULVMDesktopSocketState *)h->host_data;
     if (!s || s->listener) return -1;
-    if (h->status == ULVM_NET_STATUS_CONNECTING) return 0;
     if (h->kind == ULVM_NET_KIND_UDP && s->remote_len == 0)
     { h->last_error = ULVM_NET_ERR_BAD_KIND; return -1; }
     if (h->frame_size)
@@ -440,6 +450,8 @@ static inline int ULVM_desktop_net_send(void *ctx, ULVMNetHandle *h, const void 
         memcpy(s->framed_tx + 2, data, len);
         s->framed_tx_len = len + 2u; s->framed_tx_sent = 0;
         ULVM_desktop_net_poll(ctx, h);
+        s = (ULVMDesktopSocketState *)h->host_data;
+        if (!s || h->status == ULVM_NET_STATUS_CLOSED) return -1;
         s->last_activity_ms = ULVM_desktop_net_now();
         return (int)len;
     }

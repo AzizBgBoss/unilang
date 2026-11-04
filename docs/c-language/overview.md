@@ -35,6 +35,8 @@ For the SDL2 desktop host, build it first:
 cc -std=c11 -O2 C-interpreter/main.c -o C-interpreter/main \
   $(pkg-config --cflags --libs sdl2) -lm
 C-interpreter/main /tmp/cube3d.ulc
+# Add --net after the bytecode path for SDL networking.
+C-interpreter/main /tmp/network_game.ulc --net
 ```
 
 See the [compiler and preprocessor reference](preprocessor.md) for all
