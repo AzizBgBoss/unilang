@@ -33,6 +33,8 @@ build the SDL host, and launch the bytecode:
 cc -std=c11 -O2 C-interpreter/main.c -o C-interpreter/main \
   $(pkg-config --cflags --libs sdl2) -lm
 C-interpreter/main examples/cube3d/cube3d.ulc
+# Resize the window freely; the VM display scales proportionally with letterboxing.
+C-interpreter/main examples/cube3d/cube3d.ulc --window-size 800x600
 # Add --net after the bytecode filename to enable SDL TCP/UDP/HTTP networking.
 C-interpreter/main examples/network/pong_host.ulc --net
 ```

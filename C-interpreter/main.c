@@ -19,7 +19,7 @@
 #include "net_sockets.h"
 #include "host_options.h"
 
-#define SCALE 10
+#define DEFAULT_SCALE 10
 
 static int debug_enabled = 0;
 
@@ -43,7 +43,8 @@ static uint16_t graphics_width = 0;
 static uint16_t graphics_height = 0;
 static uint8_t graphics_colorsize = 0;
 static uint16_t palette[256];
-static int scale = SCALE;
+static int requested_window_width = 0;
+static int requested_window_height = 0;
 static uint32_t presented_frames = 0;
 static uint32_t last_frame_time = 0;
 static uint8_t previous_keyboard_state = 0;
@@ -177,6 +178,8 @@ static void my_refreshscreen(void)
     SDL_UpdateTexture(screen_texture, NULL, display_buffer,
                       FRAMEBUFFER_WIDTH * (int)sizeof(display_buffer[0]));
     SDL_RenderClear(renderer);
+    // SDL's logical-size viewport scales to the current window and letterboxes
+    // when its aspect ratio differs from the VM display.
     SDL_RenderCopy(renderer, screen_texture, NULL, NULL);
     SDL_RenderPresent(renderer);
     uint32_t now = SDL_GetTicks();
@@ -211,10 +214,13 @@ static void my_enablegraphics(uint16_t wx, uint16_t wy, uint8_t colorsize)
     }
 
     my_disablegraphics();
-    scale = (wx <= 128 && wy <= 64) ? SCALE : 5;
-    DEBUG_PRINT("[debug] enabling graphics: %ux%u, scale=%d\n", wx, wy, scale);
+    int default_scale = (wx <= 128 && wy <= 64) ? DEFAULT_SCALE : 5;
+    int window_width = requested_window_width ? requested_window_width : wx * default_scale;
+    int window_height = requested_window_height ? requested_window_height : wy * default_scale;
+    DEBUG_PRINT("[debug] enabling graphics: %ux%u, window=%dx%d\n",
+                wx, wy, window_width, window_height);
     window = SDL_CreateWindow("unilang", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                               wx * scale, wy * scale, 0);
+                               window_width, window_height, SDL_WINDOW_RESIZABLE);
     if (!window)
     {
         DEBUG_ERROR("[debug] SDL_CreateWindow failed: %s\n", SDL_GetError());
@@ -254,6 +260,14 @@ static void my_enablegraphics(uint16_t wx, uint16_t wy, uint8_t colorsize)
         my_disablegraphics();
         return;
     }
+    if (SDL_RenderSetLogicalSize(renderer, wx, wy) != 0)
+    {
+        DEBUG_ERROR("[debug] SDL_RenderSetLogicalSize failed: %s\n", SDL_GetError());
+        my_disablegraphics();
+        return;
+    }
+    SDL_RenderSetIntegerScale(renderer, SDL_FALSE);
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
     screen_texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
                                        SDL_TEXTUREACCESS_STREAMING, wx, wy);
     if (!screen_texture)
@@ -532,6 +546,38 @@ static void print_hot_instructions(const UnilangVM *vm)
     memset(vm->instruction_hits, 0, (size_t)romsize * sizeof(*vm->instruction_hits));
 }
 
+static int parse_window_size(const char *value, int *width, int *height)
+{
+    char *separator;
+    char *end;
+    long parsed_width;
+    long parsed_height;
+
+    errno = 0;
+    parsed_width = strtol(value, &separator, 10);
+    if (errno || separator == value || (*separator != 'x' && *separator != 'X'))
+        return 0;
+
+    const char *height_text = separator + 1;
+    errno = 0;
+    parsed_height = strtol(height_text, &end, 10);
+    if (errno || end == height_text || *end != '\0' ||
+        parsed_width < 64 || parsed_width > 16384 ||
+        parsed_height < 64 || parsed_height > 16384)
+        return 0;
+
+    *width = (int)parsed_width;
+    *height = (int)parsed_height;
+    return 1;
+}
+
+static void print_usage(const char *program)
+{
+    fprintf(stderr,
+            "Usage: %s <bytecode file> [-debug] [--net] [--window-size WIDTHxHEIGHT]\n",
+            program);
+}
+
 int main(int argc, char **argv)
 {
     const char *bytecode_path = NULL;
@@ -541,19 +587,41 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "-debug") == 0)
             debug_enabled = 1;
         else if (strcmp(argv[i], "--net") == 0) { }
+        else if (strcmp(argv[i], "--window-size") == 0)
+        {
+            if (++i >= argc || !parse_window_size(argv[i],
+                                                   &requested_window_width,
+                                                   &requested_window_height))
+            {
+                fprintf(stderr, "Invalid window size; expected WIDTHxHEIGHT (64-16384).\n");
+                print_usage(argv[0]);
+                return 1;
+            }
+        }
+        else if (strncmp(argv[i], "--window-size=", 14) == 0)
+        {
+            if (!parse_window_size(argv[i] + 14,
+                                   &requested_window_width,
+                                   &requested_window_height))
+            {
+                fprintf(stderr, "Invalid window size; expected WIDTHxHEIGHT (64-16384).\n");
+                print_usage(argv[0]);
+                return 1;
+            }
+        }
         else if (!bytecode_path)
             bytecode_path = argv[i];
         else
         {
             fprintf(stderr, "Unexpected argument: %s\n", argv[i]);
-            fprintf(stderr, "Usage: %s <bytecode file> [-debug] [--net]\n", argv[0]);
+            print_usage(argv[0]);
             return 1;
         }
     }
 
     if (!bytecode_path)
     {
-        fprintf(stderr, "Usage: %s <bytecode file> [-debug] [--net]\n", argv[0]);
+        print_usage(argv[0]);
         return 1;
     }
 

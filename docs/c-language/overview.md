@@ -38,6 +38,8 @@ For the SDL2 desktop host, build it first:
 cc -std=c11 -O2 C-interpreter/main.c -o C-interpreter/main \
   $(pkg-config --cflags --libs sdl2) -lm
 C-interpreter/main examples/cube3d/cube3d.ulc
+# Pick an initial window size; resizing keeps the VM display aspect ratio.
+C-interpreter/main examples/cube3d/cube3d.ulc --window-size 800x600
 # Add --net after the bytecode path for SDL networking.
 C-interpreter/main examples/network/pong_host.ulc --net
 ```
