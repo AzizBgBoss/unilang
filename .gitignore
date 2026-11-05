@@ -5,3 +5,8 @@ C-interpreter/main
 tools/headless
 tools/test_vm_features
 tools/test_vm_features.exe
+*.exe
+*.o
+*.out
+*.ulc
+*.uls
