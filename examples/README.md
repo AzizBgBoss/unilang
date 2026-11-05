@@ -21,7 +21,7 @@ the [bytecode instruction reference](../docs/assembly/instruction-reference.md).
 | [MicroCity](microcity/README.md) | City-builder with persistent save/load through the host | `python compiler.py examples/microcity -o examples/microcity/microcity.ulc -D _WIN32=1` |
 | [Off-screen drawing](offscreen/offscreen.c) | Exercises clipping for rectangles, lines, and glyphs beyond screen edges | `python compiler.py examples/offscreen/offscreen.c -o examples/offscreen/offscreen.ulc` |
 | Pong | A compact graphics and keyboard example | `python compiler.py examples/pong/pong.c -o examples/pong/pong.ulc` |
-| [Networking](network/README.md) | HTTP POST, framed TCP host/join, UDP with distinct ports, deterministic headless smoke test, and multiplayer LAN Pong | See the [network example guide](network/README.md) |
+| [Networking](network/README.md) | HTTP POST, framed TCP host/join, UDP with distinct ports, deterministic headless smoke test, and multiplayer LAN Pong | `python compiler.py examples/network/http_post.c` (see the [network example guide](network/README.md) for the host/join variants) |
 | [Save counter](save_counter/save_counter.c) | Reads and increments persistent SDL-host save data | `python compiler.py examples/save_counter/save_counter.c -o examples/save_counter/save_counter.ulc` |
 | Compiler/VM regressions | Void functions, formatted `printf`, memory operations, math, `goto`, unions, value stack, computed switch dispatch, and clipped graphics | `python tools/regress.py` |
 

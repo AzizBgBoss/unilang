@@ -190,7 +190,7 @@ record sizes are in [host integration](../vm/host-integration.md) and
 | `7B` | `cmpregv` | `src:reg, immediate:u32, dst:reg, condition:u8` | Compare register with immediate and store encoded comparison result. |
 | `7C` | `jcmp` | `left:reg, right:reg, condition:u8, target:u32` | Conditional branch using comparison selector. |
 | `7D` | `jcmpv` | `left:reg, immediate:u32, condition:u8, target:u32` | Conditional branch against immediate. |
-| `FF` | `exit` | — | Halt VM. |
+| `FF` | `exit` | — | Halt VM. Register `r0` is recorded as the exit code (`vm.exit_code`). The compiler loads `main`'s return value into `r0` first, or `0` if there is none. |
 
 For `cmpregv`, `jcmp`, and `jcmpv`, condition selectors 0..5 are unsigned
 `==`, `!=`, `<`, `>`, `<=`, `>=`; selectors 6..9 are signed `<`, `>`, `<=`,

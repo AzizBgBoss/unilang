@@ -4,7 +4,7 @@ Three animated, RGB332 wireframe cubes rotate around two axes on the 128x64
 display. The demo uses 8-bit fixed-point math and perspective projection:
 `screen = center + coordinate * focal_length / depth`. The `project_vertex`
 function transforms each 3D cube vertex, then maps it to screen coordinates.
-Press Enter to exit.
+Press Start to exit.
 
 Compile from the repository root:
 

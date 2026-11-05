@@ -2,7 +2,7 @@
 //   1 mono 64x64      2 gray 64x64      3 palette2 64x64   4 RGB332 64x64    5 palette8 64x64
 //   6 mono 128x64     7 gray 128x64     8 palette2 128x64  9 RGB332 128x64   10 palette8 128x64
 //   11 RGB555 128x128  12 RGB555 256x128
-// A kid walks through a scrolling dusk landscape. Press Enter to quit.
+// A kid walks through a scrolling dusk landscape. Press Start to quit.
 
 #define RGB332(r, g, b) (((r) << 5) | ((g) << 2) | (b))
 #define RGB555(r, g, b) (((r) << 10) | ((g) << 5) | (b))

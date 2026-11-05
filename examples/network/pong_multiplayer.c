@@ -3,7 +3,7 @@
    Menu:      Single player (with difficulty), Host LAN game, Join LAN game.
    Hosting:   the host shows its address and announces the game on the LAN.
    Joining:   pick a discovered game from a list, or type the host's IP.
-   Controls:  Up/Down move; A/Start selects; B/Select backs out. Desktop: C=A, V=B, Enter=Start, Backspace=Select.
+   Controls:  Up/Down move; A/Start selects; B/Select backs out.
    Networking needs a host that enables it (desktop: run with --net).
 
    Network design: the host runs the whole game and sends the ball, scores and

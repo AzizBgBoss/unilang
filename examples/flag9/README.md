@@ -2,7 +2,7 @@
 
 An animated 128x64 RGB332 night scene with a flowing neon aurora, twinkling
 stars, a glowing ringed planet, layered parallax mountains, and a passing
-comet. Press Enter to exit.
+comet. Press Start to exit.
 
 Compile from the repository root:
 

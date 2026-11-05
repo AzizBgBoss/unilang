@@ -93,7 +93,8 @@ int handle = ULVM_net_open(&net, ULVM_NET_KIND_UDP, 5000, "127.0.0.1", 5001, 0);
   - **Flag 1 — keyboard**: `0` disabled, `1` NES-style
     (Up/Down/Left/Right/A/B/Select/Start, 8 bits). Only meaningful once
     graphics are enabled. Bit layout: Up=`1`, Down=`2`, Left=`4`, Right=`8`,
-    C=`16`, V=`32`, Backspace=`64`, Enter=`128`.
+    A=`16`, B=`32`, Select=`64`, Start=`128`. The SDL desktop host maps A, B,
+    Select and Start to the C, V, Backspace and Enter keys.
   - **Flag 2 — audio**: `0` disabled, `1` tone playback (`beep`), `2` the
     four-channel SFX/music engine and `beep`. Support depends on the host's
     audio device. Sound data is copied into host-owned storage and does not
@@ -181,7 +182,7 @@ raw bytes.
 | 0x6C | `outreg` | reg | print a register's full numeric value |
 | 0x6D-0x6F | `sdivreg`/`smodreg`/`sshrreg` | r1, r2, dst | signed division/remainder and arithmetic right shift |
 | 0x70 | `outregsigned` | reg | print signed 32-bit register value |
-| 0xFF | `exit` | — | halt |
+| 0xFF | `exit` | — | halt; `r0` becomes the VM's exit code |
 
 `floatop` formats are `7` for IEEE-754 binary32 and `8` for binary64. Its
 operation selectors are `1` add, `2` subtract, `3` multiply, `4` divide,
@@ -250,7 +251,8 @@ live across statements.
 ### Supported
 
 - `uint32_t main() { ... }` — the entry point; its body is compiled last,
-  followed by an implicit `exit`.
+  followed by an implicit `exit`. `return value;` in `main` sets the exit
+  code (see "Exit codes" below); falling off the end gives `0`.
 - Assignment: `x = expr;`
 - Arithmetic: `+ - * / %` (binary), `x++` / `x--`
 - Bitwise: `& | ^ << >>`
@@ -269,7 +271,8 @@ live across statements.
   conversions. `%s` is supported without formatting modifiers. `*` width and
   precision, `ll`, `l`, and `z` integer conversions, and other conversions
   are rejected. Floating conversion uses the host C library's `snprintf`.
-- `exit();` — halts immediately (statement only, not an expression).
+- `exit();` — halts immediately with exit code `0` (statement only, not an
+  expression).
 - Comments: `// line` and `/* block */`, stripped before parsing
   (string/char literals containing `//`/`/*` are left alone).
 - **Preprocessor** (`preprocessor.py`): `#include "file"` (relative to the
@@ -428,6 +431,14 @@ copy." This sidesteps the ISA's limited call-stack support entirely, so:
   (below) repacks RAM afterwards, so short-lived block-local variables and
   temporaries only cost memory while they are alive.
 
+### Exit codes
+
+`return value;` in `main` loads an integer value into `r0` and then executes
+`exit`. The VM stores `r0` in `vm.exit_code` and the SDL host returns it as its
+process exit status (`echo $?`; POSIX shells keep the low 8 bits). Falling off
+the end of `main`, a bare `return;` and `exit();` give `0`. Recompile old
+`.ulc` files: bytecode built before this change does not set `r0`.
+
 ### Optimizer (`optimizer.py`)
 
 On by default; `-O0` turns it off. It is a post-pass over the instruction
@@ -439,7 +450,8 @@ optimized builds on all examples, plus `tools/fuzz_opt.py`). It does:
 - register promotion of locals into `r0`-`r12` (loop-depth weighted;
   variables whose address escapes stay in RAM),
 - folding into `*regv`/`cmpregv`/`jcmpv` forms, loop rotation,
-- RAM repacking by variable lifetime.
+- RAM repacking by variable lifetime (address `0` is never used, since pointer
+  arguments like `netopen`'s host string treat it as NULL).
 
 Programs using computed `switch` jump tables currently bypass this optimizer:
 its control-flow analysis cannot yet prove which indirect targets are reachable,

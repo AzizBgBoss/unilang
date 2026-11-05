@@ -1,7 +1,7 @@
 // Super Mario Bros. (PICO-8 cart by Tabelombre) prototype for the unilang VM.
 // Assets (sprites, flags, World 1-1 tile grid, palette) are extracted from the cart by
 // extract_cart.py into smb_data.h. 128x64 RGB332 view with a camera that follows Mario in X and Y.
-// Controls: Left/Right move, C jump (hold = higher), V run, Down = crouch (big Mario).
+// Controls: Left/Right move, A jump (hold = higher), B run, Down = crouch (big Mario).
 // Physics constants are the cart's own, in 8-bit fixed point (256 = 1 px).
 #include "smb_data.h"
 

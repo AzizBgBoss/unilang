@@ -3546,6 +3546,7 @@ class Compiler:
             if name == "printf":
                 self.gen_printf(node)
             elif name == "exit":
+                self.emit("setreg", 0, 0)
                 self.emit("exit")
             elif name == "flag":
                 self.uses_graphics = True
@@ -3810,8 +3811,11 @@ class Compiler:
                 self.emit("setpc", end_label)
             else:
                 if node.expr is not None:
-                    self.gen_expr(node.expr)
-                self.emit("exit")  # `return` inside main() ends the program
+                    rhs = self.gen_expr(node.expr)
+                    self.emit_load(rhs, min(self.expr_storage_size(node.expr), 4), 0)
+                else:
+                    self.emit("setreg", 0, 0)
+                self.emit("exit")  # `return` inside main() ends the program; r0 is the exit code
             return
 
         if isinstance(node, c_ast.Goto):
@@ -3877,6 +3881,7 @@ class Compiler:
         self.user_labels.append(self.collect_user_labels(main_fn.body, "main"))
         self.gen_stmt(main_fn.body)
         self.user_labels.pop()
+        self.emit("setreg", 0, 0)
         self.emit("exit")
 
         # Now that we know the program's total memory usage, patch the

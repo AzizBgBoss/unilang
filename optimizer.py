@@ -142,6 +142,8 @@ def reg_operands(ins):
 
 def uses_defs(ins):
     uses, defs = [], []
+    if ins.op == "exit":
+        return [0], defs  # the VM reports r0 as the program's exit code
     roles = ROLES[ins.op]
     for k, role in enumerate(roles):
         if role == "r":
@@ -850,7 +852,7 @@ class Optimizer:
                     if isinstance(a, Addr):
                         used.add(a.slot.id)
         new_addr = {}
-        top = 0
+        top = 1   # keep address 0 free: pointer arguments treat 0 as NULL (e.g. netopen host)
         for s in self.c.slots:
             if s.permanent and s.id in used:
                 new_addr[s.id] = top

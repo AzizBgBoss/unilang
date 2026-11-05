@@ -28,7 +28,7 @@ int main(void)
     while (!ULVM_run(&vm, 1000)) {
         /* Poll platform events or service a watchdog between instruction batches. */
     }
-    return vm.faulted ? 1 : 0;
+    return vm.faulted ? 1 : (int)vm.exit_code;
 }
 ```
 
@@ -37,7 +37,9 @@ directly addressable byte array, `ULVM_set_rom` can avoid calling `readbyte`
 for each fetched byte. Otherwise, leave the flat ROM unset and implement
 `readbyte` for flash, SD, or external storage. `ULVM_run(vm, budget)` executes
 up to `budget` instructions; `ULVM_handlenextinstruction` is the single-step
-alternative.
+alternative. When the program executes `exit`, `vm.exit_code` holds register
+`r0`, which is `main`'s return value (or `0`). A host can return it as its own
+status, as the SDL host does, or ignore it.
 
 ## Optional callback setters
 

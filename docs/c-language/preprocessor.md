@@ -13,8 +13,8 @@ python compiler.py input.c|input_dir [input.c|input_dir ...]
 Examples:
 
 ```sh
-python compiler.py examples/cube3d/cube3d.c -o /tmp/cube3d.ulc
-python compiler.py examples/microcity -o /tmp/microcity.ulc -D _WIN32=1
+python compiler.py examples/cube3d/cube3d.c
+python compiler.py examples/microcity -D _WIN32=1
 python compiler.py one.c two.c -I include -D DEBUG=1 -o combined.ulc
 ```
 

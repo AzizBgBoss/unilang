@@ -26,17 +26,20 @@ From the repository root:
 
 ```sh
 python -m pip install pycparser
-python compiler.py examples/cube3d/cube3d.c -o /tmp/cube3d.ulc
+python compiler.py examples/cube3d/cube3d.c
 ```
+
+The bytecode is written next to the source as `examples/cube3d/cube3d.ulc`.
+Use `-o` only to pick a different name or location.
 
 For the SDL2 desktop host, build it first:
 
 ```sh
 cc -std=c11 -O2 C-interpreter/main.c -o C-interpreter/main \
   $(pkg-config --cflags --libs sdl2) -lm
-C-interpreter/main /tmp/cube3d.ulc
+C-interpreter/main examples/cube3d/cube3d.ulc
 # Add --net after the bytecode path for SDL networking.
-C-interpreter/main /tmp/network_game.ulc --net
+C-interpreter/main examples/network/pong_host.ulc --net
 ```
 
 See the [compiler and preprocessor reference](preprocessor.md) for all
@@ -60,8 +63,9 @@ uint32_t main(void)
 }
 ```
 
-`main` may return early; the returned expression is evaluated but the VM
-program simply exits. Its value is not passed to an operating system.
+`main` may return early. An integer value returned from `main` becomes the
+VM's exit code (see below); falling off the end, `return;` and `exit();` give
+`0`. Floating-point return values are not converted.
 `void main(void)` is accepted as an entry point.
 
 ## Topics

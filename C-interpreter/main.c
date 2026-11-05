@@ -692,5 +692,5 @@ int main(int argc, char **argv)
     free(vm.instruction_hits);
     free(rom);
     free(save_file_path);
-    return 0;
+    return (int)vm.exit_code;
 }

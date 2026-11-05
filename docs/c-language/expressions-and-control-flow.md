@@ -89,8 +89,13 @@ may use `return;` or fall through. Returning a value from a void function,
 omitting a value in a non-void function, or using a void call as an expression
 is rejected.
 
-`return` in `main` halts the bytecode program. The expression is evaluated,
-but no process exit code is provided to a host operating system.
+`return` in `main` halts the bytecode program. An integer expression is loaded
+into register `r0` before the `exit` opcode, and the VM records it as
+`vm.exit_code`. The SDL desktop host returns that value as its process exit
+status, so `echo $?` shows it (POSIX shells keep only the low 8 bits). Falling
+off the end of `main`, a bare `return;` and `exit();` all give `0`. Bytecode
+compiled before this behavior existed does not set `r0` and may report an
+arbitrary exit code, so recompile old `.ulc` files.
 
 ## Known gaps
 

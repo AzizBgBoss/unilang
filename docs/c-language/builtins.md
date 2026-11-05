@@ -118,13 +118,14 @@ bitmask:
 | 2 | Down |
 | 4 | Left |
 | 8 | Right |
-| 16 | C / A |
-| 32 | V / B |
-| 64 | Backspace / Select |
-| 128 | Enter / Start |
+| 16 | A |
+| 32 | B |
+| 64 | Select |
+| 128 | Start |
 
 Keyboard input is host-dependent and intended to be used with graphics
-enabled.
+enabled. The SDL desktop host maps A, B, Select and Start to the C, V,
+Backspace and Enter keys.
 
 ### Flag 2: audio
 

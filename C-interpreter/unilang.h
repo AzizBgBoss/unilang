@@ -42,7 +42,7 @@ through the setpalette(index, rgb555) opcode. enablegraphics() receives colorsiz
 - flag 1 (keyboard) (this will consume the last n bits of memory (after graphics if it's used)) (Only gets supported once graphics are supported and on):
 0 - disable keyboard
 1 - NES style keyboard (Up + Down + Left + Right + A + B + select + start) (1 x 8 = 8 bits)
-On keyboard: (Up + Down + Left + Right + C + V + Backspace + Enter)
+On the SDL desktop host the buttons map to keys: (Up + Down + Left + Right + A=C + B=V + Select=Backspace + Start=Enter)
 */
 
 #if defined(ARDUINO_ARCH_AVR)
@@ -510,6 +510,7 @@ struct UnilangVM
 {
     uint32_t pc;
     int running;
+    uint32_t exit_code; // r0 at OP_EXIT
     int faulted;
     uint32_t fault_pc;
     uint8_t fault_opcode;
@@ -3472,6 +3473,7 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
     }
 
     ULVM_CASE(OP_EXIT)
+        vm->exit_code = ULVM_R(0);
         vm->running = 0;
         break;
 

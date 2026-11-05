@@ -7,13 +7,13 @@ expanded to the full display with double-width pixels.
 
 Controls:
 - Left and Right: walk
-- C (A button): jump
-- Hold C for a higher jump; jump is buffered and supports coyote time
+- A: jump
+- Hold A for a higher jump; jump is buffered and supports coyote time
 - Horizontal movement accelerates and eases to a stop
-- Left or Right + V (B button): dash horizontally
-- Up + V (B button): dash upward
+- Left or Right + B: dash horizontally
+- Up + B: dash upward
 - Dash recharges when you land
-- Enter (Start): exit after reaching the summit
+- Start: exit after reaching the summit
 
 The bottom spike strip sends the climber back to the last checkpoint; jump or
 dash over it. Controls and dash readiness stay in the bottom bar.

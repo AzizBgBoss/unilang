@@ -1,8 +1,8 @@
 // Celeste-style precision platformer for the uniClang VM (128x64, RGB332, 1:1 pixels).
 // Scrolling 512x128 world, subpixel physics, 8-way dash, variable jump, coyote time,
 // jump buffering, corner correction, parallax background.
-// Controls: Left/Right run, C jump (hold = higher), V + direction dash (8-way),
-//           Down while falling = fast fall, Enter exits at the summit.
+// Controls: Left/Right run, A jump (hold = higher), B + direction dash (8-way),
+//           Down while falling = fast fall, Start exits at the summit.
 
 #define KEY_UP (1)
 #define KEY_DOWN (1 << 1)
@@ -662,8 +662,8 @@ uint32_t main()
         {
             drawstring("CELESTE", 46, 8, C_GOLD);
             srect(34, 16, 60, 1, C_CYAN);
-            drawstring("C JUMP  V DASH", 28, 20, C_ICE);
-            if ((frame >> 4) & 1) drawstring("PRESS C", 46, 50, C_WHITE);
+            drawstring("A JUMP  B DASH", 28, 20, C_ICE);
+            if ((frame >> 4) & 1) drawstring("PRESS A", 46, 50, C_WHITE);
         }
         else
         {
@@ -671,7 +671,7 @@ uint32_t main()
             drawstring("DEATHS", 36, 26, C_ICE);
             drawchar('0' + deaths / 10, 76, 26, C_WHITE);
             drawchar('0' + deaths % 10, 80, 26, C_WHITE);
-            drawstring("ENTER EXIT", 38, 50, C_CYAN);
+            drawstring("START EXIT", 38, 50, C_CYAN);
         }
         refreshscreen();
         frame_wait();

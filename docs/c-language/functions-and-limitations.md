@@ -42,6 +42,9 @@ Optimization is enabled by default. `-O0` disables the optimizer; `-O1` and
 `-O2` both enable the current optimizer. It performs control-flow cleanup,
 constant propagation, store/load forwarding, dead temporary removal, register
 promotion, instruction folding, loop rotation, and RAM lifetime repacking.
+Repacking never places a variable at RAM address `0`, because pointer
+arguments such as the `netopen` host string treat address `0` as NULL. It also
+treats `exit` as reading `r0`, so `main`'s return value is preserved.
 
 Variables whose address escapes are kept in memory. Globals and address-taken
 objects have more constrained placement. With `-O0`, declarations are not

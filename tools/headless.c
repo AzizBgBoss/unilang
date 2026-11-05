@@ -182,7 +182,7 @@ static uint8_t get_keys(void)
     uint8_t k = (uint8_t)(x & 0x77);
     if ((x >> 8) % 4 != 0) k |= 8;           /* right */
     if (k & 8) k &= (uint8_t)~4;             /* not left+right */
-    if ((key_seed & 1) && (frames / 6) % 25 == 1) k |= 128;  /* odd seeds press Enter now and then */
+    if ((key_seed & 1) && (frames / 6) % 25 == 1) k |= 128;  /* odd seeds press Start now and then */
     return k;
 }
 static uint32_t get_time(void) { time_calls++; headless_net_context.now_ms++; return frames * 16 + time_calls; }
