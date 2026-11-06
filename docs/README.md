@@ -12,6 +12,7 @@ porting a larger C project.
 - [Expressions and control flow](c-language/expressions-and-control-flow.md)
 - [Functions, optimizer, and limitations](c-language/functions-and-limitations.md)
 - [Builtins: graphics, audio, storage, and math](c-language/builtins.md)
+- [Predefined constants and macros](c-language/predefined-names.md)
 - [Preprocessor and compiler command line](c-language/preprocessor.md)
 
 ## Bytecode and VM

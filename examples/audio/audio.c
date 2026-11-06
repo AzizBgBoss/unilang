@@ -8,7 +8,7 @@ const uint8_t ending_pattern[4] = {
 
 uint32_t main(void)
 {
-    flag(2, 2);
+    flag(FLAG_AUDIO, AUDIO_ENGINE);
 
     tone_sfx[0] = 0;
     tone_sfx[1] = 8;

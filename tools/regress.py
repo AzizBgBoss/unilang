@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,7 @@ EXAMPLES = [
     ("goto_math", ROOT / "examples" / "test" / "goto_math.c"),
     ("math_integer", ROOT / "examples" / "test" / "math_integer.c"),
     ("graphics_shapes", ROOT / "examples" / "test" / "graphics_shapes.c"),
+    ("predefined_names", ROOT / "examples" / "test" / "predefined_names.c"),
     ("union", ROOT / "examples" / "test" / "union.c"),
     ("system_random_time", ROOT / "examples" / "test" / "system_random_time.c"),
     ("value_stack", ROOT / "examples" / "test" / "value_stack.c"),
@@ -112,9 +114,11 @@ def main() -> int:
             run = subprocess.run([str(headless), str(bytecode), "-frames", "1", "-instr", "20000000", "-quiet"],
                                  cwd=ROOT, capture_output=True, text=True, timeout=30)
             diagnostic = run.stdout + run.stderr
-            if run.returncode or "faulted=1" in diagnostic:
+            exit_match = re.search(r"exited=1 exit_code=(\d+)", diagnostic)
+            exit_code = int(exit_match.group(1)) if exit_match else 0
+            if run.returncode or "faulted=1" in diagnostic or exit_code:
                 failures += 1
-                print(f"FAIL headless {name}")
+                print(f"FAIL headless {name}" + (f" (main returned {exit_code})" if exit_code else ""))
                 print(diagnostic.strip() or "headless host exited with a non-zero status")
             else:
                 print(f"OK   headless {name}")

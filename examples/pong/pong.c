@@ -19,9 +19,9 @@ uint32_t clamp_paddle(uint32_t y) {
 }
 
 uint32_t main() {
-    if (isflagsupported(0, 1)) {
-        flag(0, 1);
-        flag(1, 1);
+    if (isflagsupported(FLAG_GRAPHICS, GFX_MONO_64X64)) {
+        flag(FLAG_GRAPHICS, GFX_MONO_64X64);
+        flag(FLAG_KEYBOARD, 1);
     }
 
     uint32_t paddle_x = 58;
@@ -40,12 +40,12 @@ uint32_t main() {
 
     while (1) {
         uint8_t key = getkey();
-        if (key == 1) {
+        if (key == KEY_UP) {
             if (paddle_y > 0) {
                 paddle_y = paddle_y - 1;
             }
         }
-        if (key == 2) {
+        if (key == KEY_DOWN) {
             paddle_y = paddle_y + 1;
         }
 

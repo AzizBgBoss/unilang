@@ -4,13 +4,8 @@
 // Controls: Left/Right run, A jump (hold = higher), B + direction dash (8-way),
 //           Down while falling = fast fall, Start exits at the summit.
 
-#define KEY_UP (1)
-#define KEY_DOWN (1 << 1)
-#define KEY_LEFT (1 << 2)
-#define KEY_RIGHT (1 << 3)
-#define KEY_JUMP (1 << 4)
-#define KEY_DASH (1 << 5)
-#define KEY_START (1 << 7)
+#define KEY_JUMP KEY_A
+#define KEY_DASH KEY_B
 
 #define FRAME_MS 16
 #define SCREEN_W 128
@@ -48,15 +43,15 @@
 #define C_ICE 0xBF
 #define C_ROCK 0x6E
 #define C_DARK 0x49
-#define C_RED 0xE0
+#define C_RED COLOR_RED
 #define C_HAIR 0xE5
 #define C_HAIR_EMPTY 0x4F
 #define C_SKIN 0xF6
 #define C_DRESS 0x33
 #define C_PANTS 0x24
-#define C_GOLD 0xFC
-#define C_WHITE 0xFF
-#define C_CYAN 0x1F
+#define C_GOLD COLOR_YELLOW
+#define C_WHITE COLOR_WHITE
+#define C_CYAN COLOR_CYAN
 
 // ---- level data ----------------------------------------------------------------
 const uint16_t plat_x[NP] = {0, 128, 184, 240, 296, 376, 424, 472, 424, 368, 312, 256, 192};
@@ -590,13 +585,13 @@ void update_player(uint8_t keys)
 
 uint32_t main()
 {
-    if (!isflagsupported(0, 9) || !isflagsupported(1, 1))
+    if (!isflagsupported(FLAG_GRAPHICS, GFX_RGB332_128X64) || !isflagsupported(FLAG_KEYBOARD, 1))
     {
         printf("Celeste needs 128x64 color graphics and keyboard support.\n");
         exit();
     }
-    flag(0, 9);
-    flag(1, 1);
+    flag(FLAG_GRAPHICS, GFX_RGB332_128X64);
+    flag(FLAG_KEYBOARD, 1);
     srand(gettime());
     frame_start = gettime();
 

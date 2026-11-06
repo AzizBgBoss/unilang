@@ -1,12 +1,3 @@
-#define KEY_UP (1)
-#define KEY_DOWN (1 << 1)
-#define KEY_LEFT (1 << 2)
-#define KEY_RIGHT (1 << 3)
-#define KEY_A (1 << 4)
-#define KEY_B (1 << 5)
-#define KEY_SELECT (1 << 6)
-#define KEY_START (1 << 7)
-
 uint8_t player_x = 30;
 uint8_t player_y = 56;
 uint8_t player_w = 3;
@@ -89,9 +80,9 @@ uint8_t draw_hud()
 
 uint32_t main()
 {
-    if (isflagsupported(0, 1))
+    if (isflagsupported(FLAG_GRAPHICS, GFX_MONO_64X64))
     {
-        flag(0, 1);
+        flag(FLAG_GRAPHICS, GFX_MONO_64X64);
     }
     else
     {
@@ -99,9 +90,9 @@ uint32_t main()
         exit();
     }
 
-    if (isflagsupported(1, 1))
+    if (isflagsupported(FLAG_KEYBOARD, 1))
     {
-        flag(1, 1);
+        flag(FLAG_KEYBOARD, 1);
     }
     else
     {

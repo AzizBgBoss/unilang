@@ -9,6 +9,11 @@ functions from a linked C library. Most hardware features require a compatible
 host callback. Functions described as statement-only cannot be used as an
 expression.
 
+Named constants for flags, graphics modes, keys and colors, plus the `RGB332`
+and `RGB555` macros, are listed in
+[predefined constants and macros](predefined-names.md). The example programs use
+them, for instance `flag(FLAG_GRAPHICS, GFX_RGB332_128X64)`.
+
 ## Flags and platform modes
 
 `flag(index, value)` sets one of the VM's packed 4-bit flags. Both arguments

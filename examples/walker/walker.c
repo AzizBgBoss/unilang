@@ -4,8 +4,8 @@
 //   11 RGB555 128x128  12 RGB555 256x128
 // A kid walks through a scrolling dusk landscape. Press Start to quit.
 
-#define RGB332(r, g, b) (((r) << 5) | ((g) << 2) | (b))
-#define RGB555(r, g, b) (((r) << 10) | ((g) << 5) | (b))
+#define PACK332(r, g, b) (((r) << 5) | ((g) << 2) | (b))
+#define PACK555(r, g, b) (((r) << 10) | ((g) << 5) | (b))
 
 // palette slots (16 per color class)
 #define C_SUN 0
@@ -30,15 +30,15 @@ const uint16_t pal[96] = {
     // class 1, 2-bit gray: 0 to 3
     3, 1, 0, 1, 2, 3, 2, 2, 3, 2, 3, 3, 2, 0, 3, 0,
     // class 2, RGB332
-    RGB332(7, 7, 1), RGB332(3, 2, 2), RGB332(1, 3, 1), RGB332(3, 2, 0),
-    RGB332(1, 6, 0), RGB332(7, 5, 2), RGB332(2, 1, 0), RGB332(7, 1, 1),
-    RGB332(1, 2, 3), RGB332(1, 1, 1), RGB332(7, 6, 3), 255,
-    RGB332(4, 3, 1), RGB332(0, 1, 1), 255, 0,
+    PACK332(7, 7, 1), PACK332(3, 2, 2), PACK332(1, 3, 1), PACK332(3, 2, 0),
+    PACK332(1, 6, 0), PACK332(7, 5, 2), PACK332(2, 1, 0), PACK332(7, 1, 1),
+    PACK332(1, 2, 3), PACK332(1, 1, 1), PACK332(7, 6, 3), 255,
+    PACK332(4, 3, 1), PACK332(0, 1, 1), 255, 0,
     // class 3, RGB555
-    RGB555(31, 29, 6), RGB555(14, 10, 18), RGB555(3, 13, 6), RGB555(17, 11, 5),
-    RGB555(7, 24, 4), RGB555(31, 23, 17), RGB555(9, 5, 2), RGB555(31, 5, 6),
-    RGB555(4, 9, 22), RGB555(5, 4, 3), RGB555(31, 28, 29), 32767,
-    RGB555(21, 15, 8), RGB555(1, 3, 5), 32767, 0,
+    PACK555(31, 29, 6), PACK555(14, 10, 18), PACK555(3, 13, 6), PACK555(17, 11, 5),
+    PACK555(7, 24, 4), PACK555(31, 23, 17), PACK555(9, 5, 2), PACK555(31, 5, 6),
+    PACK555(4, 9, 22), PACK555(5, 4, 3), PACK555(31, 28, 29), 32767,
+    PACK555(21, 15, 8), PACK555(1, 3, 5), 32767, 0,
     // class 4, 2-bit palette indices (same layout as gray)
     3, 1, 0, 1, 2, 3, 2, 2, 3, 2, 3, 3, 2, 0, 3, 0,
     // class 5, 8-bit palette indices (slot i uses palette entry i, filled from class 3)
@@ -114,10 +114,10 @@ uint32_t setup_palette()
 {
     if (CL == 4)
     {
-        setpalette(0, RGB555(3, 3, 10));
-        setpalette(1, RGB555(14, 6, 18));
-        setpalette(2, RGB555(30, 16, 6));
-        setpalette(3, RGB555(31, 29, 20));
+        setpalette(0, PACK555(3, 3, 10));
+        setpalette(1, PACK555(14, 6, 18));
+        setpalette(2, PACK555(30, 16, 6));
+        setpalette(3, PACK555(31, 29, 20));
     }
     else if (CL == 5)
     {
@@ -257,12 +257,12 @@ uint32_t draw_walker(uint32_t dist)
 
 uint32_t main()
 {
-    if (!isflagsupported(0, 12))
+    if (!isflagsupported(FLAG_GRAPHICS, GFX_RGB555_256X128))
     {
         printf("This host does not support graphics flag 0 value 12. Rebuild C-interpreter/main.\n");
         exit();
     }
-    flag(1, 1);
+    flag(FLAG_KEYBOARD, 1);
 
     uint32_t start = gettime();
     uint32_t cur = 0;
@@ -277,29 +277,29 @@ uint32_t main()
         {
             cur = mode;
             if (mode == 1)
-                flag(0, 1);
+                flag(FLAG_GRAPHICS, GFX_MONO_64X64);
             else if (mode == 2)
-                flag(0, 2);
+                flag(FLAG_GRAPHICS, GFX_GRAY_64X64);
             else if (mode == 3)
-                flag(0, 3);
+                flag(FLAG_GRAPHICS, GFX_PAL2_64X64);
             else if (mode == 4)
-                flag(0, 4);
+                flag(FLAG_GRAPHICS, GFX_RGB332_64X64);
             else if (mode == 5)
-                flag(0, 5);
+                flag(FLAG_GRAPHICS, GFX_PAL8_64X64);
             else if (mode == 6)
-                flag(0, 6);
+                flag(FLAG_GRAPHICS, GFX_MONO_128X64);
             else if (mode == 7)
-                flag(0, 7);
+                flag(FLAG_GRAPHICS, GFX_GRAY_128X64);
             else if (mode == 8)
-                flag(0, 8);
+                flag(FLAG_GRAPHICS, GFX_PAL2_128X64);
             else if (mode == 9)
-                flag(0, 9);
+                flag(FLAG_GRAPHICS, GFX_RGB332_128X64);
             else if (mode == 10)
-                flag(0, 10);
+                flag(FLAG_GRAPHICS, GFX_PAL8_128X64);
             else if (mode == 11)
-                flag(0, 11);
+                flag(FLAG_GRAPHICS, GFX_RGB555_128X128);
             else
-                flag(0, 12);
+                flag(FLAG_GRAPHICS, GFX_RGB555_256X128);
             SW = pw[mode];
             SH = ph[mode];
             CL = pcl[mode];
@@ -347,7 +347,7 @@ uint32_t main()
             drawstring("12 RGB555 256x128", 1, 1, wc);
 
         refreshscreen();
-        if (getkey() & 128)
+        if (getkey() & KEY_START)
             exit();
     }
     return 0;

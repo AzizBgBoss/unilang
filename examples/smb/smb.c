@@ -5,11 +5,8 @@
 // Physics constants are the cart's own, in 8-bit fixed point (256 = 1 px).
 #include "smb_data.h"
 
-#define KEY_LEFT (1 << 2)
-#define KEY_RIGHT (1 << 3)
-#define KEY_JUMP (1 << 4)
-#define KEY_RUN (1 << 5)
-#define KEY_DOWN (1 << 1)
+#define KEY_JUMP KEY_A
+#define KEY_RUN KEY_B
 #define FRAME_MS 16
 #define MAXE 12
 #define POLE_X 1584
@@ -846,13 +843,13 @@ void frame_wait()
 
 uint32_t main()
 {
-    if (!isflagsupported(0, 9) || !isflagsupported(1, 1))
+    if (!isflagsupported(FLAG_GRAPHICS, GFX_RGB332_128X64) || !isflagsupported(FLAG_KEYBOARD, 1))
     {
         printf("Needs 128x64 color graphics and keyboard support.\n");
         exit();
     }
-    flag(0, 9);
-    flag(1, 1);
+    flag(FLAG_GRAPHICS, GFX_RGB332_128X64);
+    flag(FLAG_KEYBOARD, 1);
     frame_start = gettime();
     reset_level();
     while (true)

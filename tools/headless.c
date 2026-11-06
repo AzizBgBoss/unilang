@@ -335,9 +335,9 @@ int main(int argc, char **argv)
         for (long i = 0; i < romsize; i++) executed += vm.instruction_hits[i];
     }
     double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
-    fprintf(stderr, "instr=%llu frames=%u faulted=%d fault_pc=%u op=0x%02x secs=%.3f digest=%016llx\n",
+    fprintf(stderr, "instr=%llu frames=%u faulted=%d fault_pc=%u op=0x%02x secs=%.3f digest=%016llx exited=%d exit_code=%u\n",
             (unsigned long long)executed, (unsigned)frames, vm.faulted, (unsigned)vm.fault_pc, vm.fault_opcode, secs,
-            (unsigned long long)hash_all);
+            (unsigned long long)hash_all, !vm.running && !vm.faulted, (unsigned)vm.exit_code);
     printf("\nDIGEST %016llx frames=%u faulted=%d\n", (unsigned long long)hash_all, (unsigned)frames, vm.faulted);
     int result = write_wav() ? 0 : 2;
     ULVM_net_shutdown(&headless_net);

@@ -7,12 +7,6 @@
 #define WHITE 1
 #define BLACK 0
 
-#define KEY_UP 1
-#define KEY_DOWN 2
-#define KEY_LEFT 4
-#define KEY_RIGHT 8
-#define KEY_A 16
-
 #define COIN 1
 #define SEEDVILLAGER 2
 #define FARMLAND 3
@@ -366,15 +360,15 @@ void loop() {
 }
 
 uint32_t main() {
-  if (isflagsupported(0, 6)) {
-    flag(0, 6);
+  if (isflagsupported(FLAG_GRAPHICS, GFX_MONO_128X64)) {
+    flag(FLAG_GRAPHICS, GFX_MONO_128X64);
   } else {
     printf("Graphics flag 0 value 6 unsupported\n");
     exit();
   }
 
-  if (isflagsupported(1, 1)) {
-    flag(1, 1);
+  if (isflagsupported(FLAG_KEYBOARD, 1)) {
+    flag(FLAG_KEYBOARD, 1);
   } else {
     printf("Keyboard flag 1 unsupported\n");
   }

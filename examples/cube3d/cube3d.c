@@ -141,14 +141,14 @@ void draw_background(uint32_t time)
 
 void main()
 {
-    if (!isflagsupported(0, 9) || !isflagsupported(1, 1))
+    if (!isflagsupported(FLAG_GRAPHICS, GFX_RGB332_128X64) || !isflagsupported(FLAG_KEYBOARD, 1))
     {
         printf("Flag 0 value 9 graphics or keyboard is not supported");
         exit();
     }
 
-    flag(0, 9);
-    flag(1, 1);
+    flag(FLAG_GRAPHICS, GFX_RGB332_128X64);
+    flag(FLAG_KEYBOARD, 1);
     while (true)
     {
         uint32_t time = gettime() / 20;
@@ -159,7 +159,7 @@ void main()
         draw_cube(97, 34, 14, time * 4 + 128, time * 2 + 160, 0xC0);
 
         refreshscreen();
-        if (getkey() & 128)
+        if (getkey() & KEY_START)
             exit();
     }
 }

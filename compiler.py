@@ -410,6 +410,25 @@ class Compiler:
             "NET_OPT_TIMEOUT_MS": 1, "NET_OPT_TCP_NODELAY": 2,
             "NET_OPT_FRAME_SIZE": 3, "NET_OPT_HTTP_HEADERS": 4,
             "NET_OPT_UDP_BROADCAST": 5,
+            "KEY_UP": 1 << 0, "KEY_DOWN": 1 << 1, "KEY_LEFT": 1 << 2, "KEY_RIGHT": 1 << 3,
+            "KEY_A": 1 << 4, "KEY_B": 1 << 5, "KEY_SELECT": 1 << 6, "KEY_START": 1 << 7,
+            "KEY_DPAD": 0x0F, "KEY_ANY": 0xFF,
+            "FLAG_GRAPHICS": 0, "FLAG_KEYBOARD": 1, "FLAG_AUDIO": 2, "FLAG_NETWORK": 15,
+            "AUDIO_OFF": 0, "AUDIO_BEEP": 1, "AUDIO_ENGINE": 2,
+            "GFX_OFF": 0,
+            "GFX_MONO_64X64": 1, "GFX_GRAY_64X64": 2, "GFX_PAL2_64X64": 3,
+            "GFX_RGB332_64X64": 4, "GFX_PAL8_64X64": 5,
+            "GFX_MONO_128X64": 6, "GFX_GRAY_128X64": 7, "GFX_PAL2_128X64": 8,
+            "GFX_RGB332_128X64": 9, "GFX_PAL8_128X64": 10,
+            "GFX_RGB555_128X128": 11, "GFX_RGB555_256X128": 12,
+            "COLOR_BLACK": 0x00, "COLOR_WHITE": 0xFF, "COLOR_GRAY": 0x92,
+            "COLOR_RED": 0xE0, "COLOR_GREEN": 0x1C, "COLOR_BLUE": 0x03,
+            "COLOR_YELLOW": 0xFC, "COLOR_CYAN": 0x1F, "COLOR_MAGENTA": 0xE3,
+            "COLOR_ORANGE": 0xF0,
+            "COLOR555_BLACK": 0x0000, "COLOR555_WHITE": 0x7FFF, "COLOR555_GRAY": 0x4210,
+            "COLOR555_RED": 0x7C00, "COLOR555_GREEN": 0x03E0, "COLOR555_BLUE": 0x001F,
+            "COLOR555_YELLOW": 0x7FE0, "COLOR555_CYAN": 0x03FF, "COLOR555_MAGENTA": 0x7C1F,
+            "COLOR555_ORANGE": 0x7E00,
         }          # shared builtin constants plus enum constants and const scalars
         self.ptr_elem = {}           # address of a pointer variable -> pointee byte size
         self.array_by_addr = {}      # base address of a RAM array -> element byte size
@@ -2594,7 +2613,7 @@ class Compiler:
         args = call.args.exprs if call.args else []
         if len(args) != 2:
             raise NotImplementedError("isflagsupported(flag, val) takes exactly 2 arguments")
-        if not isinstance(args[0], c_ast.Constant) or not isinstance(args[1], c_ast.Constant):
+        if self.try_const(args[0]) is None or self.try_const(args[1]) is None:
             raise NotImplementedError("isflagsupported(flag, val) requires constant arguments")
         flag = self.const_value(args[0])
         val = self.const_value(args[1])

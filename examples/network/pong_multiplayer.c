@@ -10,7 +10,7 @@
    phase to the joiner every frame; the joiner only sends its own paddle
    position. Both ends use length-prefixed TCP frames (netoption frame size). */
 
-#define RGB332(r, g, b) (((r) << 5) | ((g) << 2) | (b))
+#define PACK332(r, g, b) (((r) << 5) | ((g) << 2) | (b))
 
 #define W 128
 #define H 64
@@ -648,20 +648,20 @@ void draw_play()
 
 uint32_t main(void)
 {
-    if (isflagsupported(0, 9))
+    if (isflagsupported(FLAG_GRAPHICS, GFX_RGB332_128X64))
     {
-        flag(0, 9);
-        cText = RGB332(7, 7, 3);
-        cDim = RGB332(3, 3, 1);
-        cYou = RGB332(2, 7, 1);
-        cOpp = RGB332(7, 3, 1);
-        cBall = RGB332(7, 7, 3);
-        cHi = RGB332(7, 6, 0);
-        cBad = RGB332(7, 1, 0);
+        flag(FLAG_GRAPHICS, GFX_RGB332_128X64);
+        cText = PACK332(7, 7, 3);
+        cDim = PACK332(3, 3, 1);
+        cYou = PACK332(2, 7, 1);
+        cOpp = PACK332(7, 3, 1);
+        cBall = PACK332(7, 7, 3);
+        cHi = PACK332(7, 6, 0);
+        cBad = PACK332(7, 1, 0);
     }
     else
     {
-        flag(0, 6);
+        flag(FLAG_GRAPHICS, GFX_MONO_128X64);
         cText = 1;
         cDim = 1;
         cYou = 1;
@@ -670,12 +670,12 @@ uint32_t main(void)
         cHi = 1;
         cBad = 1;
     }
-    flag(1, 1);
-    if (isflagsupported(2, 1))
+    flag(FLAG_KEYBOARD, 1);
+    if (isflagsupported(FLAG_AUDIO, AUDIO_BEEP))
     {
-        flag(2, 1);
+        flag(FLAG_AUDIO, AUDIO_BEEP);
     }
-    net_ok = isflagsupported(15, 1);
+    net_ok = isflagsupported(FLAG_NETWORK, 1);
     srand(gettime());
 
     hlisten = NONE;
@@ -703,18 +703,18 @@ uint32_t main(void)
         /* ===== main menu ===== */
         if (scene == S_MENU)
         {
-            if (pressed & 1)
+            if (pressed & KEY_UP)
                 sel = sel > 0 ? sel - 1 : 2;
-            if (pressed & 2)
+            if (pressed & KEY_DOWN)
                 sel = sel < 2 ? sel + 1 : 0;
             if (sel == 0)
             {
-                if ((pressed & 4) && ai_level > 0)
+                if ((pressed & KEY_LEFT) && ai_level > 0)
                     ai_level = ai_level - 1;
-                if ((pressed & 8) && ai_level < 2)
+                if ((pressed & KEY_RIGHT) && ai_level < 2)
                     ai_level = ai_level + 1;
             }
-            if (pressed & (16 | 128))
+            if (pressed & (KEY_A | KEY_START))
             {
                 if (sel == 0)
                 {
@@ -826,7 +826,7 @@ uint32_t main(void)
                 scene = S_PLAY;
                 lastrx = gettime();
             }
-            else if (pressed & (32 | 64))
+            else if (pressed & (KEY_B | KEY_SELECT))
             {
                 net_reset();
                 scene = S_MENU;
@@ -873,9 +873,9 @@ uint32_t main(void)
                 }
                 i = i + 1;
             }
-            if (pressed & 1)
+            if (pressed & KEY_UP)
                 sel = sel > 0 ? sel - 1 : nsess;
-            if (pressed & 2)
+            if (pressed & KEY_DOWN)
                 sel = sel < nsess ? sel + 1 : 0;
             if (sel > nsess)
                 sel = nsess;
@@ -884,13 +884,13 @@ uint32_t main(void)
             if (sel >= scroll + 4)
                 scroll = sel - 3;
 
-            if (pressed & (32 | 64))
+            if (pressed & (KEY_B | KEY_SELECT))
             {
                 net_reset();
                 scene = S_MENU;
                 sel = 2;
             }
-            else if (pressed & (16 | 128))
+            else if (pressed & (KEY_A | KEY_START))
             {
                 if (sel < nsess)
                 {
@@ -987,24 +987,24 @@ uint32_t main(void)
         /* ===== typing the host's IP address ===== */
         else if (scene == S_IP)
         {
-            if (pressed & 4)
+            if (pressed & KEY_LEFT)
                 octet = octet > 0 ? octet - 1 : 3;
-            if (pressed & 8)
+            if (pressed & KEY_RIGHT)
                 octet = octet < 3 ? octet + 1 : 0;
-            if (keys & 3)
+            if (keys & (KEY_UP | KEY_DOWN))
                 rep = rep + 1;
             else
                 rep = 0;
-            if ((pressed & 1) || ((keys & 1) && rep > 14 && rep % 3 == 0))
+            if ((pressed & KEY_UP) || ((keys & KEY_UP) && rep > 14 && rep % 3 == 0))
                 ipo[octet] = ipo[octet] < 255 ? ipo[octet] + 1 : 0;
-            if ((pressed & 2) || ((keys & 2) && rep > 14 && rep % 3 == 0))
+            if ((pressed & KEY_DOWN) || ((keys & KEY_DOWN) && rep > 14 && rep % 3 == 0))
                 ipo[octet] = ipo[octet] > 0 ? ipo[octet] - 1 : 255;
-            if (pressed & (32 | 64))
+            if (pressed & (KEY_B | KEY_SELECT))
             {
                 netdiscovery(NET_DISCOVERY_LISTEN, 0, GAME_ID, hname);
                 scene = S_LIST;
             }
-            else if (pressed & (16 | 128))
+            else if (pressed & (KEY_A | KEY_START))
             {
                 build_ip();
                 conn_port = PORT;
@@ -1070,7 +1070,7 @@ uint32_t main(void)
                 net_reset();
                 goto_note(N_CONNFAIL, S_LIST);
             }
-            else if (pressed & (32 | 64))
+            else if (pressed & (KEY_B | KEY_SELECT))
             {
                 net_reset();
                 scene = S_LIST;
@@ -1097,9 +1097,9 @@ uint32_t main(void)
         /* ===== notices and errors ===== */
         else if (scene == S_NOTE)
         {
-            if (pressed & (16 | 128 | 32 | 64))
+            if (pressed & (KEY_A | KEY_START | KEY_B | KEY_SELECT))
             {
-                if (pressed & (32 | 64))
+                if (pressed & (KEY_B | KEY_SELECT))
                     note_next = S_MENU;
                 if (note_next == S_LIST)
                 {
@@ -1171,9 +1171,9 @@ uint32_t main(void)
         else if (scene == S_PLAY)
         {
             int32_t move = 0;
-            if (keys & 1)
+            if (keys & KEY_UP)
                 move = -2;
-            if (keys & 2)
+            if (keys & KEY_DOWN)
                 move = 2;
             if (myside == 0)
                 pl = pl + move;
@@ -1181,7 +1181,7 @@ uint32_t main(void)
                 pr = pr + move;
             clamp_paddles();
 
-            if (pressed & (32 | 64))
+            if (pressed & (KEY_B | KEY_SELECT))
             {
                 net_reset();
                 scene = S_MENU;
@@ -1217,9 +1217,9 @@ uint32_t main(void)
                     recv_input();
                     clamp_paddles();
                 }
-                if (mode == M_SP && (pressed & 128) && phase != PH_OVER)
+                if (mode == M_SP && (pressed & KEY_START) && phase != PH_OVER)
                     paused = !paused;
-                if (phase == PH_OVER && (pressed & (16 | 128)))
+                if (phase == PH_OVER && (pressed & (KEY_A | KEY_START)))
                     new_match();
                 if (!paused)
                 {

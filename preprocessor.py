@@ -232,6 +232,21 @@ class Preprocessor:
             "UINT16_MAX": (None, "65535"),
             "UINT32_MAX": (None, "4294967295"),
             "__UNILANG__": (None, "1"),
+            # Color helpers: r, g, b are 0..255. RGB332 = RRRGGGBB, RGB555 = 0RRRRRGGGGGBBBBB.
+            "RGB332": (["r", "g", "b"],
+                       "(((r) & 0xE0) | (((g) & 0xE0) >> 3) | (((b) & 0xC0) >> 6))"),
+            "RGB555": (["r", "g", "b"],
+                       "((((r) >> 3) << 10) | (((g) >> 3) << 5) | ((b) >> 3))"),
+            "BIT": (["n"], "(1 << (n))"),
+            "MIN": (["a", "b"], "(((a) < (b)) ? (a) : (b))"),
+            "MAX": (["a", "b"], "(((a) > (b)) ? (a) : (b))"),
+            "ABS": (["x"], "((((x) & 0x80000000) != 0) ? -(x) : (x))"),
+            "INT8_MAX": (None, "127"),
+            "INT16_MAX": (None, "32767"),
+            "INT32_MAX": (None, "2147483647"),
+            "INT8_MIN": (None, "(-128)"),
+            "INT16_MIN": (None, "(-32768)"),
+            "INT32_MIN": (None, "(-2147483647 - 1)"),
         }
         for name, value in (defines or {}).items():
             self.macros[name] = (None, value)

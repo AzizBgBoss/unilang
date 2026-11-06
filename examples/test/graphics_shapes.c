@@ -1,6 +1,6 @@
 uint32_t main(void)
 {
-    flag(0, 9);
+    flag(FLAG_GRAPHICS, GFX_RGB332_128X64);
     fillscreen(0);
 
     drawrect(-1, -1, 4, 4, 7);
