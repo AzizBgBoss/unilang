@@ -1642,6 +1642,20 @@ class Compiler:
                     self.emit("mulregv", RA, elem_bytes, RA)   # RA = index * elem_bytes
                 self.emit("addregv", RA, base_addr, RA)        # RA = absolute runtime address
                 return elem_bytes
+            inner_type = self.resolve_type_for_expr(node.name) if isinstance(node.name, c_ast.ArrayRef) else None
+            if isinstance(inner_type, c_ast.ArrayDecl):
+                # n-dimensional array: node.name is a sub-array, so use its address, not its value
+                elem_bytes = self.type_size(inner_type.type)
+                self.emit_addr_in_ra(node.name)
+                row_addr = self.alloc_temp(INT_SIZE)
+                self.emit_store(RA, row_addr, INT_SIZE)
+                index_addr = self.gen_expr(node.subscript)
+                self.emit_load(index_addr, self.addr_size(index_addr), RA)
+                if elem_bytes != 1:
+                    self.emit("mulregv", RA, elem_bytes, RA)
+                self.emit_load(row_addr, INT_SIZE, RB)
+                self.emit("addreg", RA, RB, RA)
+                return elem_bytes
             elem_bytes = self.expr_ptr_elem(node.name)
             if elem_bytes is None:
                 raise NotImplementedError("subscripted value is neither an array nor a pointer")
