@@ -54,7 +54,7 @@ ROLES = {
     "outc": "M", "out": "M", "input": "iM", "print": "t", "printn": "t",
     "printv": "iM", "printvn": "iM", "setpc": "L", "sleep": "i",
     "refreshscreen": "", "romread8": "rw", "romread16": "rw", "romread32": "rw",
-    "setpixel": "rrr", "getpixel": "rrw", "getkeyboard": "w", "gettime": "w",
+    "setpixel": "rrr", "getpixel": "rrw", "getkeyboard": "w", "gettime": "w", "gettime64": "ww",
     "getmemsize": "w", "getflag": "iw", "randreg": "rrW", "srandreg": "r",
     "drawstring": "rrrrriww", "numtostr": "rMw", "floatop": "iirrr",
     "floatcast": "iirr", "romread64": "rww", "fillrect": "rrrrr",

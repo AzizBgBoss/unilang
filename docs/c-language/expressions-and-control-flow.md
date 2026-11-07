@@ -18,6 +18,16 @@ value and can be used in expressions or conditions. Integer right shift is
 arithmetic for signed operands and logical for unsigned operands. Float
 arithmetic and comparisons are available for `float` and `double`.
 
+Arithmetic is done in 32 bits, following C's integer promotion: operands
+narrower than 32 bits (such as `uint8_t`) are promoted to signed `int`, so
+`selectx - 1` with `selectx == 0` is `-1`, not 255. Signed `/` and `%` truncate
+toward zero and the remainder takes the sign of the dividend, so `-1 % 6` is
+`-1` and `-7 / 2` is `-3`, also when folded at compile time. Constant folding
+treats its operands as signed 32-bit values, so a folded `/` or `%` on an
+unsigned constant above `0x7FFFFFFF` is read as negative. Narrowing happens only
+when a value is stored into a narrower variable, so wrapping a `uint8_t` index
+still needs the `(x + n - 1) % n` form.
+
 The compiler performs constant folding. Some builtins require compile-time
 constants; see [builtins](builtins.md). Pointer arithmetic scales by the
 pointee's byte size.

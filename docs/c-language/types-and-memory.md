@@ -20,6 +20,8 @@ integers are stored in whole bytes; they are not bit-packed.
 
 `true` and `false` are the integer constants `1` and `0`. `NULL` is
 predefined as `0`. `int64_t`, `uint64_t`, and `long long` are not supported.
+64-bit values exist only as pairs of 32-bit words, as produced by `mul64` and
+`gettime64`.
 
 ### Signedness and conversions
 

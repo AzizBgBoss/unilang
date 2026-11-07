@@ -41,7 +41,7 @@ a four-byte RAM address; `target` is a four-byte absolute bytecode offset.
 | `17` | `setpixel` | `x:reg, y:reg, color:reg` | Draw one pixel through host callback. |
 | `18` | `getpixel` | `x:reg, y:reg, dst:reg` | Read one pixel through host callback. |
 | `19` | `getkeyboard` | `dst:reg` | Read host keyboard bitmask. |
-| `1A` | `gettime` | `dst:reg` | Read host elapsed milliseconds. |
+| `1A` | `gettime` | `dst:reg` | Read host elapsed milliseconds as a 32-bit value; it wraps after 2^32 ms (about 49.7 days). |
 | `1B` | `getmemsize` | `dst:reg` | Write VM RAM capacity. |
 | `1C` | `getflag` | `flag:u8, dst:reg` | Read packed flag value. |
 | `1D` | `randreg` | `min:reg, max:reg, dst:reg` | Random integer in `[min, max)`; VM PRNG. |
@@ -155,6 +155,7 @@ the remote endpoint.
 | `39` | `pushr` | `src:reg` | Push 32-bit value onto 64-entry value stack; overflow faults. |
 | `3A` | `popr` | `dst:reg` | Pop value-stack word; underflow faults. |
 | `3B` | `outfmt` | `addr:u32, format:u8, conversion:u8, width:u8, precision:u8, flags:u8` | Formatted numeric output; see [format page](bytecode-format.md#outfmt-encoding). |
+| `3C` | `gettime64` | `high:reg, low:reg` | Read host elapsed milliseconds as a 64-bit value in two words. `low` is the host's 32-bit time and `high` is the number of 32-bit wraps the VM has observed; `gettime` also updates this wrap count. |
 
 `audio_command` command IDs are 1 `sfx`, 2 `music`, 3 `stop`, 4 `pause`,
 5 `resume`, 6 `volume`, and 7 `status`. Audio callback details and SFX/music

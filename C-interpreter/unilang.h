@@ -242,6 +242,7 @@ enum OP_CODES
     OP_PUSHR = 0x39,     // push a register value onto the value stack - parameters: regsrc(1)
     OP_POPR,             // pop a value into a register - parameters: regdst(1)
     OP_OUTFMT = 0x3B,    // formatted numeric output: addr(4), format, conversion, width, precision, flags
+    OP_GETTIME64 = 0x3C, // get the 64-bit time (ms) as two 32-bit words - parameters: rhigh(1), rlow(1)
     OP_MINREG = 0x33,    // minimum of two 32-bit values - parameters: rleft(1), rright(1), rdst(1), signed(1)
     OP_MAXREG,           // maximum of two 32-bit values - parameters: rleft(1), rright(1), rdst(1), signed(1)
     OP_ABSREG,           // two's-complement absolute value - parameters: rsrc(1), rdst(1)
@@ -538,6 +539,8 @@ struct UnilangVM
     vm_getpixel getpixel;
     vm_getkeyboard getkeyboard;
     vm_gettime gettime;
+    uint32_t time_last;      // last 32-bit host time sample (for gettime64 wrap detection)
+    uint32_t time_wraps;     // number of 32-bit wraps seen; the high word of gettime64
     vm_sleep sleep;
     vm_refreshscreen refreshscreen;
     vm_input input;
@@ -623,6 +626,18 @@ static inline void ULVM_set_audio(UnilangVM *vm, vm_beep beep,
 static inline void ULVM_set_keyboard(UnilangVM *vm, vm_getkeyboard getkeyboard)
 {
     vm->getkeyboard = getkeyboard;
+}
+
+// Samples the host clock and counts wraps of its 32-bit millisecond value, so
+// OP_GETTIME64 can extend it to 64 bits. A wrap is only noticed if the clock is
+// sampled at least once per 2^32 ms (about 49.7 days).
+static inline uint32_t ulvm_time_sample(UnilangVM *vm)
+{
+    uint32_t now = vm->gettime ? vm->gettime() : 0;
+    if (now < vm->time_last)
+        vm->time_wraps++;
+    vm->time_last = now;
+    return now;
 }
 
 static inline void ULVM_set_time(UnilangVM *vm, vm_gettime gettime, vm_sleep sleep)
@@ -2020,6 +2035,7 @@ static inline void ulvm_blit(UnilangVM *vm, uint32_t d)
     [OP_GETMEMSIZE] = &&ulvm_l_OP_GETMEMSIZE, \
     [OP_GETPIXEL] = &&ulvm_l_OP_GETPIXEL, \
     [OP_GETTIME] = &&ulvm_l_OP_GETTIME, \
+    [OP_GETTIME64] = &&ulvm_l_OP_GETTIME64, \
     [OP_GTREG] = &&ulvm_l_OP_GTREG, \
     [OP_IFNOTREG] = &&ulvm_l_OP_IFNOTREG, \
     [OP_IFNOTSUBREG] = &&ulvm_l_OP_IFNOTSUBREG, \
@@ -2789,7 +2805,17 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
     ULVM_CASE(OP_GETTIME)
     {
         uint8_t r = (uint8_t)ULVM_NEXTBYTE();
-        ULVM_R(r) = vm->gettime ? vm->gettime() : 0;
+        ULVM_R(r) = ulvm_time_sample(vm);
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_GETTIME64)
+    {
+        uint8_t rhigh = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rlow = (uint8_t)ULVM_NEXTBYTE();
+        uint32_t low = ulvm_time_sample(vm);
+        ULVM_R(rhigh) = vm->time_wraps;
+        ULVM_R(rlow) = low;
         ULVM_NEXT();
     }
 

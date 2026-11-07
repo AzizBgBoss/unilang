@@ -88,6 +88,13 @@ Keyboard callback returns the NES-style 8-bit bitmask described in
 resolution and epoch are host-specific. This is a polling timer, not a VM
 interrupt. Sleep and input are host callbacks.
 
+`gettime64` extends the 32-bit `gettime` callback to 64 bits without any host
+change. The VM remembers the last sample (`vm.time_last`) and increments
+`vm.time_wraps` whenever the callback returns a smaller value than before.
+The callback must therefore be a monotonic millisecond counter that wraps at
+2^32, and the program must sample the clock at least once every 2^32 ms (about
+49.7 days), or wraps are missed. `ULVM_init` zeroes both fields.
+
 ### Persistence
 
 Save and load callbacks receive a pointer to a validated VM RAM block and its

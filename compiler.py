@@ -148,6 +148,7 @@ OPS = {
     "minreg":          (0x33, [1, 1, 1, 1]),           # rleft, rright, rdst, signed
     "maxreg":          (0x34, [1, 1, 1, 1]),           # rleft, rright, rdst, signed
     "absreg":          (0x35, [1, 1]),                 # rsrc, rdst
+    "gettime64":       (0x3C, [1, 1]),                 # rhigh, rlow
     "mul64":           (0x36, [1, 1, 1, 1, 1]),        # rleft, rright, rhigh, rlow, signed
 
     "setreg":          (0x40, [1, 4]),                # reg, val
@@ -2259,6 +2260,8 @@ class Compiler:
                 return self.gen_min_max_abs(node, name)
             if name == "mul64":
                 raise NotImplementedError("mul64(a, b, &high, &low) is a statement")
+            if name == "gettime64":
+                raise NotImplementedError("gettime64(&high, &low) is a statement")
             if name in ("memcpy", "memset"):
                 return self.gen_mem_builtin(node, name)
             if name == "getkey":
@@ -2819,6 +2822,19 @@ class Compiler:
         self.emit_store(RB, result, INT_SIZE)
         return result
 
+    def gen_gettime64(self, call):
+        args = call.args.exprs if call.args else []
+        if len(args) != 2 or not (
+                isinstance(args[0], c_ast.UnaryOp) and args[0].op == "&"
+                and isinstance(args[1], c_ast.UnaryOp) and args[1].op == "&"):
+            raise NotImplementedError("gettime64(&high, &low) takes two output addresses")
+        high_ptr, low_ptr = self.gen_expr(args[0]), self.gen_expr(args[1])
+        self.emit_load(high_ptr, INT_SIZE, 9)
+        self.emit_load(low_ptr, INT_SIZE, 10)
+        self.emit("gettime64", 12, 13)
+        self.emit("storeregi32", 9, 12)
+        self.emit("storeregi32", 10, 13)
+
     def gen_mul64(self, call):
         args = call.args.exprs if call.args else []
         if len(args) != 4 or not (
@@ -2980,6 +2996,8 @@ class Compiler:
         if void_return and not allow_void:
             raise NotImplementedError(f"void function '{name}' does not return a value")
         params = self.fn_params(fn)
+        if name == "drawnum" and len(args) == 3:
+            args = list(args) + [c_ast.Constant("int", "1")]
         if len(args) != len(params):
             raise NotImplementedError(f"'{name}' expects {len(params)} argument(s), got {len(args)}")
 
@@ -3613,6 +3631,8 @@ class Compiler:
                 self.gen_blit(node)
             elif name == "setpalette":
                 self.gen_setpalette(node)
+            elif name == "gettime64":
+                self.gen_gettime64(node)
             elif name == "mul64":
                 self.gen_mul64(node)
             elif name == "beep":
@@ -3876,6 +3896,11 @@ class Compiler:
     # -- entry point ---------------------------------------------------------
     def compile(self, source, filename="<input>", include_dirs=(), defines=None):
         source = Preprocessor(include_dirs, defines).process(source, filename)
+        if re.search(r"\bdrawnum\s*\(", source) and not re.search(r"\bdrawnum\s*\([^;{)]*\)\s*\{", source):
+            source += ("\nvoid drawnum(uint32_t n, uint8_t x, uint8_t y, uint8_t c)\n"
+                       "{\n    uint32_t d = 1;\n    while (n / d >= 10)\n        d = d * 10;\n"
+                       "    while (d > 0)\n    {\n        drawchar('0' + n / d % 10, x, y, c);\n"
+                       "        x = x + 6;\n        d = d / 10;\n    }\n}\n")
         clean_source, self.alloc_meta = self.rewrite_alloc_syntax(source)
         clean_source = self.rewrite_mem_syntax(clean_source)
         clean_source = self.rewrite_cpp_tag_typedefs(clean_source)

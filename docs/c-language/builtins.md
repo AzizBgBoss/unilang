@@ -99,7 +99,7 @@ for details and the [network examples](../../examples/network/README.md).
 | 12 | 16-bit RGB555, 256x128 |
 
 Use the `setpixel`, `fillrect`, `fillscreen`, `fillcircle`, `drawrect`,
-`drawline`, `blit`, `drawchar`, `drawstring`, and `getpixel`
+`drawline`, `blit`, `drawchar`, `drawstring`, `drawnum`, and `getpixel`
 operations for drawing. Pixels and shapes are clipped at framebuffer edges.
 The host may optionally provide bulk `fillrect`/sprite-row callbacks; the VM
 has a per-pixel fallback.
@@ -159,10 +159,15 @@ does not play sound.
   4x6 font.
 - `drawstring(text, x, y[, color])` — draw a string; supported input is a
   literal or a RAM `char[]`. The VM handles line wrapping.
+- `drawnum(number, x, y[, color])`: draw an unsigned 32-bit decimal number with
+  `drawchar`, one digit every 6 pixels, with no padding or sign. This is not a
+  VM operation: when a program calls `drawnum` without defining it, the
+  compiler appends a small C helper that is inlined at each call site. A
+  user-defined `drawnum` takes precedence. Statement-only.
 - `setpalette(index, rgb555)` — update one palette entry (see flag 0).
 - `refreshscreen()` — present then clear.
 
-The optional color argument to `drawchar`/`drawstring` defaults to 1. In
+The optional color argument to `drawchar`/`drawstring`/`drawnum` defaults to 1. In
 8-bit RGB332 graphics mode, color is a packed RGB332 byte. In palette modes,
 pixel colors are indices; other modes use the selected mode's pixel
 representation. Coordinates outside the framebuffer are clipped rather than
@@ -219,8 +224,18 @@ separate return and value stacks.
   does nothing; the compiler's current lowering leaves the expression result
   equal to `min`. Avoid that range.
 - `srand(seed)` seeds the VM's deterministic pseudo-random generator.
-- `gettime()` returns host elapsed milliseconds; epoch and resolution depend
+- `gettime()` returns host elapsed milliseconds as a 32-bit value (wraps after
+  about 49.7 days); epoch and resolution depend
   on the host. This is polling, not an interrupt or guaranteed frame clock.
+- `gettime64(&high, &low)` stores the elapsed milliseconds as a 64-bit value in
+  two `uint32_t` variables, `high` being the upper word and `low` the lower, so
+  it does not wrap in practice. It is statement-only and takes two output
+  addresses. There is no 64-bit integer type (see
+  [types](types-and-memory.md#scalar-types)), so work with the two words. The
+  VM extends the host's 32-bit clock by counting its wraps, so call `gettime64`
+  or `gettime` at least once every 49.7 days. Elapsed time between two
+  `gettime()` samples stays correct with unsigned subtraction while it is under
+  49.7 days.
 - `sleep(milliseconds)` — sleep for a compile-time constant duration; host
   must implement the sleep callback.
 - `input(&variable)` — request text input from the host into a variable.
