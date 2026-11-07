@@ -1155,7 +1155,12 @@ class Compiler:
             if float_size:
                 return c_ast.TypeDecl(declname=None, quals=[], align=None,
                                      type=c_ast.IdentifierType(names=["double" if float_size == 8 else "float"]))
-            return self.expr_type(expr.left) or self.expr_type(expr.right)
+            l, r = self.expr_type(expr.left), self.expr_type(expr.right)
+            small = lambda t: isinstance(t, c_ast.TypeDecl) and self.scalar_type_size(t) < INT_SIZE
+            if small(l):
+                l = r if r is not None and not small(r) else c_ast.TypeDecl(
+                    declname=None, quals=[], align=None, type=c_ast.IdentifierType(names=["int"]))
+            return l or r
         if isinstance(expr, c_ast.TernaryOp):
             float_size = max(self.expr_float_size(expr.iftrue), self.expr_float_size(expr.iffalse))
             if float_size:
