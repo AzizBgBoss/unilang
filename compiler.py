@@ -1026,7 +1026,9 @@ class Compiler:
             elif op == "/" or op == "%":
                 if b == 0:
                     raise _NotConst()
-                r = a // b if op == "/" else a % b
+                sa, sb = a - (a >> 31 << 32), b - (b >> 31 << 32)
+                q = abs(sa) // abs(sb) * (1 if (sa < 0) == (sb < 0) else -1)
+                r = q if op == "/" else sa - q * sb
             elif op == "&": r = a & b
             elif op == "|": r = a | b
             elif op == "^": r = a ^ b
