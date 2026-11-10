@@ -242,11 +242,20 @@ enum OP_CODES
     OP_PUSHR = 0x39,     // push a register value onto the value stack - parameters: regsrc(1)
     OP_POPR,             // pop a value into a register - parameters: regdst(1)
     OP_OUTFMT = 0x3B,    // formatted numeric output: addr(4), format, conversion, width, precision, flags
-    OP_GETTIME64 = 0x3C, // get the 64-bit time (ms) as two 32-bit words - parameters: rhigh(1), rlow(1)
     OP_MINREG = 0x33,    // minimum of two 32-bit values - parameters: rleft(1), rright(1), rdst(1), signed(1)
     OP_MAXREG,           // maximum of two 32-bit values - parameters: rleft(1), rright(1), rdst(1), signed(1)
     OP_ABSREG,           // two's-complement absolute value - parameters: rsrc(1), rdst(1)
     OP_MUL64,            // 32x32 to 64-bit product in two registers - parameters: rleft(1), rright(1), rhigh(1), rlow(1), signed(1)
+
+    OP_SETREG64 = 0x3C,  // dst:reg, value:u64
+    OP_LOADREG64,        // dst:reg, addr:u32
+    OP_STOREREG64,       // src:reg, addr:u32
+    OP_LOADREGI64,       // addr:reg, dst:reg
+    OP_ALU64 = 0x30,     // selector:u8, left:reg, right:reg, dst:reg
+    OP_OUTREG64 = 0x5E,  // value:reg
+    OP_OUTREGSIGNED64,   // value:reg
+    OP_STOREREGI64 = 0x7E, // addr:reg, src:reg
+    OP_NUMTOSTR64,       // value:reg, addr:u32, out_length:reg
 
     // Direct Register & Memory Operations
     OP_SETREG = 0x40, // reg = val - parameters: reg(1), val(4)
@@ -332,7 +341,7 @@ typedef void     (*vm_blitrow_fast)(uint8_t x, uint8_t y, uint16_t count,
                                     const uint16_t *colors, const uint8_t *opaque);
 typedef uint16_t (*vm_getpixel)(uint8_t x, uint8_t y);
 typedef uint8_t  (*vm_getkeyboard)(void);
-typedef uint32_t (*vm_gettime)(void);
+typedef uint64_t (*vm_gettime)(void);
 typedef void     (*vm_sleep)(uint32_t ms);
 typedef void     (*vm_refreshscreen)(void);
 typedef uint32_t (*vm_input)(char *buf, uint32_t maxchars);
@@ -519,7 +528,7 @@ struct UnilangVM
 
     uint8_t mem[ULVM_MEM_SIZE];
     uint8_t flags[(ULVM_FLAG_NUM * ULVM_FLAG_SIZE) / 8];
-    uint32_t reg[16];
+    uint64_t reg[16];
 
     uint32_t callstack[ULVM_CALLSTACK_SIZE];
     uint8_t callsp;
@@ -539,8 +548,6 @@ struct UnilangVM
     vm_getpixel getpixel;
     vm_getkeyboard getkeyboard;
     vm_gettime gettime;
-    uint32_t time_last;      // last 32-bit host time sample (for gettime64 wrap detection)
-    uint32_t time_wraps;     // number of 32-bit wraps seen; the high word of gettime64
     vm_sleep sleep;
     vm_refreshscreen refreshscreen;
     vm_input input;
@@ -626,18 +633,6 @@ static inline void ULVM_set_audio(UnilangVM *vm, vm_beep beep,
 static inline void ULVM_set_keyboard(UnilangVM *vm, vm_getkeyboard getkeyboard)
 {
     vm->getkeyboard = getkeyboard;
-}
-
-// Samples the host clock and counts wraps of its 32-bit millisecond value, so
-// OP_GETTIME64 can extend it to 64 bits. A wrap is only noticed if the clock is
-// sampled at least once per 2^32 ms (about 49.7 days).
-static inline uint32_t ulvm_time_sample(UnilangVM *vm)
-{
-    uint32_t now = vm->gettime ? vm->gettime() : 0;
-    if (now < vm->time_last)
-        vm->time_wraps++;
-    vm->time_last = now;
-    return now;
 }
 
 static inline void ULVM_set_time(UnilangVM *vm, vm_gettime gettime, vm_sleep sleep)
@@ -1185,6 +1180,8 @@ ULVM_HOT uint32_t ulvm_next4f(UnilangVM *vm, const uint8_t *rom, uint32_t rom_si
     return ulvm_next4(vm, rom, rom_size, pc);
 }
 
+#define ULVM_NEXT8BYTES() ((((uint64_t)ULVM_NEXT4BYTES()) << 32) | ULVM_NEXT4BYTES())
+
 #define ULVM_NEXTBYTE() (fast ? (uint32_t)READ_FLASH_BYTE(rom + pc++) : ulvm_fetch(vm, rom, rom_size, pc++))
 #define ULVM_NEXT2BYTES() ulvm_next2f(vm, rom, rom_size, &pc, fast)
 #define ULVM_NEXT4BYTES() ulvm_next4f(vm, rom, rom_size, &pc, fast)
@@ -1201,6 +1198,7 @@ static inline uint8_t ulvm_rom_byte(UnilangVM *vm, uint32_t addr)
     ((addr) <= (uint32_t)ULVM_MEM_SIZE && \
      (size) <= (uint32_t)ULVM_MEM_SIZE - (uint32_t)(addr))
 #define ULVM_R(i) (vm->reg[(i) & 0x0F])
+#define ULVM_R32(i) ((uint32_t)ULVM_R(i))
 
 static inline uint8_t ulvm_getflag(UnilangVM *vm, uint8_t flag)
 {
@@ -1329,7 +1327,7 @@ static inline void ulvm_store_memory64(UnilangVM *vm, uint32_t addr, uint64_t va
 
 static inline uint8_t ulvm_numeric_format_valid(uint8_t format)
 {
-    return format >= 1 && format <= 8;
+    return format >= 1 && format <= 10;
 }
 
 static inline uint8_t ulvm_ieee_format_supported(uint8_t format)
@@ -1582,6 +1580,32 @@ static inline uint8_t ulvm_itoa(UnilangVM *vm, uint32_t v, uint32_t addr)
     return (uint8_t)n;
 }
 
+static inline uint8_t ulvm_itoa64(UnilangVM *vm, uint64_t v, uint32_t addr)
+{
+    char tmp[20];
+    uint8_t n = 0;
+    do { tmp[n++] = (char)('0' + v % 10); v /= 10; } while (v && n < sizeof(tmp));
+    uint32_t available = addr <= (uint32_t)ULVM_MEM_SIZE ? (uint32_t)ULVM_MEM_SIZE - addr : 0;
+    for (uint8_t i = 0; i < n; ++i) {
+        uint32_t offset = (uint32_t)n - 1u - i;
+        if (offset < available) vm->mem[addr + offset] = (uint8_t)tmp[i];
+    }
+    return n;
+}
+
+static inline void ulvm_print_uint64(UnilangVM *vm, uint64_t value, uint8_t is_signed)
+{
+    char buf[21];
+    uint8_t n = 0;
+    uint64_t magnitude = value;
+    if (is_signed && (int64_t)value < 0) {
+        if (vm->outputchar) vm->outputchar('-');
+        magnitude = (uint64_t)(0u - value);
+    }
+    do { buf[n++] = (char)('0' + magnitude % 10); magnitude /= 10; } while (magnitude && n < sizeof(buf));
+    while (n && vm->outputchar) vm->outputchar(buf[--n]);
+}
+
 static inline int ulvm_print_formatted(UnilangVM *vm, uint32_t addr, uint8_t format,
                                        uint8_t conversion, uint8_t width,
                                        uint8_t precision, uint8_t flags)
@@ -1627,8 +1651,12 @@ static inline int ulvm_print_formatted(UnilangVM *vm, uint32_t addr, uint8_t for
         written = snprintf(output, sizeof(output), spec, (int)ulvm_load_memory(vm, addr, size));
     } else if (conversion == 'd' || conversion == 'i' || conversion == 'u'
                || conversion == 'x' || conversion == 'X' || conversion == 'o') {
-        if (format > 6)
+        if (format == 7 || format == 8)
             return 0;
+        if (format >= 9) {
+            unsigned_value = ulvm_load_memory64(vm, addr);
+            signed_value = (int64_t)unsigned_value;
+        } else {
         raw = ulvm_load_memory(vm, addr, size);
         switch (format) {
         case 1: signed_value = (int8_t)raw; break;
@@ -1639,6 +1667,7 @@ static inline int ulvm_print_formatted(UnilangVM *vm, uint32_t addr, uint8_t for
         default: signed_value = (int64_t)raw; break;
         }
         unsigned_value = raw;
+        }
         if (conversion == 'd' || conversion == 'i') {
             spec[n++] = 'l';
             spec[n++] = 'l';
@@ -2016,6 +2045,15 @@ static inline void ulvm_blit(UnilangVM *vm, uint32_t d)
     [OP_NET_DISCOVERY_GET] = &&ulvm_l_OP_NET_DISCOVERY_GET, \
     [OP_NET_LOCALPORT] = &&ulvm_l_OP_NET_LOCALPORT, \
     [OP_OUTFMT] = &&ulvm_l_OP_OUTFMT, \
+    [OP_SETREG64] = &&ulvm_l_OP_SETREG64, \
+    [OP_LOADREG64] = &&ulvm_l_OP_LOADREG64, \
+    [OP_STOREREG64] = &&ulvm_l_OP_STOREREG64, \
+    [OP_LOADREGI64] = &&ulvm_l_OP_LOADREGI64, \
+    [OP_STOREREGI64] = &&ulvm_l_OP_STOREREGI64, \
+    [OP_ALU64] = &&ulvm_l_OP_ALU64, \
+    [OP_OUTREG64] = &&ulvm_l_OP_OUTREG64, \
+    [OP_OUTREGSIGNED64] = &&ulvm_l_OP_OUTREGSIGNED64, \
+    [OP_NUMTOSTR64] = &&ulvm_l_OP_NUMTOSTR64, \
     [OP_CMPREGV] = &&ulvm_l_OP_CMPREGV, \
     [OP_COMPREG] = &&ulvm_l_OP_COMPREG, \
     [OP_CUR] = &&ulvm_l_OP_CUR, \
@@ -2035,7 +2073,6 @@ static inline void ulvm_blit(UnilangVM *vm, uint32_t d)
     [OP_GETMEMSIZE] = &&ulvm_l_OP_GETMEMSIZE, \
     [OP_GETPIXEL] = &&ulvm_l_OP_GETPIXEL, \
     [OP_GETTIME] = &&ulvm_l_OP_GETTIME, \
-    [OP_GETTIME64] = &&ulvm_l_OP_GETTIME64, \
     [OP_GTREG] = &&ulvm_l_OP_GTREG, \
     [OP_IFNOTREG] = &&ulvm_l_OP_IFNOTREG, \
     [OP_IFNOTSUBREG] = &&ulvm_l_OP_IFNOTSUBREG, \
@@ -2805,17 +2842,7 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
     ULVM_CASE(OP_GETTIME)
     {
         uint8_t r = (uint8_t)ULVM_NEXTBYTE();
-        ULVM_R(r) = ulvm_time_sample(vm);
-        ULVM_NEXT();
-    }
-
-    ULVM_CASE(OP_GETTIME64)
-    {
-        uint8_t rhigh = (uint8_t)ULVM_NEXTBYTE();
-        uint8_t rlow = (uint8_t)ULVM_NEXTBYTE();
-        uint32_t low = ulvm_time_sample(vm);
-        ULVM_R(rhigh) = vm->time_wraps;
-        ULVM_R(rlow) = low;
+        ULVM_R(r) = vm->gettime ? vm->gettime() : 0;
         ULVM_NEXT();
     }
 
@@ -3001,6 +3028,82 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
         uint32_t val = ULVM_NEXT4BYTES();
         ULVM_R(r) = val;
         ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_SETREG64)
+    {
+        uint8_t r = (uint8_t)ULVM_NEXTBYTE();
+        uint64_t value = ULVM_NEXT8BYTES();
+        ULVM_R(r) = value;
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_LOADREG64)
+    {
+        uint8_t r = (uint8_t)ULVM_NEXTBYTE();
+        uint32_t addr = ULVM_NEXT4BYTES();
+        ULVM_R(r) = ulvm_load_memory64(vm, addr);
+        ULVM_NEXT();
+    }
+    ULVM_CASE(OP_STOREREG64)
+    {
+        uint8_t r = (uint8_t)ULVM_NEXTBYTE();
+        uint32_t addr = ULVM_NEXT4BYTES();
+        ulvm_store_memory64(vm, addr, ULVM_R(r));
+        ULVM_NEXT();
+    }
+    ULVM_CASE(OP_LOADREGI64)
+    {
+        uint8_t ra = (uint8_t)ULVM_NEXTBYTE(), rd = (uint8_t)ULVM_NEXTBYTE();
+        ULVM_R(rd) = ulvm_load_memory64(vm, ULVM_R32(ra));
+        ULVM_NEXT();
+    }
+    ULVM_CASE(OP_STOREREGI64)
+    {
+        uint8_t ra = (uint8_t)ULVM_NEXTBYTE(), rv = (uint8_t)ULVM_NEXTBYTE();
+        ulvm_store_memory64(vm, ULVM_R32(ra), ULVM_R(rv));
+        ULVM_NEXT();
+    }
+    ULVM_CASE(OP_ALU64)
+    {
+        uint8_t op = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t ra = (uint8_t)ULVM_NEXTBYTE(), rb = (uint8_t)ULVM_NEXTBYTE(), rd = (uint8_t)ULVM_NEXTBYTE();
+        uint64_t a = ULVM_R(ra), b = ULVM_R(rb), v = 0;
+        int write = 1;
+        switch (op) {
+        case 1: v = a + b; break; case 2: v = a - b; break; case 3: v = a * b; break;
+        case 4: if (!b) write = 0; else v = a / b; break;
+        case 5: if (!b) write = 0; else v = a % b; break;
+        case 6: if (!b) write = 0; else v = (a == UINT64_C(0x8000000000000000) && b == UINT64_MAX) ? a : (uint64_t)((int64_t)a / (int64_t)b); break;
+        case 7: if (!b) write = 0; else v = (a == UINT64_C(0x8000000000000000) && b == UINT64_MAX) ? 0 : (uint64_t)((int64_t)a % (int64_t)b); break;
+        case 8: v = a & b; break; case 9: v = a | b; break; case 10: v = a ^ b; break;
+        case 11: v = ~a; break; case 12: v = 0u - a; break;
+        case 13: v = b < 64 ? a << b : 0; break; case 14: v = b < 64 ? a >> b : 0; break;
+        case 15: v = b >= 64 ? ((a >> 63) ? UINT64_MAX : 0) : b == 0 ? a : ((a >> b) | ((a >> 63) ? (UINT64_MAX << (64 - b)) : 0)); break;
+        case 16: v = a == b; break; case 17: v = a != b; break; case 18: v = a < b; break;
+        case 19: v = a > b; break; case 20: v = a <= b; break; case 21: v = a >= b; break;
+        case 22: v = (int64_t)a == (int64_t)b; break; case 23: v = (int64_t)a != (int64_t)b; break;
+        case 24: v = (int64_t)a < (int64_t)b; break; case 25: v = (int64_t)a > (int64_t)b; break;
+        case 26: v = (int64_t)a <= (int64_t)b; break; case 27: v = (int64_t)a >= (int64_t)b; break;
+        case 28: v = (uint64_t)(int64_t)(int8_t)a; break; case 29: v = (uint64_t)(int64_t)(int16_t)a; break;
+        case 30: v = (uint64_t)(int64_t)(int32_t)a; break; case 31: v = (uint32_t)a; break;
+        default: write = 0; break;
+        }
+        if (write) ULVM_R(rd) = v;
+        ULVM_NEXT();
+    }
+    ULVM_CASE(OP_OUTREG64)
+    {
+        uint8_t r = (uint8_t)ULVM_NEXTBYTE(); ulvm_print_uint64(vm, ULVM_R(r), 0); ULVM_NEXT();
+    }
+    ULVM_CASE(OP_OUTREGSIGNED64)
+    {
+        uint8_t r = (uint8_t)ULVM_NEXTBYTE(); ulvm_print_uint64(vm, ULVM_R(r), 1); ULVM_NEXT();
+    }
+    ULVM_CASE(OP_NUMTOSTR64)
+    {
+        uint8_t r = (uint8_t)ULVM_NEXTBYTE(); uint32_t addr = ULVM_NEXT4BYTES(); uint8_t rlen = (uint8_t)ULVM_NEXTBYTE();
+        ULVM_R(rlen) = ulvm_itoa64(vm, ULVM_R(r), addr); ULVM_NEXT();
     }
 
     ULVM_CASE(OP_MOVREG)
@@ -3376,15 +3479,15 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
         int address_ok = len == 0 || addr <= UINT32_MAX - (len - 1u);
         int rom_ok = !vm->rom || source == 0 ||
             (addr <= vm->rom_size && len <= vm->rom_size - addr);
-        if (ULVM_R(rkind) == ULVM_AUDIO_DATA_SFX)
+        if (ULVM_R32(rkind) == ULVM_AUDIO_DATA_SFX)
             item_size = ULVM_AUDIO_SFX_BYTES;
-        else if (ULVM_R(rkind) == ULVM_AUDIO_DATA_MUSIC)
+        else if (ULVM_R32(rkind) == ULVM_AUDIO_DATA_MUSIC)
             item_size = ULVM_AUDIO_MUSIC_BYTES;
         if (item_size && len && len % item_size == 0)
             item_count = len / item_size;
         int ok = ulvm_getflag(vm, 2) == 2 && vm->audio_load &&
-            ULVM_R(rkind) <= UINT8_MAX && ULVM_R(rindex) <= UINT8_MAX &&
-            ULVM_R(rindex) < 64u && item_count && item_count <= 64u - ULVM_R(rindex) &&
+            ULVM_R32(rkind) <= UINT8_MAX && ULVM_R32(rindex) <= UINT8_MAX &&
+            ULVM_R32(rindex) < 64u && item_count && item_count <= 64u - ULVM_R32(rindex) &&
             item_size <= sizeof(data) && source <= 1 && address_ok && rom_ok &&
             (source == 1 || ULVM_INBOUNDS(addr, len));
         if (ok)
@@ -3432,7 +3535,7 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
     {
         uint8_t r = (uint8_t)ULVM_NEXTBYTE();
         uint32_t pos = ULVM_NEXT4BYTES();
-        int take = (opbyte == OP_IFREG || opbyte == OP_IFSUBREG) ? (ULVM_R(r) != 0) : (ULVM_R(r) == 0);
+        int take = (opbyte == OP_IFREG || opbyte == OP_IFSUBREG) ? (ULVM_R32(r) != 0) : (ULVM_R32(r) == 0);
         if (take)
         {
             if (opbyte == OP_IFSUBREG || opbyte == OP_IFNOTSUBREG)
@@ -3456,7 +3559,7 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
     {
         uint8_t r1 = (uint8_t)ULVM_NEXTBYTE();
         uint8_t dst = (uint8_t)ULVM_NEXTBYTE();
-        ULVM_R(dst) = ~ULVM_R(r1);
+        ULVM_R(dst) = (uint32_t)~ULVM_R32(r1);
         ULVM_NEXT();
     }
 

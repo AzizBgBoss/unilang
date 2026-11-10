@@ -38,6 +38,7 @@ EXAMPLES = [
     ("value_stack", ROOT / "examples" / "test" / "value_stack.c"),
     ("switch_dispatch", ROOT / "examples" / "test" / "switch_dispatch.c"),
     ("printf_format", ROOT / "examples" / "test" / "printf_format.c"),
+    ("uint64_core", ROOT / "examples" / "test" / "uint64_core.c"),
 ]
 
 
@@ -111,7 +112,10 @@ def main() -> int:
             print("OK   netscore user function")
 
         for name, bytecode in compiled:
-            run = subprocess.run([str(headless), str(bytecode), "-frames", "1", "-instr", "20000000", "-quiet"],
+            args = [str(headless), str(bytecode), "-frames", "1", "-instr", "20000000", "-quiet"]
+            if name == "uint64_core":
+                args.extend(["-time-start", "5000000000"])
+            run = subprocess.run(args,
                                  cwd=ROOT, capture_output=True, text=True, timeout=30)
             diagnostic = run.stdout + run.stderr
             exit_match = re.search(r"exited=1 exit_code=(\d+)", diagnostic)

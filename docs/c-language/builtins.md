@@ -159,7 +159,7 @@ does not play sound.
   4x6 font.
 - `drawstring(text, x, y[, color])` — draw a string; supported input is a
   literal or a RAM `char[]`. The VM handles line wrapping.
-- `drawnum(number, x, y[, color])`: draw an unsigned 32-bit decimal number with
+- `drawnum(number, x, y[, color])`: draw an unsigned 64-bit decimal number with
   `drawchar`, one digit every 6 pixels, with no padding or sign. This is not a
   VM operation: when a program calls `drawnum` without defining it, the
   compiler appends a small C helper that is inlined at each call site. A
@@ -224,18 +224,9 @@ separate return and value stacks.
   does nothing; the compiler's current lowering leaves the expression result
   equal to `min`. Avoid that range.
 - `srand(seed)` seeds the VM's deterministic pseudo-random generator.
-- `gettime()` returns host elapsed milliseconds as a 32-bit value (wraps after
-  about 49.7 days); epoch and resolution depend
-  on the host. This is polling, not an interrupt or guaranteed frame clock.
-- `gettime64(&high, &low)` stores the elapsed milliseconds as a 64-bit value in
-  two `uint32_t` variables, `high` being the upper word and `low` the lower, so
-  it does not wrap in practice. It is statement-only and takes two output
-  addresses. There is no 64-bit integer type (see
-  [types](types-and-memory.md#scalar-types)), so work with the two words. The
-  VM extends the host's 32-bit clock by counting its wraps, so call `gettime64`
-  or `gettime` at least once every 49.7 days. Elapsed time between two
-  `gettime()` samples stays correct with unsigned subtraction while it is under
-  49.7 days.
+- `gettime()` returns host elapsed milliseconds as a `uint64_t` in one value;
+  epoch and resolution depend on the host. This is polling, not an interrupt or
+  guaranteed frame clock.
 - `sleep(milliseconds)` — sleep for a compile-time constant duration; host
   must implement the sleep callback.
 - `input(&variable)` — request text input from the host into a variable.
@@ -279,14 +270,20 @@ and [audio guide](../../examples/audio/README.md).
 - Numeric flags: `-`, `+`, space, `#`, `0`; literal width and precision are
   limited to 0..99.
 - `h` and `hh` narrow integer conversions.
+- `ll` supports `%llu`, `%lld`, `%llx`, and `%llX` with 64-bit integer values.
 
 Flag combinations are conversion-specific: `%u`, `%o`, `%x`, and `%X` reject
 `+` and space; `%d`, `%i`, and `%u` reject `#`; `%c` accepts only optional
 width and `-`. `%s` does not support width, precision, or flags. Dynamic `*`
-width/precision, `ll`, `l`, and `z` integer conversions, and unsupported
+width/precision, `l` and `z` integer conversions, and unsupported
 conversion letters are rejected. Floating formatting uses the host C
 library's `snprintf`, so exact rounding and locale behavior can vary by host.
 `puts`, `putchar`, and simple VM output builtins are also available.
+
+Builtins whose VM interface accepts 32-bit values use the low 32 bits of a
+64-bit argument. This includes `rand`, `srand`, `sleep`, pointer and memory
+addresses, drawing coordinates, and the value stack. `min`/`max`/`abs` retain
+their 32-bit VM behavior; use ordinary 64-bit expressions for wider arithmetic.
 
 ## Examples
 

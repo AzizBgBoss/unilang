@@ -45,6 +45,7 @@ They are not null-terminated. `print` appends a newline; `printn` does not.
 - Indirect load/store instructions take a register containing a RAM address.
 - Jump/call targets are absolute byte offsets in the `.ulc` image.
 - `setreg` immediates and ordinary 32-bit integers are big-endian.
+- `setreg64` immediates and 64-bit integers are eight-byte big-endian values.
 - 64-bit floating values in memory are big-endian bit patterns; `romread64`
   returns high and low 32-bit words separately.
 
@@ -59,6 +60,14 @@ operation address arguments, but hand-written bytecode can use any register.
 An instruction's documented destination register may also be one of its
 inputs.
 
+Each register stores 64 bits. Existing instructions keep their historical
+32-bit behavior: they read the low 32 bits and write a zero-extended 32-bit
+result. `movreg` copies all 64 bits, and `gettime` writes all 64 bits. The
+value stack and host builtins that take 32-bit values still use the low 32
+bits. The wider register file adds 128 bytes to each VM instance and 64-bit
+operations can be slow on AVR-class targets. Bytecode using the new opcodes
+requires a VM that implements them; older VMs will fault on these opcodes.
+
 The `floatcast` numeric format IDs are:
 
 | ID | Type |
@@ -71,6 +80,8 @@ The `floatcast` numeric format IDs are:
 | 6 | unsigned 32-bit |
 | 7 | IEEE-754 binary32 |
 | 8 | IEEE-754 binary64 |
+| 9 | signed 64-bit integer (`outfmt`) |
+| 10 | unsigned 64-bit integer (`outfmt`) |
 
 `floatop` uses formats 7 or 8. Its operation selectors are 1 add, 2 subtract,
 3 multiply, 4 divide, 5 negate, 6 equality, 7 inequality, 8 less-than,

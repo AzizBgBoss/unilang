@@ -520,7 +520,7 @@ static void test_network_vm_opcodes(void)
     ULVM_run(&vm, 100);
     if (vm.faulted || vm.reg[6] != 0 || vm.reg[7] != 4)
         fprintf(stderr, "network opcode diagnostic: fault=%d opcode=%u r6=%u r7=%u r8=%u last_error=%u\n",
-                vm.faulted, vm.fault_opcode, vm.reg[6], vm.reg[7], vm.reg[8], ULVM_net_lasterror(&net));
+                vm.faulted, vm.fault_opcode, (unsigned)vm.reg[6], (unsigned)vm.reg[7], (unsigned)vm.reg[8], ULVM_net_lasterror(&net));
     assert(!vm.faulted && vm.reg[6] == 0 && vm.reg[7] == 4);
     assert(vm.reg[8] == ULVM_NET_STATUS_READY);
 

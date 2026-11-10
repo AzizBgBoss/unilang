@@ -325,9 +325,9 @@ static uint8_t my_getkeyboard(void)
     return state;
 }
 
-static uint32_t my_gettime(void)
+static uint64_t my_gettime(void)
 {
-    return SDL_GetTicks();
+    return SDL_GetTicks64();
 }
 
 static void my_sleep(uint32_t ms)

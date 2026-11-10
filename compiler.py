@@ -148,10 +148,18 @@ OPS = {
     "minreg":          (0x33, [1, 1, 1, 1]),           # rleft, rright, rdst, signed
     "maxreg":          (0x34, [1, 1, 1, 1]),           # rleft, rright, rdst, signed
     "absreg":          (0x35, [1, 1]),                 # rsrc, rdst
-    "gettime64":       (0x3C, [1, 1]),                 # rhigh, rlow
     "mul64":           (0x36, [1, 1, 1, 1, 1]),        # rleft, rright, rhigh, rlow, signed
 
     "setreg":          (0x40, [1, 4]),                # reg, val
+    "setreg64":        (0x3C, [1, 8]),
+    "loadreg64":       (0x3D, [1, 4]),
+    "storereg64":      (0x3E, [1, 4]),
+    "loadregi64":      (0x3F, [1, 1]),
+    "alu64":           (0x30, [1, 1, 1, 1]),
+    "outreg64":        (0x5E, [1]),
+    "outregsigned64":  (0x5F, [1]),
+    "storeregi64":     (0x7E, [1, 1]),
+    "numtostr64":      (0x7F, [1, 4, 1]),
     "movreg":          (0x41, [1, 1]),                # dst, src
     "loadreg8":        (0x42, [1, 4]),                # reg, addr
     "loadreg16":       (0x43, [1, 4]),
@@ -235,6 +243,7 @@ TYPE_BYTES = {
     "uint8": 1,
     "uint16": 2,
     "uint32": 4,
+    "uint64": 8,
 }
 DEFAULT_TYPE = "uint32"
 INT_SIZE = TYPE_BYTES[DEFAULT_TYPE]  # width used by VM pointers and compiler scratch (4 bytes)
@@ -244,8 +253,8 @@ VARS_START = 0          # byte address where user variables start
 # Signed integers use two's-complement storage and explicit signed operations;
 # float/double values use IEEE-754 binary32/binary64 bit layouts.
 TYPE_ALIASES = {
-    "uint8_t": (1, False), "uint16_t": (2, False), "uint32_t": (4, False),
-    "int8_t": (1, True), "int16_t": (2, True), "int32_t": (4, True),
+    "uint8_t": (1, False), "uint16_t": (2, False), "uint32_t": (4, False), "uint64_t": (8, False),
+    "int8_t": (1, True), "int16_t": (2, True), "int32_t": (4, True), "int64_t": (8, True),
     "size_t": (4, False), "uintptr_t": (4, False),
 }
 
@@ -549,23 +558,26 @@ class Compiler:
 
     @staticmethod
     def _reg_width(size_bytes):
-        if size_bytes not in (1, 2, 4):
-            raise NotImplementedError(f"unsupported operand width ({size_bytes} bytes) -- only 1, 2, or 4 byte values are supported")
+        if size_bytes not in (1, 2, 4, 8):
+            raise NotImplementedError(f"unsupported operand width ({size_bytes} bytes)")
         return size_bytes * 8
 
     # -- register-level emission helpers --------------------------------------
     def emit_load(self, addr, size, reg):
-        self.emit(f"loadreg{self._reg_width(size)}", reg, addr)
+        self.emit("loadreg64" if size == 8 else f"loadreg{self._reg_width(size)}", reg, addr)
 
     def emit_store(self, reg, addr, size):
-        self.emit(f"storereg{self._reg_width(size)}", reg, addr)
+        self.emit("storereg64" if size == 8 else f"storereg{self._reg_width(size)}", reg, addr)
 
     def emit_set_const(self, reg, val):
         self.emit("setreg", reg, val)
 
+    def emit_set_const64(self, reg, val):
+        self.emit("setreg64", reg, val)
+
     def emit_store_const(self, addr, size, val):
         # Sets a memory location to a compile-time-known constant.
-        self.emit_set_const(RA, val)
+        (self.emit_set_const64 if size == 8 else self.emit_set_const)(RA, val)
         self.emit_store(RA, addr, size)
 
     def int_conversion(self, src, src_fmt, dest_size, dest_fmt):
@@ -590,6 +602,17 @@ class Compiler:
     def emit_copy(self, src, dest):
         src_fmt = self.addr_formats.get(src, self.format_for_size(self.addr_size(src)))
         dest_fmt = self.addr_formats.get(dest, self.format_for_size(self.addr_size(dest)))
+        if src_fmt in (1, 2, 3, 4, 5, 6, 9, 10) and dest_fmt in (1, 2, 3, 4, 5, 6, 9, 10):
+            self.emit_load(src, self.addr_size(src), RA)
+            source_size = self.addr_size(src)
+            if dest_fmt in (9, 10) and source_size < 8 and src_fmt in (1, 3, 5):
+                self.emit("alu64", {1: 28, 2: 29, 4: 30}[source_size], RA, RA, RA)
+            elif src_fmt in (1, 3) and self.addr_size(dest) > source_size:
+                shift = 32 - 8 * source_size
+                self.emit("shlregv", RA, shift, RA)
+                self.emit("sshrregv", RA, shift, RA)
+            self.emit_store(RA, dest, self.addr_size(dest))
+            return
         if src_fmt != dest_fmt and self.int_conversion(src, src_fmt, self.addr_size(dest), dest_fmt):
             # e.g. uint8_t c = b & 15: a load and a (truncating) store
             self.emit_load_int(src, src_fmt, self.addr_size(dest), RA)
@@ -644,7 +667,8 @@ class Compiler:
     @staticmethod
     def integer_format(size, signed):
         return {(1, True): 1, (1, False): 2, (2, True): 3,
-                (2, False): 4, (4, True): 5, (4, False): 6}.get(
+                (2, False): 4, (4, True): 5, (4, False): 6,
+                (8, True): 9, (8, False): 10}.get(
                     (size, signed), 6)
 
     def expr_format(self, node):
@@ -653,6 +677,9 @@ class Compiler:
             return 8 if float_size == 8 else 7
         if isinstance(node, c_ast.BinaryOp) and node.op in (
                 "+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>"):
+            typ = self.expr_type(node)
+            if typ is not None:
+                return self.integer_format(self.scalar_type_size(typ), self.scalar_type_signed(typ))
             left_type, right_type = self.expr_type(node.left), self.expr_type(node.right)
             unsigned = ((left_type is not None and not self.scalar_type_signed(left_type))
                         or (right_type is not None and not self.scalar_type_signed(right_type)))
@@ -660,7 +687,7 @@ class Compiler:
         if isinstance(node, c_ast.UnaryOp) and node.op in ("-", "~"):
             operand_type = self.expr_type(node.expr)
             if operand_type is not None and self.type_size(operand_type) >= INT_SIZE:
-                return 5 if self.scalar_type_signed(operand_type) else 6
+                return self.integer_format(self.type_size(operand_type), self.scalar_type_signed(operand_type))
             return 5
         if isinstance(node, c_ast.BinaryOp) and node.op in (
                 "==", "!=", "<", ">", "<=", ">=", "&&", "||"):
@@ -746,7 +773,10 @@ class Compiler:
         dest = self.alloc_temp(1)
         self.emit_load(addr, self.addr_size(addr), RA)
         self.emit_set_const(RB, 0)
-        self.emit("neqreg", RA, RB, RA)
+        if self.addr_size(addr) == 8:
+            self.emit("alu64", 17, RA, RB, RA)
+        else:
+            self.emit("neqreg", RA, RB, RA)
         self.emit_store(RA, dest, 1)
         return dest
 
@@ -772,6 +802,36 @@ class Compiler:
         _, addr, size = resolved
         self.emit_load(addr, size, reg)
         return size
+
+    def load64_operand(self, node, resolved, reg):
+        """Load an integer operand into a VM register with C sign extension."""
+        if resolved[0] == "const":
+            value = resolved[1]
+            t = self.expr_type(node)
+            size = self.scalar_type_size(t) if t is not None else INT_SIZE
+            signed = self.scalar_type_signed(t) if t is not None else value < 0
+            if signed and value < 0:
+                value &= (1 << 64) - 1
+            self.emit_set_const64(reg, value)
+            if size < 8 and signed:
+                self.emit("alu64", {1: 28, 2: 29, 4: 30}[size], reg, reg, reg)
+            return 8
+        _, addr, size = resolved
+        self.emit_load(addr, size, reg)
+        t = self.expr_type(node)
+        if size < 8 and t is not None and self.scalar_type_signed(t):
+            self.emit("alu64", {1: 28, 2: 29, 4: 30}[size], reg, reg, reg)
+        return 8
+
+    def gen_alu64(self, node, selector):
+        left_r = self.resolve_operand(node.left)
+        right_r = self.resolve_operand(node.right)
+        self.load64_operand(node.left, left_r, RA)
+        self.load64_operand(node.right, right_r, RB)
+        self.emit("alu64", selector, RA, RB, RA)
+        dest = self.alloc_temp(8, self.expr_format(node))
+        self.emit_store(RA, dest, 8)
+        return dest
 
     def load_operand(self, node, reg):
         # Only safe to use when nothing else is depending on a register's
@@ -893,7 +953,8 @@ class Compiler:
         if "void" in words:
             raise NotImplementedError("'void' is only valid as a function return type, a (void) parameter list, or a pointer target")
         if words.count("long") > 1:
-            raise NotImplementedError("64-bit integers (long long) are not supported")
+            self.used_signed = self.used_signed or "unsigned" not in words
+            return 8
         if "char" in words:
             if "signed" in words:
                 self.used_signed = True
@@ -987,12 +1048,33 @@ class Compiler:
         except _NotConst:
             return None
 
+    def scalar_type_format_is_int(self, t):
+        return self.type_format(t) in (1, 2, 3, 4, 5, 6, 9, 10)
+
+    def const_sx(self, v, node):
+        """Sign-extend a folded constant from the signed type of its own node."""
+        t = self.expr_type(node)
+        if t is not None and not isinstance(t, c_ast.PtrDecl) and self.scalar_type_signed(t):
+            bits = self.scalar_type_size(t) * 8
+            v &= (1 << bits) - 1
+            if v >> (bits - 1):
+                v -= 1 << bits
+        return v
+
     def eval_const(self, node):
+        v = self._eval_const_raw(node)
+        t = self.expr_type(node)
+        if t is not None and not isinstance(t, c_ast.PtrDecl) and self.scalar_type_signed(t) \
+                and self.scalar_type_size(t) < 8:
+            v = self.const_sx(v, node) & 0xFFFFFFFFFFFFFFFF
+        return v
+
+    def _eval_const_raw(self, node):
         if isinstance(node, c_ast.Constant):
             if node.type == "char":
                 return ord(bytes(node.value[1:-1], "utf-8").decode("unicode_escape"))
             if node.type.endswith("int"):
-                return self.parse_int_literal(node.value) & M32
+                return self.parse_int_literal(node.value)
             raise _NotConst()
         if isinstance(node, c_ast.ID):
             if node.name in self.vars:
@@ -1010,31 +1092,44 @@ class Compiler:
             if node.op in ("-", "+", "~", "!"):
                 v = self.eval_const(node.expr)
                 if node.op == "-":
-                    return (-v) & M32
+                    return (-v) & ((1 << (max(INT_SIZE, self.scalar_type_size(self.expr_type(node))) * 8)) - 1)
                 if node.op == "~":
-                    return (~v) & M32
+                    return (~v) & ((1 << (max(INT_SIZE, self.scalar_type_size(self.expr_type(node))) * 8)) - 1)
                 if node.op == "!":
                     return int(v == 0)
                 return v
             raise _NotConst()
         if isinstance(node, c_ast.BinaryOp):
-            a = self.eval_const(node.left)
-            b = self.eval_const(node.right)
+            a = self.const_sx(self.eval_const(node.left), node.left)
+            b = self.const_sx(self.eval_const(node.right), node.right)
             op = node.op
+            left_type, right_type = self.expr_type(node.left), self.expr_type(node.right)
+            width = max(4, self.scalar_type_size(left_type), self.scalar_type_size(right_type))
+            signed = self.comparison_is_signed(node.left, node.right,
+                                                self.scalar_type_size(left_type), self.scalar_type_size(right_type))
+            mask = (1 << (width * 8)) - 1
+            if signed:
+                sign = 1 << (width * 8 - 1)
+                a = (a & mask) - (1 << (width * 8)) if a & sign else a & mask
+                b = (b & mask) - (1 << (width * 8)) if b & sign else b & mask
+            else:
+                a, b = a & mask, b & mask
             if op == "+": r = a + b
             elif op == "-": r = a - b
             elif op == "*": r = a * b
             elif op == "/" or op == "%":
                 if b == 0:
                     raise _NotConst()
-                sa, sb = a - (a >> 31 << 32), b - (b >> 31 << 32)
-                q = abs(sa) // abs(sb) * (1 if (sa < 0) == (sb < 0) else -1)
-                r = q if op == "/" else sa - q * sb
+                if signed:
+                    q = abs(a) // abs(b) * (1 if (a < 0) == (b < 0) else -1)
+                    r = q if op == "/" else a - q * b
+                else:
+                    r = a // b if op == "/" else a % b
             elif op == "&": r = a & b
             elif op == "|": r = a | b
             elif op == "^": r = a ^ b
-            elif op == "<<": r = (a << b) if b < 32 else 0
-            elif op == ">>": r = (a >> b) if b < 32 else 0
+            elif op == "<<": r = (a << b) if 0 <= b < width * 8 else 0
+            elif op == ">>": r = (a >> b) if 0 <= b < width * 8 else (-1 if signed and a < 0 else 0)
             elif op == "==": r = int(a == b)
             elif op == "!=": r = int(a != b)
             elif op == "<": r = int(a < b)
@@ -1045,14 +1140,16 @@ class Compiler:
             elif op == "||": r = int(bool(a) or bool(b))
             else:
                 raise _NotConst()
-            return r & M32
+            result_type = self.expr_type(node)
+            result_width = self.scalar_type_size(result_type) if result_type is not None else INT_SIZE
+            return r & ((1 << (result_width * 8)) - 1)
         if isinstance(node, c_ast.TernaryOp):
             return self.eval_const(node.iftrue if self.eval_const(node.cond) else node.iffalse)
         if isinstance(node, c_ast.Cast):
             target = node.to_type.type
             if self.is_void_type(target):
                 raise _NotConst()
-            v = self.eval_const(node.expr)
+            v = self.const_sx(self.eval_const(node.expr), node.expr)
             size = INT_SIZE if isinstance(target, c_ast.PtrDecl) else self.scalar_size(target)
             return v & ((1 << (size * 8)) - 1)
         raise _NotConst()
@@ -1145,7 +1242,16 @@ class Compiler:
                                      type=c_ast.IdentifierType(names=["size_t"]))
             if expr.op == "*":
                 return self.resolve_type_for_expr(expr)
-            return self.expr_type(expr.expr)
+            if expr.op == "!":
+                return c_ast.TypeDecl(declname=None, quals=[], align=None,
+                                     type=c_ast.IdentifierType(names=["int"]))   # !x is always int
+            inner = self.expr_type(expr.expr)
+            plain = isinstance(inner, c_ast.TypeDecl) and isinstance(inner.type, c_ast.IdentifierType)
+            if expr.op in ("-", "+", "~") and plain and self.scalar_type_format_is_int(inner) \
+                    and self.scalar_type_size(inner) < INT_SIZE:
+                return c_ast.TypeDecl(declname=None, quals=[], align=None,
+                                     type=c_ast.IdentifierType(names=["int"]))   # integer promotion
+            return inner
         if isinstance(expr, (c_ast.ArrayRef, c_ast.StructRef)):
             return self.resolve_type_for_expr(expr)
         if isinstance(expr, c_ast.BinaryOp):
@@ -1157,18 +1263,48 @@ class Compiler:
                 return c_ast.TypeDecl(declname=None, quals=[], align=None,
                                      type=c_ast.IdentifierType(names=["double" if float_size == 8 else "float"]))
             l, r = self.expr_type(expr.left), self.expr_type(expr.right)
+            if expr.op in ("<<", ">>"):
+                if l is not None and self.scalar_type_size(l) < INT_SIZE:
+                    return c_ast.TypeDecl(declname=None, quals=[], align=None,
+                                         type=c_ast.IdentifierType(names=["int"]))
+                return l
+            if l is not None and r is not None and max(self.scalar_type_size(l), self.scalar_type_size(r)) == 8:
+                ls, rs = self.scalar_type_size(l), self.scalar_type_size(r)
+                if ls == rs == 8:
+                    unsigned = not self.scalar_type_signed(l) or not self.scalar_type_signed(r)
+                elif ls == 8:
+                    unsigned = not self.scalar_type_signed(l)
+                else:
+                    unsigned = not self.scalar_type_signed(r)
+                name = "uint64_t" if unsigned else "int64_t"
+                return c_ast.TypeDecl(declname=None, quals=[], align=None,
+                                     type=c_ast.IdentifierType(names=[name]))
             small = lambda t: isinstance(t, c_ast.TypeDecl) and self.scalar_type_size(t) < INT_SIZE
             if small(l):
                 l = r if r is not None and not small(r) else c_ast.TypeDecl(
                     declname=None, quals=[], align=None, type=c_ast.IdentifierType(names=["int"]))
+            plain = lambda t: isinstance(t, c_ast.TypeDecl) and isinstance(t.type, c_ast.IdentifierType)
+            if plain(l) and plain(r) and self.scalar_type_size(l) == self.scalar_type_size(r) == INT_SIZE \
+                    and self.scalar_type_signed(l) != self.scalar_type_signed(r):
+                return r if self.scalar_type_signed(l) else l   # int op unsigned is unsigned
             return l or r
         if isinstance(expr, c_ast.TernaryOp):
             float_size = max(self.expr_float_size(expr.iftrue), self.expr_float_size(expr.iffalse))
             if float_size:
                 return c_ast.TypeDecl(declname=None, quals=[], align=None,
                                      type=c_ast.IdentifierType(names=["double" if float_size == 8 else "float"]))
-            return self.expr_type(expr.iftrue) or self.expr_type(expr.iffalse)
+            lt, rt = self.expr_type(expr.iftrue), self.expr_type(expr.iffalse)
+            plain = lambda t: isinstance(t, c_ast.TypeDecl) and isinstance(t.type, c_ast.IdentifierType)
+            if plain(lt) and plain(rt) and (
+                    self.scalar_type_size(lt) != self.scalar_type_size(rt)
+                    or self.scalar_type_signed(lt) != self.scalar_type_signed(rt)):
+                # mixed integer branches: same common type a binary operator would give
+                return self.expr_type(c_ast.BinaryOp("+", expr.iftrue, expr.iffalse))
+            return lt or rt
         if isinstance(expr, c_ast.FuncCall) and isinstance(expr.name, c_ast.ID):
+            if expr.name.name == "gettime":
+                return c_ast.TypeDecl(declname=None, quals=[], align=None,
+                                     type=c_ast.IdentifierType(names=["uint64_t"]))
             if expr.name.name in ("sin", "cos", "sqrt", "atan2"):
                 return c_ast.TypeDecl(declname=None, quals=[], align=None,
                                      type=c_ast.IdentifierType(names=["double"]))
@@ -1206,6 +1342,12 @@ class Compiler:
         right_type = self.expr_type(right)
         if isinstance(left_type, c_ast.PtrDecl) or isinstance(right_type, c_ast.PtrDecl):
             return False
+        plain = lambda t: isinstance(t, c_ast.TypeDecl) and isinstance(t.type, c_ast.IdentifierType)
+        # a folded constant is loaded as INT_SIZE, but a cast like (uint8_t)0x80 still promotes as uint8_t
+        if plain(left_type):
+            left_size = min(left_size, self.scalar_type_size(left_type))
+        if plain(right_type):
+            right_size = min(right_size, self.scalar_type_size(right_type))
         left_signed = self.scalar_type_signed(left_type)
         right_signed = self.scalar_type_signed(right_type)
         left_promoted_size = max(INT_SIZE, left_size)
@@ -1742,19 +1884,27 @@ class Compiler:
             size = self.addr_size(addr)
             old = None
             if want_value and post:
-                old = self.alloc_temp(size)
+                old = self.alloc_temp(size, fmt) if size == 8 else self.alloc_temp(size)
                 self.emit_copy(addr, old)
             self.emit_load(addr, size, RA)
-            self.emit(opname, RA, step, RA)
+            if size == 8:
+                self.emit_set_const64(RB, step)
+                self.emit("alu64", 1 if increment else 2, RA, RB, RA)
+            else:
+                self.emit(opname, RA, step, RA)
             self.emit_store(RA, addr, size)
             return old if old is not None else addr
         elem = self.emit_addr_in_ra(target)
         self.emit(f"loadregi{self._reg_width(elem)}", RA, RB)
         old = None
         if want_value and post:
-            old = self.alloc_temp(elem)
+            old = self.alloc_temp(elem, fmt) if elem == 8 else self.alloc_temp(elem)
             self.emit_store(RB, old, elem)
-        self.emit(opname, RB, step, RB)
+        if elem == 8:
+            self.emit_set_const64(RC, step)
+            self.emit("alu64", 1 if increment else 2, RB, RC, RB)
+        else:
+            self.emit(opname, RB, step, RB)
         self.emit(f"storeregi{self._reg_width(elem)}", RA, RB)
         if not want_value:
             return None
@@ -1804,9 +1954,13 @@ class Compiler:
             if elem == 8:
                 fmt = self.type_format(self.resolve_type_for_expr(node))
                 result = self.alloc_temp(8, fmt)
-                self.emit("movreg", RC, RA)
-                self.emit_set_const(RA, result)
-                self.emit("floatcast", fmt, fmt, RC, RA)
+                if fmt in (9, 10):
+                    self.emit("loadregi64", RA, RB)
+                    self.emit_store(RB, result, 8)
+                else:
+                    self.emit("movreg", RC, RA)
+                    self.emit_set_const(RA, result)
+                    self.emit("floatcast", fmt, fmt, RC, RA)
                 return result
             self.emit(f"loadregi{self._reg_width(elem)}", RA, RB)
             result = self.alloc_temp(elem, self.type_format(self.resolve_type_for_expr(node)))
@@ -1816,6 +1970,14 @@ class Compiler:
             return self.gen_expr(node.expr)
         if op == "-":
             operand = self.resolve_operand(node.expr)
+            typ = self.expr_type(node.expr)
+            if typ is not None and self.scalar_type_size(typ) == 8:
+                self.load64_operand(node.expr, operand, RA)
+                self.emit_set_const64(RB, 0)
+                self.emit("alu64", 12, RA, RB, RA)
+                dest = self.alloc_temp(8, self.expr_format(node))
+                self.emit_store(RA, dest, 8)
+                return dest
             self.emit_set_const(RA, 0)
             self.load_comparison_operand(node.expr, operand, RB)
             self.emit("subreg", RA, RB, RA)
@@ -1824,6 +1986,14 @@ class Compiler:
             return dest
         if op == "~":
             operand = self.resolve_operand(node.expr)
+            typ = self.expr_type(node.expr)
+            if typ is not None and self.scalar_type_size(typ) == 8:
+                self.load64_operand(node.expr, operand, RA)
+                self.emit_set_const64(RB, 0)
+                self.emit("alu64", 11, RA, RB, RA)
+                dest = self.alloc_temp(8, self.expr_format(node))
+                self.emit_store(RA, dest, 8)
+                return dest
             self.load_comparison_operand(node.expr, operand, RA)
             self.emit("notreg", RA, RA)
             dest = self.alloc_temp(INT_SIZE, self.expr_format(node))
@@ -1831,6 +2001,14 @@ class Compiler:
             return dest
         if op == "!":
             operand = self.resolve_operand(node.expr)
+            typ = self.expr_type(node.expr)
+            if typ is not None and self.scalar_type_size(typ) == 8:
+                self.load64_operand(node.expr, operand, RA)
+                self.emit_set_const64(RB, 0)
+                self.emit("alu64", 16, RA, RB, RA)
+                dest = self.alloc_temp(1)
+                self.emit_store(RA, dest, 1)
+                return dest
             self.load_resolved(operand, RA)
             self.emit_set_const(RB, 0)
             self.emit("eqreg", RA, RB, RA)
@@ -1903,8 +2081,9 @@ class Compiler:
                 return dest
             if node.type != "char" and not node.type.endswith("int"):
                 raise NotImplementedError(f"unsupported constant type '{node.type}'")
-            dest = self.alloc_temp(INT_SIZE, self.expr_format(node))
-            self.emit_store_const(dest, INT_SIZE, self.const_value(node))
+            size = self.expr_storage_size(node)
+            dest = self.alloc_temp(size, self.expr_format(node))
+            self.emit_store_const(dest, size, self.const_value(node))
             return dest
 
         if isinstance(node, c_ast.ID):
@@ -1957,9 +2136,13 @@ class Compiler:
             if field_size == 8:
                 fmt = self.type_format(field_decl.type) if field_decl is not None else 8
                 result = self.alloc_temp(8, fmt)
-                self.emit("movreg", RC, RA)
-                self.emit_set_const(RA, result)
-                self.emit("floatcast", fmt, fmt, RC, RA)
+                if fmt in (9, 10):
+                    self.emit("loadregi64", RA, RB)
+                    self.emit_store(RB, result, 8)
+                else:
+                    self.emit("movreg", RC, RA)
+                    self.emit_set_const(RA, result)
+                    self.emit("floatcast", fmt, fmt, RC, RA)
                 return result
             self.emit(f"loadregi{self._reg_width(field_size)}", RA, RB)
             result = self.alloc_temp(field_size, self.type_format(field_decl.type) if field_decl is not None else None)
@@ -1991,9 +2174,13 @@ class Compiler:
             if elem_bytes == 8:
                 fmt = self.type_format(self.resolve_type_for_expr(node))
                 result = self.alloc_temp(8, fmt)
-                self.emit("movreg", RC, RA)
-                self.emit_set_const(RA, result)
-                self.emit("floatcast", fmt, fmt, RC, RA)
+                if fmt in (9, 10):
+                    self.emit("loadregi64", RA, RB)
+                    self.emit_store(RB, result, 8)
+                else:
+                    self.emit("movreg", RC, RA)
+                    self.emit_set_const(RA, result)
+                    self.emit("floatcast", fmt, fmt, RC, RA)
                 return result
             self.emit(f"loadregi{self._reg_width(elem_bytes)}", RA, RB)
             result = self.alloc_temp(elem_bytes, self.type_format(self.resolve_type_for_expr(node)))
@@ -2046,6 +2233,13 @@ class Compiler:
                 self.emit_load(converted, elem_bytes, RB)
                 self.emit(f"storeregi{self._reg_width(elem_bytes)}", RA, RB)
                 return converted
+            if elem_bytes == 8 and dest_fmt in (9, 10):
+                converted = self.alloc_temp(elem_bytes, dest_fmt)
+                self.emit_copy(rhs, converted)
+                self.emit_addr_in_ra(node.lvalue)
+                self.emit_load(converted, 8, RB)
+                self.emit("storeregi64", RA, RB)
+                return converted
             if src_fmt != dest_fmt or elem_bytes == 8:
                 converted = self.alloc_temp(elem_bytes, dest_fmt)
                 self.emit_copy(rhs, converted)
@@ -2087,6 +2281,17 @@ class Compiler:
             fmt = self.type_format(target)
             dest = self.alloc_temp(size, fmt)
             src_fmt = self.addr_formats.get(src, self.expr_format(node.expr))
+            integer_fmt = lambda f: f in (1, 2, 3, 4, 5, 6, 9, 10)
+            if integer_fmt(src_fmt) and integer_fmt(fmt):
+                if size == 8:
+                    const = self.try_const(node.expr)
+                    resolved = ("const", const) if const is not None else ("addr", src, self.addr_size(src))
+                    self.load64_operand(node.expr, resolved, RA)
+                    self.emit_store(RA, dest, 8)
+                else:
+                    self.emit_load_int(src, src_fmt, size, RA)
+                    self.emit_store(RA, dest, size)
+                return dest
             if src_fmt != fmt and self.int_conversion(src, src_fmt, size, fmt):
                 self.emit_load_int(src, src_fmt, size, RA)
                 self.emit_store(RA, dest, size)
@@ -2113,6 +2318,19 @@ class Compiler:
 
             if self.expr_float_size(node):
                 return self.gen_float_binary(node)
+
+            result_type = self.expr_type(node)
+            if node.op not in ("&&", "||") and result_type is not None and self.scalar_type_size(result_type) == 8:
+                selectors = {"+": 1, "-": 2, "*": 3, "/": 4, "%": 5,
+                             "&": 8, "|": 9, "^": 10, "<<": 13, ">>": 14}
+                if node.op in ("/", "%") and self.comparison_is_signed(
+                        node.left, node.right, self.scalar_type_size(self.expr_type(node.left)),
+                        self.scalar_type_size(self.expr_type(node.right))):
+                    selectors[node.op] = 6 if node.op == "/" else 7
+                if node.op == ">>" and self.scalar_type_signed(self.expr_type(node.left)):
+                    selectors[node.op] = 15
+                if node.op in selectors:
+                    return self.gen_alu64(node, selectors[node.op])
 
             if node.op in ("&&", "||"):
                 # short-circuit like C: the right operand is only evaluated
@@ -2155,7 +2373,10 @@ class Compiler:
                     dest = self.alloc_temp(INT_SIZE, self.expr_format(node))
                     self.emit_store(RA, dest, INT_SIZE)
                     return dest
-                self.load_resolved(right_r, RB)
+                if node.op in ("&", "|", "^"):
+                    self.load_comparison_operand(node.right, right_r, RB)
+                else:
+                    self.load_resolved(right_r, RB)
                 if node.op == ">>" and self.comparison_is_signed(
                         node.left, node.right,
                         INT_SIZE if left_r[0] == "const" else left_r[2],
@@ -2209,13 +2430,13 @@ class Compiler:
                     self.emit("addreg", RA, RB, RA)
                     self.emit("sshrregv", RA, k, RA)
             elif right_const is not None and node.op in const_ops and not (
-                    signed_op and left_size < INT_SIZE):
-                self.load_operand(node.left, RA)
+                    left_size < INT_SIZE and self.scalar_type_signed(left_type)):
+                self.load_resolved(left_r, RA)
                 self.emit(const_ops[node.op], RA, right_const, RA)
             elif left_const is not None and node.op in ("+", "*") and not (
-                    signed_op and right_size < INT_SIZE):
+                    right_size < INT_SIZE and self.scalar_type_signed(self.expr_type(node.right))):
                 # commutative -- swap so the constant still uses the cheaper *v opcode
-                self.load_operand(node.right, RA)
+                self.load_resolved(right_r, RA)
                 self.emit(const_ops[node.op], RA, left_const, RA)
             else:
                 self.load_comparison_operand(node.left, left_r, RA)
@@ -2260,8 +2481,6 @@ class Compiler:
                 return self.gen_min_max_abs(node, name)
             if name == "mul64":
                 raise NotImplementedError("mul64(a, b, &high, &low) is a statement")
-            if name == "gettime64":
-                raise NotImplementedError("gettime64(&high, &low) is a statement")
             if name in ("memcpy", "memset"):
                 return self.gen_mem_builtin(node, name)
             if name == "getkey":
@@ -2343,7 +2562,9 @@ class Compiler:
                 self.define_label(skip)
             return
         if (isinstance(node, c_ast.BinaryOp) and node.op in COND_CODES and self.try_const(node) is None
-                and not (self.expr_float_size(node.left) or self.expr_float_size(node.right))):
+                and not (self.expr_float_size(node.left) or self.expr_float_size(node.right))
+                and not ((self.expr_type(node.left) is not None and self.scalar_type_size(self.expr_type(node.left)) == 8)
+                         or (self.expr_type(node.right) is not None and self.scalar_type_size(self.expr_type(node.right)) == 8))):
             left_r = self.resolve_operand(node.left)
             right_r = self.resolve_operand(node.right)
             left_size = INT_SIZE if left_r[0] == "const" else left_r[2]
@@ -2371,6 +2592,21 @@ class Compiler:
         if isinstance(node, c_ast.BinaryOp) and node.op in comparisons:
             if self.expr_float_size(node.left) or self.expr_float_size(node.right):
                 return self.gen_float_compare(node.left, node.right, node.op)
+            left_type, right_type = self.expr_type(node.left), self.expr_type(node.right)
+            if ((left_type is not None and self.scalar_type_size(left_type) == 8) or
+                    (right_type is not None and self.scalar_type_size(right_type) == 8)):
+                signed = node.op not in ("==", "!=") and self.comparison_is_signed(
+                    node.left, node.right, self.scalar_type_size(left_type), self.scalar_type_size(right_type))
+                selector = {"==": 16, "!=": 17, "<": 18, ">": 19, "<=": 20, ">=": 21}[node.op]
+                if signed and node.op not in ("==", "!="):
+                    selector += 6
+                left_r, right_r = self.resolve_operand(node.left), self.resolve_operand(node.right)
+                self.load64_operand(node.left, left_r, RA)
+                self.load64_operand(node.right, right_r, RB)
+                self.emit("alu64", selector, RA, RB, RA)
+                bool_addr = self.alloc_temp(1)
+                self.emit_store(RA, bool_addr, 1)
+                return bool_addr
             left_r = self.resolve_operand(node.left)
             right_r = self.resolve_operand(node.right)
             left_size = INT_SIZE if left_r[0] == "const" else left_r[2]
@@ -2444,8 +2680,8 @@ class Compiler:
                 conversion = m.group("conversion")
                 if width > 99 or (precision != 255 and precision > 99):
                     raise NotImplementedError("printf width and precision are limited to 99")
-                if length == "ll":
-                    raise NotImplementedError("64-bit printf conversions are not supported")
+                if length == "ll" and conversion not in "diuoxX":
+                    raise NotImplementedError("the ll printf modifier is supported only for integer conversions")
                 if length in ("l", "z") and conversion in "diuoxX":
                     raise NotImplementedError("long and size_t printf conversions are not supported")
                 if conversion == "c" and (
@@ -2482,6 +2718,14 @@ class Compiler:
             if conversion in "diuoxXfFeEgG" or conversion == "c":
                 addr = self.gen_expr(arg)
                 numeric_format = self.expr_format(arg)
+                if length == "ll":
+                    signed_ll = conversion in "di"
+                    numeric_format = self.integer_format(8, signed_ll)
+                    if self.addr_size(addr) < 8:
+                        wide = self.alloc_temp(8, numeric_format)
+                        self.load64_operand(arg, self.resolve_operand(arg), RA)
+                        self.emit_store(RA, wide, 8)
+                        addr = wide
                 if conversion == "c":
                     numeric_format = self.integer_format(min(self.addr_size(addr), 4), False)
                 if length in ("hh", "h"):
@@ -2822,19 +3066,6 @@ class Compiler:
         self.emit_store(RB, result, INT_SIZE)
         return result
 
-    def gen_gettime64(self, call):
-        args = call.args.exprs if call.args else []
-        if len(args) != 2 or not (
-                isinstance(args[0], c_ast.UnaryOp) and args[0].op == "&"
-                and isinstance(args[1], c_ast.UnaryOp) and args[1].op == "&"):
-            raise NotImplementedError("gettime64(&high, &low) takes two output addresses")
-        high_ptr, low_ptr = self.gen_expr(args[0]), self.gen_expr(args[1])
-        self.emit_load(high_ptr, INT_SIZE, 9)
-        self.emit_load(low_ptr, INT_SIZE, 10)
-        self.emit("gettime64", 12, 13)
-        self.emit("storeregi32", 9, 12)
-        self.emit("storeregi32", 10, 13)
-
     def gen_mul64(self, call):
         args = call.args.exprs if call.args else []
         if len(args) != 4 or not (
@@ -2897,8 +3128,8 @@ class Compiler:
 
     def gen_gettime(self):
         self.emit("gettime", RA)
-        dest = self.alloc_temp(INT_SIZE)
-        self.emit_store(RA, dest, INT_SIZE)
+        dest = self.alloc_temp(8, 10)
+        self.emit_store(RA, dest, 8)
         return dest
 
     def gen_numtostr(self, call):
@@ -2912,8 +3143,14 @@ class Compiler:
             raise NotImplementedError("numtostr()'s buffer must be a char[]")
         buf_addr = self.var_addr(buf_node.name)
         val_r = self.resolve_operand(val_node)
-        self.load_resolved(val_r, RA)
-        self.emit("numtostr", RA, buf_addr, RB)
+        val_type = self.expr_type(val_node)
+        is_wide = val_type is not None and self.scalar_type_size(val_type) == 8
+        if is_wide:
+            self.load64_operand(val_node, val_r, RA)
+            self.emit("numtostr64", RA, buf_addr, RB)
+        else:
+            self.load_resolved(val_r, RA)
+            self.emit("numtostr", RA, buf_addr, RB)
         dest = self.alloc_temp(1)
         self.emit_store(RB, dest, 1)
         return dest
@@ -3012,6 +3249,7 @@ class Compiler:
                 self.check_not_rom(a)
         arg_vals = [self.gen_expr(a) for a in args]
 
+        scope_snapshot = (dict(self.vars), dict(self.var_sizes), dict(self.var_types))
         shadowed = {}  # name -> previous address/size/type (or NO_PREV sentinel) to restore after inlining
         NO_PREV = object()
         for p, val in zip(params, arg_vals):
@@ -3059,6 +3297,11 @@ class Compiler:
                 self.vars[pname] = prev
                 self.var_sizes[pname] = prev_size
                 self.var_types[pname] = prev_type
+
+        # block locals declared inside the callee must not replace the caller's names
+        for table, saved in zip((self.vars, self.var_sizes, self.var_types), scope_snapshot):
+            for key, value in saved.items():
+                table[key] = value
 
         return ret_addr
 
@@ -3631,8 +3874,6 @@ class Compiler:
                 self.gen_blit(node)
             elif name == "setpalette":
                 self.gen_setpalette(node)
-            elif name == "gettime64":
-                self.gen_gettime64(node)
             elif name == "mul64":
                 self.gen_mul64(node)
             elif name == "beep":
@@ -3775,6 +4016,9 @@ class Compiler:
             return
 
         if isinstance(node, c_ast.Switch):
+            selector_type = self.expr_type(node.cond)
+            if selector_type is not None and self.scalar_type_size(selector_type) == 8:
+                raise NotImplementedError("switch selectors wider than 32 bits are not supported")
             saved_vars, saved_sizes = dict(self.vars), dict(self.var_sizes)
             cond = self.gen_expr(node.cond)
             items = (node.stmt.block_items or []) if isinstance(node.stmt, c_ast.Compound) else [node.stmt]
@@ -3897,8 +4141,8 @@ class Compiler:
     def compile(self, source, filename="<input>", include_dirs=(), defines=None):
         source = Preprocessor(include_dirs, defines).process(source, filename)
         if re.search(r"\bdrawnum\s*\(", source) and not re.search(r"\bdrawnum\s*\([^;{)]*\)\s*\{", source):
-            source += ("\nvoid drawnum(uint32_t n, uint8_t x, uint8_t y, uint8_t c)\n"
-                       "{\n    uint32_t d = 1;\n    while (n / d >= 10)\n        d = d * 10;\n"
+            source += ("\nvoid drawnum(uint64_t n, uint8_t x, uint8_t y, uint8_t c)\n"
+                       "{\n    uint64_t d = 1;\n    while (n / d >= 10)\n        d = d * 10;\n"
                        "    while (d > 0)\n    {\n        drawchar('0' + n / d % 10, x, y, c);\n"
                        "        x = x + 6;\n        d = d / 10;\n    }\n}\n")
         clean_source, self.alloc_meta = self.rewrite_alloc_syntax(source)

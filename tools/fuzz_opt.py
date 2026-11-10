@@ -18,7 +18,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-TYPES = ["int", "unsigned", "uint8_t", "int8_t", "uint16_t", "int16_t"]
+TYPES = ["int", "unsigned", "uint8_t", "int8_t", "uint16_t", "int16_t", "uint64_t", "int64_t"]
 BINOPS = ["+", "-", "*", "&", "|", "^", "<", ">", "<=", ">=", "==", "!=", "&&", "||"]
 
 
@@ -104,13 +104,13 @@ class Gen:
             ty = "int" if t == "ga" else "uint8_t"
             lines.append(f"{pad}{{ {ty} *{p} = &{t}[{r.randint(0, 7)}]; *{p} = *{p} + {self.expr(scope)}; }}")
         elif k < 0.94 and depth < 3:
-            lines.append(f"{pad}switch (({self.expr(scope)}) & 3) {{")
+            lines.append(f"{pad}switch (((int32_t)({self.expr(scope)})) & 3) {{")
             for c in range(3):
                 lines.append(f"{pad}case {c}: {target} = {self.expr(scope)};" + (" break;" if r.random() < 0.7 else ""))
             lines.append(f"{pad}default: {target} += 1;")
             lines.append(f"{pad}}}")
         else:
-            lines.append(f'{pad}printf("%d ", {self.expr(scope)});')
+            lines.append(f'{pad}printf("%d ", (int32_t)({self.expr(scope)}));')
 
     def function(self, idx):
         r = self.r
@@ -158,7 +158,7 @@ class Gen:
             self.stmt(scope, 0, body, 1)
         out += body
         for v in scope:
-            out.append(f'    printf("{v}=%d ", {v});')
+            out.append(f'    printf("{v}=%d ", (int32_t)({v}));')
         out.append('    for (int k = 0; k < 8; k++) printf("%d,%d ", ga[k], gb[k]);')
         out.append('    printf("\\n");')
         out.append("    return 0;")

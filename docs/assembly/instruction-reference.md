@@ -41,7 +41,7 @@ a four-byte RAM address; `target` is a four-byte absolute bytecode offset.
 | `17` | `setpixel` | `x:reg, y:reg, color:reg` | Draw one pixel through host callback. |
 | `18` | `getpixel` | `x:reg, y:reg, dst:reg` | Read one pixel through host callback. |
 | `19` | `getkeyboard` | `dst:reg` | Read host keyboard bitmask. |
-| `1A` | `gettime` | `dst:reg` | Read host elapsed milliseconds as a 32-bit value; it wraps after 2^32 ms (about 49.7 days). |
+| `1A` | `gettime` | `dst:reg` | Read the full host elapsed millisecond count into one 64-bit register. |
 | `1B` | `getmemsize` | `dst:reg` | Write VM RAM capacity. |
 | `1C` | `getflag` | `flag:u8, dst:reg` | Read packed flag value. |
 | `1D` | `randreg` | `min:reg, max:reg, dst:reg` | Random integer in `[min, max)`; VM PRNG. |
@@ -143,7 +143,7 @@ the remote endpoint.
 | `2D` | `memcpy` | `dst:reg, src:reg, length:reg, source:u8` | Copy RAM (`0`) or ROM (`1`) bytes to validated RAM destination. RAM overlap uses memmove semantics. |
 | `2E` | `memset` | `dst:reg, value:reg, length:reg` | Fill validated RAM byte range. |
 | `2F` | `fillscreen` | `color:reg` | Fill active framebuffer. |
-| `30` | — | — | Reserved/undefined; faults as unknown opcode. |
+| `30` | `alu64` | `selector:u8, left:reg, right:reg, dst:reg` | Execute one 64-bit integer operation; see selectors below. |
 | `31` | `fillcircle` | `x:reg, y:reg, radius:reg, color:reg` | Fill clipped integer circle. |
 | `32` | `drawrect` | `x:reg, y:reg, width:reg, height:reg, color:reg` | Draw clipped outline; right/bottom edges are inclusive. |
 | `33` | `minreg` | `left:reg, right:reg, dst:reg, signed:u8` | Select minimum; signed is nonzero for signed comparison. |
@@ -155,7 +155,25 @@ the remote endpoint.
 | `39` | `pushr` | `src:reg` | Push 32-bit value onto 64-entry value stack; overflow faults. |
 | `3A` | `popr` | `dst:reg` | Pop value-stack word; underflow faults. |
 | `3B` | `outfmt` | `addr:u32, format:u8, conversion:u8, width:u8, precision:u8, flags:u8` | Formatted numeric output; see [format page](bytecode-format.md#outfmt-encoding). |
-| `3C` | `gettime64` | `high:reg, low:reg` | Read host elapsed milliseconds as a 64-bit value in two words. `low` is the host's 32-bit time and `high` is the number of 32-bit wraps the VM has observed; `gettime` also updates this wrap count. |
+| `3C` | `setreg64` | `dst:reg, value:u64` | Set a register to an eight-byte big-endian immediate. |
+| `3D` | `loadreg64` | `dst:reg, addr:u32` | Load a big-endian 64-bit value from RAM. |
+| `3E` | `storereg64` | `src:reg, addr:u32` | Store a register's full 64-bit value to RAM. |
+| `3F` | `loadregi64` | `addr_reg:reg, dst:reg` | Load a big-endian 64-bit value from an indirect RAM address. |
+| `5E` | `outreg64` | `src:reg` | Print a register as unsigned decimal. |
+| `5F` | `outregsigned64` | `src:reg` | Print a register as signed decimal. |
+| `7E` | `storeregi64` | `addr_reg:reg, value_reg:reg` | Store a register's full 64-bit value to an indirect RAM address. |
+| `7F` | `numtostr64` | `value:reg, addr:u32, out_length:reg` | Convert an unsigned register to decimal text in RAM. |
+
+`alu64` selectors are: 1 add, 2 subtract, 3 multiply, 4 unsigned divide,
+5 unsigned remainder, 6 signed divide, 7 signed remainder, 8 AND, 9 OR,
+10 XOR, 11 NOT, 12 negate, 13 left shift, 14 logical right shift,
+15 arithmetic right shift, 16 equal, 17 not equal, 18–21 unsigned less,
+greater, less-or-equal, greater-or-equal, 22–27 the same six comparisons
+with signed interpretation, 28 sign-extend 8 bits, 29 sign-extend 16 bits,
+30 sign-extend 32 bits, and 31 zero-extend 32 bits. Shift amounts of 64 or
+more produce zero for logical shifts and sign fill for arithmetic right shift.
+Division by zero leaves `dst` unchanged. `INT64_MIN / -1` produces
+`INT64_MIN`; its remainder is zero.
 
 `audio_command` command IDs are 1 `sfx`, 2 `music`, 3 `stop`, 4 `pause`,
 5 `resume`, 6 `volume`, and 7 `status`. Audio callback details and SFX/music
@@ -195,7 +213,8 @@ record sizes are in [host integration](../vm/host-integration.md) and
 
 For `cmpregv`, `jcmp`, and `jcmpv`, condition selectors 0..5 are unsigned
 `==`, `!=`, `<`, `>`, `<=`, `>=`; selectors 6..9 are signed `<`, `>`, `<=`,
-`>=`. Gaps `0x5E..0x5F` and `0x7E..0xFE` are reserved/undefined.
+`>=`. Gaps `0x5E..0x5F` and `0x7E..0x7F` contain the 64-bit output and store
+instructions listed above; `0x80..0x8F` and `0xA1..0xFE` are reserved/undefined.
 
 ## Callback dependence and errors
 

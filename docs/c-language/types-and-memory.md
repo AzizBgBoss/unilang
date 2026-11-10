@@ -14,14 +14,17 @@ integers are stored in whole bytes; they are not bit-packed.
 | `bool`, `_Bool`, `char`, `uint1`, `uint2`, `uint4`, `uint8`, `uint8_t`, `int8_t` | 1 byte | `uint1`/`uint2`/`uint4` are legacy names but still occupy one byte |
 | `short`, `unsigned short`, `uint16`, `uint16_t`, `int16_t` | 2 bytes | signedness follows spelling |
 | `int`, `unsigned`, `long`, `uint32`, `uint32_t`, `int32_t`, `size_t`, `uintptr_t`, enums | 4 bytes | `long` is 32-bit; `size_t` and `uintptr_t` are unsigned 32-bit |
+| `long long`, `int64_t`, `uint64_t` | 8 bytes | Two's-complement signed or unsigned integers in one VM register |
 | `float` | 4 bytes | IEEE-754 binary32 |
 | `double`, `long double` | 8 bytes | IEEE-754 binary64; `long double` adds no precision |
 | pointers | 4 bytes | byte-addressed 32-bit addresses |
 
 `true` and `false` are the integer constants `1` and `0`. `NULL` is
-predefined as `0`. `int64_t`, `uint64_t`, and `long long` are not supported.
-64-bit values exist only as pairs of 32-bit words, as produced by `mul64` and
-`gettime64`.
+predefined as `0`. Integer registers hold 64 bits; memory values wider than
+one byte use big-endian order. Ordinary operations on 8-, 16-, and 32-bit
+values retain the 32-bit VM semantics, while operations on 64-bit expressions
+use the 64-bit ALU. `mul64` remains available for source compatibility and
+still writes a high/low pair.
 
 ### Signedness and conversions
 

@@ -54,7 +54,7 @@ ROLES = {
     "outc": "M", "out": "M", "input": "iM", "print": "t", "printn": "t",
     "printv": "iM", "printvn": "iM", "setpc": "L", "sleep": "i",
     "refreshscreen": "", "romread8": "rw", "romread16": "rw", "romread32": "rw",
-    "setpixel": "rrr", "getpixel": "rrw", "getkeyboard": "w", "gettime": "w", "gettime64": "ww",
+    "setpixel": "rrr", "getpixel": "rrw", "getkeyboard": "w", "gettime": "w",
     "getmemsize": "w", "getflag": "iw", "randreg": "rrW", "srandreg": "r",
     "drawstring": "rrrrriww", "numtostr": "rMw", "floatop": "iirrr",
     "floatcast": "iirr", "romread64": "rww", "fillrect": "rrrrr",
@@ -75,7 +75,10 @@ ROLES = {
     "net_discovery_count": "w", "net_discovery_get": "rrrrrw",
     "net_localport": "rw",
     "minreg": "rrwi", "maxreg": "rrwi", "absreg": "rw", "mul64": "rrwwi",
-    "setreg": "wi", "movreg": "wr",
+    "setreg": "wi", "setreg64": "wi", "movreg": "wr",
+    "loadreg64": "wm", "storereg64": "rs",
+    "loadregi64": "rw", "storeregi64": "rr", "alu64": "irrw",
+    "outreg64": "r", "outregsigned64": "r", "numtostr64": "rMw",
     "loadreg8": "wm", "loadreg16": "wm", "loadreg32": "wm",
     "storereg8": "rs", "storereg16": "rs", "storereg32": "rs",
     "addreg": "rrw", "subreg": "rrw", "mulreg": "rrw", "divreg": "rrW", "modreg": "rrW",
@@ -96,7 +99,8 @@ ROLES = {
 
 # instructions that can be deleted when nothing reads what they write
 PURE = {
-    "setreg", "movreg", "loadreg8", "loadreg16", "loadreg32",
+    "setreg", "setreg64", "movreg", "loadreg8", "loadreg16", "loadreg32", "loadreg64",
+    "loadregi64", "alu64",
     "loadregi8", "loadregi16", "loadregi32", "romread8", "romread16", "romread32", "romread64",
     "addreg", "subreg", "mulreg", "divreg", "modreg", "addregv", "subregv", "mulregv",
     "compreg", "notreg", "orreg", "andreg", "norreg", "nandreg", "xorreg", "xnorreg",
@@ -106,10 +110,10 @@ PURE = {
     "getmemsize", "getflag",
 }
 # instructions that write RAM somewhere other than a tagged direct address
-MEM_CLOBBER = {"storeregi8", "storeregi16", "storeregi32", "floatop", "floatcast",
-               "numtostr", "input", "write", "setbyte", "load"}
-LOADS = {"loadreg8": 1, "loadreg16": 2, "loadreg32": 4}
-STORES = {"storereg8": 1, "storereg16": 2, "storereg32": 4}
+MEM_CLOBBER = {"storeregi8", "storeregi16", "storeregi32", "storeregi64", "floatop", "floatcast",
+               "numtostr", "numtostr64", "input", "write", "setbyte", "load"}
+LOADS = {"loadreg8": 1, "loadreg16": 2, "loadreg32": 4, "loadreg64": 8}
+STORES = {"storereg8": 1, "storereg16": 2, "storereg32": 4, "storereg64": 8}
 COND_JUMPS = {"ifreg", "ifnotreg", "jcmp", "jcmpv"}
 JUMPS = COND_JUMPS | {"setpc"}
 ENDS_BLOCK = JUMPS | {"exit"}
@@ -126,7 +130,7 @@ CMP_COND = {"eqreg": 0, "neqreg": 1, "ltreg": 2, "gtreg": 3, "lereg": 4, "gereg"
 COND_SWAP = {0: 0, 1: 1, 2: 3, 3: 2, 4: 5, 5: 4, 6: 7, 7: 6, 8: 9, 9: 8}
 
 ALLOCATABLE = range(0, 13)   # r13-r15 are the compiler's scratch registers
-MASK = {1: 0xFF, 2: 0xFFFF, 4: 0xFFFFFFFF}
+MASK = {1: 0xFF, 2: 0xFFFF, 4: 0xFFFFFFFF, 8: 0xFFFFFFFFFFFFFFFF}
 
 
 def log(msg):
@@ -169,7 +173,28 @@ class Optimizer:
         self.c = comp
         self.code = comp.code
         self.slot_ok = not comp.raw_memory
+        self.dirty = self.wide_registers()
         self.stats = {}
+
+    def wide_registers(self):
+        """Registers that may ever hold bits above bit 31. Legacy 32-bit ops
+        always write zero-extended results, so only 64-bit producers and
+        copies of their results can make a register wide."""
+        wide, dst = set(), {"gettime": 0, "loadreg64": 0, "setreg64": 0, "loadregi64": 1, "alu64": 3}
+        copies = []
+        for ins in self.code:
+            if ins is None:
+                continue
+            if ins.op == "movreg":
+                copies.append(tuple(ins.args))
+            elif ins.op in dst and not (ins.op == "setreg64" and is_const(ins.args[1])
+                                        and ins.args[1] <= 0xFFFFFFFF):
+                wide.add(ins.args[dst[ins.op]])
+        while True:
+            grown = {d for d, s in copies if s in wide} - wide
+            if not grown:
+                return wide
+            wide |= grown
 
     def bump(self, key, n=1):
         self.stats[key] = self.stats.get(key, 0) + n
@@ -400,7 +425,7 @@ class Optimizer:
                     else:
                         code[i] = Ins("andregv", [s, MASK[w], r])
                         self.bump("loads forwarded (masked)")
-                    bits = min(reg_bits.get(s, 32), 8 * w)
+                    bits = min(reg_bits.get(s, 64), 8 * w)
                     kill_reg(r)
                     reg_mem[r] = (int(a), w, True, a)
                     reg_bits[r] = bits
@@ -414,7 +439,7 @@ class Optimizer:
                             log(f"last forwarding (const) at {i}: {ins!r}")
                 if (int(a), w) in mem_const:
                     val = mem_const[(int(a), w)][0]
-                    code[i] = Ins("setreg", [r, val])
+                    code[i] = Ins("setreg64" if w == 8 else "setreg", [r, val & MASK[w]])
                     self.bump("loads replaced by constants")
                     kill_reg(r)
                     reg_const[r] = val
@@ -429,7 +454,7 @@ class Optimizer:
                 r, a = ins.args
                 w = STORES[op]
                 kill_mem(int(a), int(a) + w)
-                exact = reg_bits.get(r, 32) <= 8 * w
+                exact = reg_bits.get(r, 64) <= 8 * w
                 reg_mem[r] = (int(a), w, exact, a)
                 if r in reg_const and is_const(reg_const[r]):
                     mem_const[(int(a), w)] = (reg_const[r] & MASK[w], a)
@@ -459,12 +484,13 @@ class Optimizer:
             else:
                 for d in defs:
                     kill_reg(d)
-                if op == "setreg" and is_const(ins.args[1]):
-                    reg_const[ins.args[0]] = ins.args[1]
-                    reg_bits[ins.args[0]] = bit_len(ins.args[1])
+                if op in ("setreg", "setreg64") and is_const(ins.args[1]):
+                    value = ins.args[1] if op == "setreg64" else ins.args[1] & 0xFFFFFFFF
+                    reg_const[ins.args[0]] = value
+                    reg_bits[ins.args[0]] = bit_len(value)
                 elif defs:
                     b = result_bits(ins, reg_bits)
-                    if b < 32:
+                    if b <= 64:
                         reg_bits[defs[0]] = b
             if op in ENDS_BLOCK and op in NO_FALLTHROUGH:
                 reset()
@@ -520,7 +546,7 @@ class Optimizer:
                     break
                 _, defs = uses_defs(ins)
                 if reg in defs:
-                    if ins.op == "setreg" and is_const(ins.args[1]):
+                    if ins.op in ("setreg", "setreg64") and is_const(ins.args[1]):
                         val = ins.args[1] & MASK[s.size]
                     break
             if val is None:
@@ -611,10 +637,10 @@ class Optimizer:
                 code[i] = Ins("movreg", [ins.args[0], chosen])
             for i in d["stores"]:
                 ins = code[i]
-                if size == 4:
-                    code[i] = Ins("movreg", [chosen, ins.args[0]])
-                else:
+                if size in (1, 2, 4):
                     code[i] = Ins("andregv", [ins.args[0], MASK[size], chosen])
+                else:
+                    code[i] = Ins("movreg", [chosen, ins.args[0]])
         self.bump("variables promoted to registers", promoted)
 
     # --------------------------------------------------- 5. register cleanup
@@ -743,13 +769,16 @@ class Optimizer:
                         changed = True
                         self.bump("copies propagated")
                 # 2. constant folding into immediate forms
-                new = fold_constants(ins, const)
+                def clean(r):
+                    return bits.get(r, 64 if r in self.dirty else 32) <= 32
+
+                new = fold_constants(ins, const, clean)
                 if new is not None:
                     code[i] = ins = new
                     roles = ROLES[ins.op]
                     changed = True
                     self.bump("constants folded into instructions")
-                folded = evaluate(ins, const)
+                folded = evaluate(ins, const, clean)
                 if folded is not None:
                     code[i] = ins = folded
                     roles = ROLES[ins.op]
@@ -757,7 +786,7 @@ class Optimizer:
                     self.bump("constant expressions folded")
                 if ins.op == "andregv" and is_const(ins.args[1]):
                     m = ins.args[1] & 0xFFFFFFFF
-                    if m == (1 << m.bit_length()) - 1 and bits.get(ins.args[0], 32) <= m.bit_length():
+                    if m == (1 << m.bit_length()) - 1 and bits.get(ins.args[0], 64 if ins.args[0] in self.dirty else 32) <= m.bit_length():
                         code[i] = ins = Ins("movreg", [ins.args[2], ins.args[0]])
                         roles = ROLES[ins.op]
                         changed = True
@@ -782,15 +811,16 @@ class Optimizer:
                         bits[d] = bits[s]
                     else:
                         bits.pop(d, None)
-                elif ins.op == "setreg" and is_const(ins.args[1]):
-                    const[ins.args[0]] = ins.args[1] & 0xFFFFFFFF
-                    bits[ins.args[0]] = bit_len(ins.args[1] & 0xFFFFFFFF)
+                elif ins.op in ("setreg", "setreg64") and is_const(ins.args[1]):
+                    value = ins.args[1] if ins.op == "setreg64" else ins.args[1] & 0xFFFFFFFF
+                    const[ins.args[0]] = value
+                    bits[ins.args[0]] = bit_len(value)
                 else:
                     for d in defs:
                         bits.pop(d, None)
                     if len(defs) == 1:
                         b = result_bits(ins, bits)
-                        if b < 32:
+                        if b <= 64:
                             bits[defs[0]] = b
         return changed
 
@@ -931,16 +961,16 @@ class Optimizer:
         self.analyze_slots()
         if consts_first:
             step("constvars", self.propagate_constant_slots)
-            self.register_cleanup()
+            step("regs", self.register_cleanup)
             self.analyze_slots()
             step("dse", self.remove_dead_stores)
             step("promote", self.promote)
         else:
             step("promote", self.promote)
-            self.register_cleanup()
+            step("regs", self.register_cleanup)
             self.analyze_slots()
             step("constvars", self.propagate_constant_slots)
-        self.register_cleanup()
+        step("regs", self.register_cleanup)
 
     def snapshot(self):
         return ([None if ins is None else Ins(ins.op, list(ins.args)) for ins in self.code],
@@ -1008,6 +1038,8 @@ class Optimizer:
 def result_bits(ins, bits):
     """Upper bound on the number of significant bits an instruction produces."""
     op, a = ins.op, ins.args
+    if op in ("gettime", "loadreg64", "loadregi64", "alu64"):
+        return 64
     if op in ("loadreg8", "loadregi8", "romread8", "getkeyboard", "numtostr"):
         return 8
     if op in ("loadreg16", "loadregi16", "romread16", "getpixel"):
@@ -1015,7 +1047,7 @@ def result_bits(ins, bits):
     if op in CMP_COND or op in ("cmpregv", "isflagsupported"):
         return 1
     if op == "andregv" and is_const(a[1]):
-        return min(bits.get(a[0], 32), bit_len(a[1] & 0xFFFFFFFF))
+        return min(bits.get(a[0], 64), bit_len(a[1] & 0xFFFFFFFF))
     if op == "andreg":
         return min(bits.get(a[0], 32), bits.get(a[1], 32))
     if op in ("orreg", "xorreg"):
@@ -1029,45 +1061,46 @@ def result_bits(ins, bits):
     return 32
 
 
-def fold_constants(ins, const):
+def fold_constants(ins, const, clean=lambda r: False):
     """Rewrite a register-register instruction whose operand is a known
     constant into its immediate form. Returns the new Ins or None."""
     op, a = ins.op, ins.args
     if op in IMM_FORM:
         x, y, d = a
         if y in const:
-            v = const[y]
+            v = const[y] & 0xFFFFFFFF
             if op in ("shlreg", "shrreg", "sshrreg"):
                 if not 0 <= v < 32:
                     return None
             return Ins(IMM_FORM[op], [x, v, d])
         if x in const and op in COMMUTATIVE:
-            return Ins(IMM_FORM[op], [y, const[x], d])
+            return Ins(IMM_FORM[op], [y, const[x] & 0xFFFFFFFF, d])
         return None
     if op in CMP_COND:
         x, y, d = a
         if y in const:
-            return Ins("cmpregv", [x, const[y], d, CMP_COND[op]])
+            return Ins("cmpregv", [x, const[y] & 0xFFFFFFFF, d, CMP_COND[op]])
         if x in const:
-            return Ins("cmpregv", [y, const[x], d, COND_SWAP[CMP_COND[op]]])
+            return Ins("cmpregv", [y, const[x] & 0xFFFFFFFF, d, COND_SWAP[CMP_COND[op]]])
         return None
     if op == "jcmp":
         x, y, cond, lab = a
         if y in const:
-            return Ins("jcmpv", [x, const[y], cond, lab])
+            return Ins("jcmpv", [x, const[y] & 0xFFFFFFFF, cond, lab])
         if x in const:
-            return Ins("jcmpv", [y, const[x], COND_SWAP[cond], lab])
+            return Ins("jcmpv", [y, const[x] & 0xFFFFFFFF, COND_SWAP[cond], lab])
         return None
     if op in ("ifreg", "ifnotreg") and a[0] in const:
-        taken = (const[a[0]] != 0) == (op == "ifreg")
+        taken = ((const[a[0]] & 0xFFFFFFFF) != 0) == (op == "ifreg")
         return Ins("setpc", [a[1]]) if taken else Ins("movreg", [a[0], a[0]])
     if op == "jcmpv" and a[0] in const and is_const(a[1]):
-        if cond_holds(a[2], const[a[0]], a[1] & 0xFFFFFFFF):
+        if cond_holds(a[2], const[a[0]] & 0xFFFFFFFF, a[1] & 0xFFFFFFFF):
             return Ins("setpc", [a[3]])
         return Ins("movreg", [a[0], a[0]])
     if op == "movreg" and a[1] in const and a[0] != a[1]:
-        return Ins("setreg", [a[0], const[a[1]]])
-    if op in ("addregv", "subregv") and is_const(a[1]) and a[1] & 0xFFFFFFFF == 0:
+        value = const[a[1]]
+        return Ins("setreg64" if value > 0xFFFFFFFF else "setreg", [a[0], value])
+    if op in ("addregv", "subregv") and is_const(a[1]) and a[1] & 0xFFFFFFFF == 0 and clean(a[0]):
         return Ins("movreg", [a[2], a[0]])
     return None
 
@@ -1077,7 +1110,7 @@ def _s32(v):
     return v - (1 << 32) if v & 0x80000000 else v
 
 
-def evaluate(ins, const):
+def evaluate(ins, const, clean=lambda r: False):
     """Replaces a pure instruction whose inputs are all known constants by a
     setreg of its result, and a few identities by a move. None otherwise."""
     op, a = ins.op, ins.args
@@ -1093,12 +1126,12 @@ def evaluate(ins, const):
                                 "shrregv", "sshrregv") and imm == 0)
                         or (op == "mulregv" and imm == 1)
                         or (op == "andregv" and imm == 0xFFFFFFFF))
-            if identity:
+            if identity and clean(x):
                 return Ins("movreg", [dst, x])
             if (op == "mulregv" or op == "andregv") and imm == 0:
                 return Ins("setreg", [dst, 0])
             return None
-        v = const[x]
+        v = const[x] & 0xFFFFFFFF
         if op == "addregv": r = v + imm
         elif op == "subregv": r = v - imm
         elif op == "mulregv": r = v * imm
@@ -1115,7 +1148,7 @@ def evaluate(ins, const):
         x, y, dst = a
         if x not in const or y not in const:
             return None
-        u, v = const[x], const[y]
+        u, v = const[x] & 0xFFFFFFFF, const[y] & 0xFFFFFFFF
         table = {
             "addreg": lambda: u + v, "subreg": lambda: u - v, "mulreg": lambda: u * v,
             "andreg": lambda: u & v, "orreg": lambda: u | v, "xorreg": lambda: u ^ v,

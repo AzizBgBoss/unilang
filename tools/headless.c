@@ -31,6 +31,7 @@ static uint16_t pal[256];
 static const char *dump_path;
 static uint32_t dump_frame;
 static uint32_t frames, max_frames = 300, time_calls;
+static uint64_t time_start_ms;
 static uint32_t key_seed = 1;
 static int print_hashes, quiet;
 static const char *wav_path;
@@ -185,7 +186,7 @@ static uint8_t get_keys(void)
     if ((key_seed & 1) && (frames / 6) % 25 == 1) k |= 128;  /* odd seeds press Start now and then */
     return k;
 }
-static uint32_t get_time(void) { time_calls++; headless_net_context.now_ms++; return frames * 16 + time_calls; }
+static uint64_t get_time(void) { time_calls++; headless_net_context.now_ms++; return time_start_ms + (uint64_t)frames * 16 + time_calls; }
 static void do_sleep(uint32_t ms) { headless_net_context.now_ms += ms; advance_audio_ms(ms); }
 static int flag_ok(uint8_t f, uint8_t v)
 {
@@ -285,6 +286,7 @@ int main(int argc, char **argv)
         if (!strcmp(argv[i], "-frames") && i + 1 < argc) max_frames = (uint32_t)strtoul(argv[++i], 0, 0);
         else if (!strcmp(argv[i], "-instr") && i + 1 < argc) max_instr = strtoull(argv[++i], 0, 0);
         else if (!strcmp(argv[i], "-keys") && i + 1 < argc) key_seed = (uint32_t)strtoul(argv[++i], 0, 0);
+        else if (!strcmp(argv[i], "-time-start") && i + 1 < argc) time_start_ms = strtoull(argv[++i], 0, 0);
         else if (!strcmp(argv[i], "-dump") && i + 2 < argc) { dump_frame = (uint32_t)strtoul(argv[++i], 0, 0); dump_path = argv[++i]; }
         else if (!strcmp(argv[i], "-hashes")) print_hashes = 1;
         else if (!strcmp(argv[i], "-quiet")) quiet = 1;
@@ -292,7 +294,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-wav") && i + 1 < argc) wav_path = argv[++i];
         else path = argv[i];
     }
-    if (!path) { fprintf(stderr, "usage: %s prog.ulc [-frames N] [-instr N] [-keys SEED] [-hashes] [-quiet] [-wav out.wav]\n", argv[0]); return 2; }
+    if (!path) { fprintf(stderr, "usage: %s prog.ulc [-frames N] [-instr N] [-keys SEED] [-time-start MS] [-hashes] [-quiet] [-wav out.wav]\n", argv[0]); return 2; }
     FILE *f = fopen(path, "rb");
     if (!f) { perror(path); return 2; }
     fseek(f, 0, SEEK_END); romsize = ftell(f); fseek(f, 0, SEEK_SET);
