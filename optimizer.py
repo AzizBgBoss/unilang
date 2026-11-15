@@ -116,8 +116,8 @@ LOADS = {"loadreg8": 1, "loadreg16": 2, "loadreg32": 4, "loadreg64": 8}
 STORES = {"storereg8": 1, "storereg16": 2, "storereg32": 4, "storereg64": 8}
 COND_JUMPS = {"ifreg", "ifnotreg", "jcmp", "jcmpv"}
 JUMPS = COND_JUMPS | {"setpc"}
-ENDS_BLOCK = JUMPS | {"exit"}
-NO_FALLTHROUGH = {"setpc", "exit"}
+ENDS_BLOCK = JUMPS | {"exit", "jmpreg"}
+NO_FALLTHROUGH = {"setpc", "exit", "jmpreg"}
 
 # register-register op -> register-immediate form for a constant right operand
 IMM_FORM = {"addreg": "addregv", "subreg": "subregv", "mulreg": "mulregv",
@@ -173,6 +173,15 @@ class Optimizer:
         self.c = comp
         self.code = comp.code
         self.slot_ok = not comp.raw_memory
+        # `switch` jump tables: jmpreg can land on any label stored in a ROM
+        # table, so those labels are its successors in the control-flow graph.
+        self.table_labels = []
+        seen = set()
+        for item in comp.rom_data:
+            for _, target in item["relocations"]:
+                if isinstance(target, Label) and target not in seen:
+                    seen.add(target)
+                    self.table_labels.append(target)
         self.dirty = self.wide_registers()
         self.stats = {}
 
@@ -525,6 +534,9 @@ class Optimizer:
                 label_at[ins.args[0]] = i
             elif ins.op in JUMPS:
                 sources.setdefault(ins.args[-1], []).append(i)
+            elif ins.op == "jmpreg":
+                for lab in self.table_labels:
+                    sources.setdefault(lab, []).append(i)
         label_positions = sorted(label_at.values())
         import bisect
         done = 0
@@ -673,6 +685,11 @@ class Optimizer:
                 t = block_of_label.get(last.args[-1])
                 if t is not None and t < len(blocks):
                     s.append(t)
+            elif last.op == "jmpreg":
+                for lab in self.table_labels:
+                    t = block_of_label.get(lab)
+                    if t is not None and t < len(blocks) and t not in s:
+                        s.append(t)
             if last.op not in NO_FALLTHROUGH and b + 1 < len(blocks):
                 s.append(b + 1)
             succ.append(s)
@@ -1102,6 +1119,10 @@ def fold_constants(ins, const, clean=lambda r: False):
         return Ins("setreg64" if value > 0xFFFFFFFF else "setreg", [a[0], value])
     if op in ("addregv", "subregv") and is_const(a[1]) and a[1] & 0xFFFFFFFF == 0 and clean(a[0]):
         return Ins("movreg", [a[2], a[0]])
+    if op == "mulregv" and is_const(a[1]):
+        imm = a[1] & 0xFFFFFFFF
+        if imm > 1 and imm & (imm - 1) == 0:      # x * 2^k == x << k (both 32-bit)
+            return Ins("shlregv", [a[0], imm.bit_length() - 1, a[2]])
     return None
 
 

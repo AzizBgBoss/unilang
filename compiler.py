@@ -4212,7 +4212,7 @@ class Compiler:
                 slot.end = None
                 slot.permanent = True
         required_bytes = self.max_addr
-        if self.optimize and not self.uses_indirect_jump:
+        if self.optimize:
             from optimizer import optimize_program
             required_bytes = optimize_program(self)
         self.required_bytes_ins.args[1] = required_bytes

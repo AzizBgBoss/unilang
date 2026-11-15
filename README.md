@@ -455,9 +455,8 @@ optimized builds on all examples, plus `tools/fuzz_opt.py`). It does:
 - RAM repacking by variable lifetime (address `0` is never used, since pointer
   arguments like `netopen`'s host string treat it as NULL).
 
-Programs using computed `switch` jump tables currently bypass this optimizer:
-its control-flow analysis cannot yet prove which indirect targets are reachable,
-so preserving the unoptimized code is safer than making unsound assumptions.
+`switch` jump tables are handled too: a `jmpreg` ends its basic block and its
+successors are the case labels stored in the ROM tables.
 
 The compiler also emits plain load/store for integer narrowing instead of
 `floatcast`, `x = x + 1` as `addregv`, and shifts/masks for division by
