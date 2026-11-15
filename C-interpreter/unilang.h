@@ -2215,7 +2215,7 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
     budget--;
     // fast: at least 16 bytes of flat ROM left, so operand reads skip their
     // bounds checks. One comparison covers the common case.
-    fast = pc <= fast_end;
+    fast = have_fast && pc <= fast_end;
     if (!fast && rom && pc >= rom_size)
     {
         vm->faulted = 1;

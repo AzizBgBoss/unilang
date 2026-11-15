@@ -136,19 +136,11 @@ void drawBitmap(int x, int y, int off, int w, int h, int color) {
 }
 
 void fillRect(int x, int y, int w, int h, int color) {
-  for (int yy = 0; yy < h; yy++)
-    for (int xx = 0; xx < w; xx++) pixel(x + xx, y + yy, color);
+  fillrect(x, y, w, h, color);
 }
 
 void drawRect(int x, int y, int w, int h, int color) {
-  for (int xx = x; xx < x + w; xx++) {
-    pixel(xx, y, color);
-    pixel(xx, y + h - 1, color);
-  }
-  for (int yy = y; yy < y + h; yy++) {
-    pixel(x, yy, color);
-    pixel(x + w - 1, yy, color);
-  }
+  drawrect(x, y, w, h, color);
 }
 
 // draws a number without numtostr (its buffer was not NUL-terminated, so stale digits showed up)
@@ -297,9 +289,13 @@ void loop() {
   else if (yOffset < -48) yOffset = -48;
 
   // ground and player
+  fillRect(xOffset, yOffset, 144, 80, WHITE);
   for (int y = 0; y < 5; y++)
-    for (int x = 0; x < 9; x++)
-      drawBitmap(x * 16 + xOffset, y * 16 + yOffset, mapstone, 16, 16, WHITE);
+    for (int x = 0; x < 9; x++) {
+      pixel(x * 16 + xOffset + 3, y * 16 + yOffset + 2, BLACK);
+      pixel(x * 16 + xOffset + 13, y * 16 + yOffset + 7, BLACK);
+      pixel(x * 16 + xOffset + 6, y * 16 + yOffset + 12, BLACK);
+    }
   if (isFacingY) drawBitmap(60, 28, mapplayery, 8, 8, BLACK);
   else drawBitmap(60, 28, mapplayerx, 8, 8, BLACK);
 
@@ -318,6 +314,7 @@ void loop() {
           ME(x, y) = 0;
         }
       }
+      if (ME(x, y) == 0 || tx < -7 || tx > 127 || ty < -7 || ty > 63) continue;
       switch (ME(x, y)) {
         case COIN: drawBitmap(tx, ty, mapcoin, 8, 8, BLACK); break;
         case SEEDVILLAGER: drawBitmap(tx, ty, mapsvillager, 8, 8, BLACK); break;

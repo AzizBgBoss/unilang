@@ -3413,8 +3413,16 @@ class Compiler:
             value = self.const_float_value(expr)
             return struct.pack(">f" if fmt == 7 else ">d", value)
         value = self.const_value(expr, "const initializer")
-        if value < 0:
-            value &= (1 << (size * 8)) - 1
+        mask = (1 << (size * 8)) - 1
+        source_type = self.expr_type(expr)
+
+        if value < 0 or (
+            value > mask
+            and source_type is not None
+            and not isinstance(source_type, c_ast.PtrDecl)
+            and self.scalar_type_signed(source_type)
+        ):
+            value &= mask
         return value.to_bytes(size, "big")
 
     def const_float_value(self, node):
@@ -3494,7 +3502,8 @@ class Compiler:
             return values
         if self.type_format(type_node) in (7, 8):
             return [int.from_bytes(self.const_scalar_bytes(init, type_node), "big")]
-        return [self.const_value(init, "const array value")]
+        raw = self.const_scalar_bytes(init, type_node)
+        return [int.from_bytes(raw, "big")]
 
     def gen_array_init(self, node, addr, elem, count):
         init = node.init

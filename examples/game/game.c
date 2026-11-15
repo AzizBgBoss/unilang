@@ -196,7 +196,6 @@ uint32_t main()
             {
                 waiting = false;
             }
-            sleep(16);
         }
     }
 

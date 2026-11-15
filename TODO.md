@@ -1,0 +1,1 @@
+blit should support 1bpp, like the arduino library does. This means that the blit function should be able to handle images with a color depth of 1 bit per pixel, allowing for monochrome graphics to be displayed correctly.
