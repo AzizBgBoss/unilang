@@ -1,1 +1,3 @@
-blit should support 1bpp, like the arduino library does. This means that the blit function should be able to handle images with a color depth of 1 bit per pixel, allowing for monochrome graphics to be displayed correctly.
+- setpixel, fillrect, drawline and similar builtins load their arguments a negative int16_t passed to them is still misread. fix.
+- tilemap(), a builtin function that takes a tilemap, tile sheet, scroll x and y offset, tile size, and once called display the tilemap to better offload hefty rendering from VM to host. should support all type of flags and their different size per pixel and so. also document it
+- blit should support all flags and their different BPP, tell me if it does, if it doesnt fix it
