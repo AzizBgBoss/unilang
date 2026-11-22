@@ -2866,7 +2866,9 @@ class Compiler:
                 self.emit_set_const(RA, self.var_addr(a.name))      # RAM array: its address
             else:
                 addr = self.gen_expr(a)
-                self.emit_load(addr, self.addr_size(addr), RA)
+                # sign-extend narrow signed values so negative x/y (off-screen) survive
+                src_fmt = self.addr_formats.get(addr, self.expr_format(a))
+                self.emit_load_int(addr, src_fmt, 4, RA)
             self.emit_store(RA, desc + 4 * i, 4)
         self.emit("blit", desc)
 
