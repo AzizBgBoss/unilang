@@ -91,6 +91,8 @@ OPS = {
     "printv":          (0x0A, [4, 4]),                # chars, addr
     "printvn":         (0x0B, [4, 4]),                # chars, addr
     "setpc":           (0x0F, [4]),                  # pos
+    "subroutine":      (0x10, [4]),                  # pos (call)
+    "return":          (0x11, []),                   # return from subroutine
     "sleep":           (0x12, [4]),                  # ms
     "refreshscreen":   (0x13, []),
     "romread8":        (0x14, [1, 1]),                # reg_addr, reg_dst
@@ -387,6 +389,14 @@ class Compiler:
         self.next_temp = 0
         self.function_asts = {}     # name -> FuncDef node
         self.inlining_stack = []    # names currently being inlined (recursion guard)
+        self.rec_fns = set()        # functions in a call cycle: compiled once as real subroutines
+        self.rec_scc = {}           # rec fn -> set of rec fns in its cycle group
+        self.rec_info = {}          # rec fn -> {label, params:[Addr], ret:Addr|None}
+        self.rec_used = []          # rec fns actually called (bodies get emitted)
+        self.rec_cur = []           # stack of (name, frame_base) while emitting a rec body
+        self.uses_subroutines = False
+        self.main_body = None
+        self.share_functions = False  # -Os: compile big, repeatedly-called functions once as subroutines
         self.return_stack = []      # (ret_addr, end_label) for the innermost inlined call
         self.next_instance = 0
         self.uses_indirect_jump = False
@@ -1174,6 +1184,8 @@ class Compiler:
             typ = self.var_types.get(expr.name, self.const_array_types.get(expr.name))
         else:
             typ = None
+        if isinstance(expr, c_ast.Cast):
+            return expr.to_type.type
         if isinstance(expr, c_ast.ArrayRef):
             base_type = self.resolve_type_for_expr(expr.name)
             if isinstance(base_type, c_ast.ArrayDecl):
@@ -3221,6 +3233,8 @@ class Compiler:
 
         if name not in self.function_asts:
             raise NotImplementedError(f"unsupported/undeclared function call '{name}'")
+        if name in self.rec_fns:
+            return self.gen_recursive_call(node, allow_void)
         if name in self.inlining_stack:
             chain = " -> ".join(self.inlining_stack + [name])
             raise NotImplementedError(
@@ -3304,6 +3318,166 @@ class Compiler:
                 table[key] = value
 
         return ret_addr
+
+    # -- recursive functions (real subroutines, caller-saves frame on the value stack) --
+    def find_recursive_functions(self):
+        calls = {}
+        for fname, fn in self.function_asts.items():
+            found = set()
+            def visit(n):
+                if isinstance(n, c_ast.FuncCall) and isinstance(n.name, c_ast.ID) and n.name.name in self.function_asts:
+                    found.add(n.name.name)
+                for _, ch in n.children():
+                    visit(ch)
+            visit(fn.body)
+            calls[fname] = found
+        reach = {}
+        for f in calls:
+            seen, todo = set(), list(calls[f])
+            while todo:
+                g = todo.pop()
+                if g not in seen:
+                    seen.add(g)
+                    todo.extend(calls.get(g, ()))
+            reach[f] = seen
+        self.rec_fns = {f for f in calls if f in reach[f]}
+        for f in self.rec_fns:
+            self.rec_scc[f] = {g for g in self.rec_fns if g in reach[f] and f in reach[g]} | {f}
+        if self.share_functions:
+            counts = {}
+            def count_calls(n):
+                if isinstance(n, c_ast.FuncCall) and isinstance(n.name, c_ast.ID) and n.name.name in self.function_asts:
+                    counts[n.name.name] = counts.get(n.name.name, 0) + 1
+                for _, ch in n.children():
+                    count_calls(ch)
+            for fn in self.function_asts.values():
+                count_calls(fn.body)
+            if self.main_body is not None:
+                count_calls(self.main_body)
+            def size(n):
+                return 1 + sum(size(ch) for _, ch in n.children())
+            for f, fn in self.function_asts.items():
+                if f not in self.rec_fns and counts.get(f, 0) >= 2 and size(fn.body) >= 60:
+                    self.rec_fns.add(f)
+                    self.rec_scc[f] = {f}
+
+    def alloc_rec_interface(self):
+        """Parameter and return slots of recursive functions live at fixed, permanent addresses."""
+        for name in sorted(self.rec_fns):
+            fn = self.function_asts[name]
+            params = self.fn_params(fn)
+            addrs = []
+            for p in params:
+                a = self.alloc_var(f"{name}#rec.{p.name}", self.param_size(p), self.type_format(p.type))
+                pointee = self.param_pointee(p)
+                if pointee is not None:
+                    self.ptr_elem[a] = pointee
+                a.slot.permanent = True
+                addrs.append(a)
+            ret = None
+            if not self.is_void_type(fn.decl.type.type):
+                ret = self.alloc_var(f"{name}#rec.__ret", self.function_return_size(fn),
+                                     self.type_format(fn.decl.type.type))
+                ret.slot.permanent = True
+            self.rec_info[name] = {"label": Label(f"rec_{name}"), "params": addrs, "ret": ret}
+
+    def gen_recursive_call(self, node, allow_void=False):
+        name = node.name.name
+        args = node.args.exprs if node.args else []
+        fn = self.function_asts[name]
+        info = self.rec_info[name]
+        void_return = self.is_void_type(fn.decl.type.type)
+        if void_return and not allow_void:
+            raise NotImplementedError(f"void function '{name}' does not return a value")
+        params = self.fn_params(fn)
+        if len(args) != len(params):
+            raise NotImplementedError(f"'{name}' expects {len(params)} argument(s), got {len(args)}")
+        if name not in self.rec_used:
+            self.rec_used.append(name)
+        self.uses_subroutines = True
+        for a, p in zip(args, params):
+            if self.param_pointee(p) is not None:
+                self.check_not_rom(a)
+        arg_vals = [self.gen_expr(a) for a in args]
+
+        cur = self.rec_cur[-1] if self.rec_cur else None
+        save = cur is not None and name in self.rec_scc[cur[0]]
+        chunks = []
+        if save:
+            cur_name, base = cur
+            own = {a.slot for a in self.rec_info[cur_name]["params"]}
+            if name == cur_name:
+                for i, v in enumerate(arg_vals):
+                    if isinstance(v, Addr) and v.slot in own:
+                        t = self.alloc_temp(self.addr_size(v), self.addr_formats.get(v))
+                        self.emit_copy(v, t)
+                        arg_vals[i] = t
+            slots = [a.slot for a in self.rec_info[cur_name]["params"]]
+            slots += [s for s in self.live_slots if s.addr >= base]
+            for s in slots:
+                off = 0
+                while off < s.size:
+                    rem = s.size - off
+                    w = 4 if rem >= 4 else 2 if rem >= 2 else 1
+                    a = Addr(s.addr + off, s, off)
+                    self.emit_load(a, w, RA)
+                    self.emit("pushr", RA)
+                    chunks.append((a, w))
+                    off += w
+        for v, pa in zip(arg_vals, info["params"]):
+            self.emit_copy(v, pa)
+        self.emit("subroutine", info["label"])
+        ret = info["ret"]
+        if ret is not None:
+            self.emit_load(ret, self.addr_size(ret), RC)
+        for a, w in reversed(chunks):
+            self.emit("popr", RA)
+            self.emit_store(RA, a, w)
+        if ret is None:
+            return None
+        t = self.alloc_temp(self.addr_size(ret), self.addr_formats.get(ret))
+        self.emit_store(RC, t, self.addr_size(ret))
+        return t
+
+    def gen_rec_bodies(self):
+        done = set()
+        while True:
+            pending = [n for n in self.rec_used if n not in done]
+            if not pending:
+                break
+            name = pending[0]
+            done.add(name)
+            fn = self.function_asts[name]
+            info = self.rec_info[name]
+            self.define_label(info["label"])
+            base = self.max_addr
+            self.next_addr = base
+            first_slot = len(self.slots)
+            scope = (dict(self.vars), dict(self.var_sizes), dict(self.var_types))
+            for p, a in zip(self.fn_params(fn), info["params"]):
+                self.vars[p.name] = a
+                self.var_sizes[p.name] = self.param_size(p)
+                self.var_types[p.name] = p.type
+            end_label = Label(f"end_rec_{name}")
+            self.rec_cur.append((name, base))
+            self.user_labels.append(self.collect_user_labels(fn.body, f"rec_{name}"))
+            self.return_stack.append((info["ret"], end_label))
+            saved_loops = (self.break_stack, self.continue_stack)
+            self.break_stack, self.continue_stack = [], []
+            self.gen_stmt(fn.body)
+            self.break_stack, self.continue_stack = saved_loops
+            self.return_stack.pop()
+            self.user_labels.pop()
+            self.rec_cur.pop()
+            self.define_label(end_label)
+            self.emit("return")
+            for s in self.slots[first_slot:]:
+                s.permanent = True
+                s.end = None
+            for table, saved in zip((self.vars, self.var_sizes, self.var_types), scope):
+                table.clear()
+                table.update(saved)
+            self.next_addr = self.max_addr
 
     @staticmethod
     def collect_user_labels(body, prefix):
@@ -4190,17 +4364,21 @@ class Compiler:
         for fn in other_fns:
             self.function_asts[fn.decl.name] = fn
 
+        self.main_body = main_fn.body
+        self.find_recursive_functions()
         self.gen_prologue()
         self.at_global_scope = True  # globals start zeroed, so zero-fill is skipped
         for n in ast.ext:
             if isinstance(n, c_ast.Decl):
                 self.gen_stmt(n)
         self.at_global_scope = False
+        self.alloc_rec_interface()
         self.user_labels.append(self.collect_user_labels(main_fn.body, "main"))
         self.gen_stmt(main_fn.body)
         self.user_labels.pop()
         self.emit("setreg", 0, 0)
         self.emit("exit")
+        self.gen_rec_bodies()
 
         # Now that we know the program's total memory usage, patch the
         # prologue's placeholder "required bytes" value. Graphics/keyboard no
@@ -4266,10 +4444,13 @@ def main():
     include_dirs = [os.path.join(os.path.dirname(os.path.abspath(__file__)), "include")]
     defines = {}
     optimize = True
+    share = False
     i = 0
     while i < len(args):
         a = args[i]
-        if a in ("-O0", "-O1", "-O2"):
+        if a == "-Os":
+            share = True
+        elif a in ("-O0", "-O1", "-O2"):
             optimize = a != "-O0"
         elif a[:2] in ("-o", "-I", "-D"):
             flag, value = a[:2], a[2:]
@@ -4309,6 +4490,7 @@ def main():
             out_path = os.path.join(os.getcwd(), "combined.ulc")
 
     compiler = Compiler(optimize=optimize)
+    compiler.share_functions = share
     try:
         bytecode = compiler.compile(source, label, include_dirs, defines)
     except (PreprocessorError, NotImplementedError, pycparser.c_parser.ParseError) as e:

@@ -7,7 +7,7 @@
 
 ```text
 python compiler.py input.c|input_dir [input.c|input_dir ...]
-  [-o output.ulc] [-I dir]... [-D NAME[=value]]... [-O0|-O1|-O2]
+  [-o output.ulc] [-I dir]... [-D NAME[=value]]... [-O0|-O1|-O2] [-Os]
 ```
 
 Examples:
@@ -23,6 +23,9 @@ immediate `.c` and `.cpp` files in sorted order; directory traversal is not
 recursive. Duplicate source paths are included only once. The default output
 is the input basename with `.ulc`, or `combined.ulc` for multiple source files.
 `-O0` disables optimization; `-O1` and `-O2` currently both enable it.
+`-Os` optimizes for bytecode size: large functions called from two or more
+places are compiled once as subroutines instead of being inlined at every call
+site (see [functions and limitations](functions-and-limitations.md#size-optimization--os)).
 
 The compiler has a built-in `include` directory. `-I` adds include search
 directories. `-D NAME` defines `NAME` as `1`; `-D NAME=value` supplies a

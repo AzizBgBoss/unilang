@@ -514,7 +514,7 @@ enum ULVM_AUDIO_DATA_KINDS
 #endif
 
 #define ULVM_CALLSTACK_SIZE 16
-#define ULVM_VALUESTACK_SIZE 64
+#define ULVM_VALUESTACK_SIZE 1024
 
 struct UnilangVM
 {
@@ -533,7 +533,7 @@ struct UnilangVM
     uint32_t callstack[ULVM_CALLSTACK_SIZE];
     uint8_t callsp;
     uint32_t valuestack[ULVM_VALUESTACK_SIZE];
-    uint8_t valuesp;
+    uint16_t valuesp;
 
     vm_outputchar outputchar;
     vm_readbyte readbyte;

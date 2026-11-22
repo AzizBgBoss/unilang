@@ -84,8 +84,9 @@ VM's exit code (see below); falling off the end, `return;` and `exit();` give
   and literals can be ROM-backed and read-only.
 - Integer values are at most 32 bits. `double` and `long double` are binary64,
   not integer types.
-- Calls to defined functions are inlined at each call site. Recursion and calls
-  through function pointers are not supported.
+- Calls to defined functions are inlined at each call site, except recursive
+  functions and (with `-Os`) large shared ones, which become subroutines.
+  Calls through function pointers are not supported.
 - Most I/O, graphics, audio, time, and persistence behavior is provided by
   optional host callbacks. The same bytecode can therefore behave differently
   on hosts that do not implement those callbacks.

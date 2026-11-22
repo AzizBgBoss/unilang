@@ -185,8 +185,10 @@ configuration, not a typical application size. The compiler emits a runtime
 warning if its estimated program RAM need exceeds the host setting.
 
 The VM checks RAM accesses against `ULVM_MEM_SIZE`. Its default bounded
-return-address stack holds 16 entries; the separate value stack holds 64
-32-bit entries. Stack overflows and underflows fault the VM.
+return-address stack holds 16 entries; the separate value stack holds 1024
+32-bit entries. Stack overflows and underflows fault the VM. Recursive
+functions and `-Os` shared functions use both stacks (see
+[functions and limitations](../c-language/functions-and-limitations.md#recursive-functions)).
 
 For AVR-class Arduino targets, keep bytecode in `PROGMEM` and make
 `readbyte` use `pgm_read_byte`. ARM-based targets can generally read a `const`

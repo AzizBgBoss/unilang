@@ -60,7 +60,7 @@ ROLES = {
     "floatcast": "iirr", "romread64": "rww", "fillrect": "rrrrr",
     "drawline": "rrrrr", "blit": "M", "setpalette": "rr",
     "fillscreen": "r", "fillcircle": "rrrr", "drawrect": "rrrrr",
-    "jmpreg": "r", "callreg": "r",
+    "jmpreg": "r", "callreg": "r", "subroutine": "L", "return": "",
     "pushr": "r", "popr": "w",
     "outfmt": "Miiiii",
     "save": "rrw", "load": "rrw", "beep": "rr",
@@ -116,8 +116,8 @@ LOADS = {"loadreg8": 1, "loadreg16": 2, "loadreg32": 4, "loadreg64": 8}
 STORES = {"storereg8": 1, "storereg16": 2, "storereg32": 4, "storereg64": 8}
 COND_JUMPS = {"ifreg", "ifnotreg", "jcmp", "jcmpv"}
 JUMPS = COND_JUMPS | {"setpc"}
-ENDS_BLOCK = JUMPS | {"exit", "jmpreg"}
-NO_FALLTHROUGH = {"setpc", "exit", "jmpreg"}
+ENDS_BLOCK = JUMPS | {"exit", "jmpreg", "return", "subroutine"}
+NO_FALLTHROUGH = {"setpc", "exit", "jmpreg", "return"}
 
 # register-register op -> register-immediate form for a constant right operand
 IMM_FORM = {"addreg": "addregv", "subreg": "subregv", "mulreg": "mulregv",
@@ -404,7 +404,7 @@ class Optimizer:
                 continue
             cur[0] = i
             op = ins.op
-            if op == "LABEL":
+            if op == "LABEL" or op in ("subroutine", "return"):
                 reset()
                 continue
             if op in LOADS and isinstance(ins.args[1], Addr):
@@ -1011,6 +1011,10 @@ class Optimizer:
                 fn()
 
         step("jumps", self.jump_cleanup)
+        if getattr(self.c, "uses_subroutines", False):
+            # real subroutines clobber registers and arbitrary memory, so the
+            # slot-based passes (dse, promote, constants, relocation) stay off
+            self.slot_ok = False
         self.analyze_slots()
         step("forward", self.forward_stores)
         if self.slot_ok:
