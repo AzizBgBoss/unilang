@@ -6,7 +6,7 @@
 Programs can use these names without declaring or defining them. They come in
 two kinds:
 
-- **Compiler constants** (`KEY_*`, `FLAG_*`, `AUDIO_*`, `GFX_*`, `COLOR_*`, and
+- **Compiler constants** (`KEY_*`, `BLIT_*`, `FLAG_*`, `AUDIO_*`, `GFX_*`, `COLOR_*`, and
   the `NET_*` names from [builtins](builtins.md)) are resolved by the compiler.
   They work anywhere a compile-time constant is accepted, including the
   arguments of `flag()` and `isflagsupported()`. They are not preprocessor
@@ -47,6 +47,21 @@ uint32_t keys = getkey();
 if (keys & KEY_LEFT)  x--;
 if (keys & (KEY_A | KEY_START)) confirm();
 ```
+
+## Blit flags
+
+Bits for the `flags` argument of [`blit`](builtins.md#graphics-and-display).
+Combine them with `|`.
+
+| Name | Value | Meaning |
+|---|---:|---|
+| `BLIT_FLIP_X` | 1 | Mirror left to right |
+| `BLIT_FLIP_Y` | 2 | Mirror top to bottom |
+| `BLIT_4BPP` | 4 | 4 bits per pixel |
+| `BLIT_PALETTE` | 8 | Map pixels through the palette array |
+| `BLIT_TRANSPARENT` | 16 | Skip pixels equal to the transparent value |
+| `BLIT_RAM` | 32 | Source is a RAM array |
+| `BLIT_1BPP` | 64 | 1 bit per pixel, highest bit first, rows padded to whole bytes |
 
 ## Flag indices
 

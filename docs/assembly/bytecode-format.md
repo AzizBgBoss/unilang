@@ -135,7 +135,9 @@ Opcode `0x26` takes a four-byte RAM address to eleven consecutive big-endian
 
 Flag bits: bit 0 flips horizontally; bit 1 flips vertically; bit 2 reads
 packed 4-bit pixels (low nibble first); bit 3 applies the byte palette; bit 4
-enables transparent-value skipping; bit 5 selects RAM source (otherwise ROM).
+enables transparent-value skipping; bit 5 selects RAM source (otherwise ROM);
+bit 6 reads packed 1-bit pixels (highest bit first, each row padded to a whole
+byte, so a row is `(stride + 7) / 8` bytes). Bit 6 takes priority over bit 2.
 Clipping is applied to destination and source bounds. Invalid dimensions or
 stride draw nothing.
 

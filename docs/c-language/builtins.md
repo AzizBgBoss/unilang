@@ -173,18 +173,76 @@ pixel colors are indices; other modes use the selected mode's pixel
 representation. Coordinates outside the framebuffer are clipped rather than
 wrapped.
 
-`blit` is the C-level sprite-sheet operation, with signature:
+`blit` copies a rectangle of pixels from an image (a "sprite sheet") onto the
+screen. It is the fast way to draw sprites, tiles and icons.
 
 ```c
 blit(x, y, width, height, source, source_x, source_y, stride,
      flags, palette, transparent);
 ```
 
-`source` is a RAM byte array/pointer or a constant ROM array. `stride` is the
-source row length in pixels/bytes. `flags` selects source mode options such as
-RAM versus ROM and palette lookup; see the
-[bytecode format page](../assembly/bytecode-format.md#blit-descriptor) for the
-VM descriptor layout. Source and destination rectangles are clipped.
+| Argument | What it means |
+|---|---|
+| `x`, `y` | Where on the screen the top-left corner of the sprite goes. May be negative or off-screen; the part outside is clipped. |
+| `width`, `height` | Size of the rectangle to draw, in pixels. |
+| `source` | The image data: a `const` array (stored in ROM) or a RAM array (add `BLIT_RAM` to `flags`). |
+| `source_x`, `source_y` | Top-left corner of the rectangle *inside the image*. Use `0, 0` for a standalone sprite; use other values to pick one sprite out of a sheet. |
+| `stride` | Width of the **whole image** in pixels, not of the sprite. The VM needs it to find the start of each row. |
+| `flags` | Options, combined with `\|`. See the table below. Use `0` for plain 8-bit pixels from ROM. |
+| `palette` | A RAM array of 256 bytes that converts source values to screen colors. Only used with `BLIT_PALETTE`; otherwise pass `0`. |
+| `transparent` | A source value that is not drawn. Only used with `BLIT_TRANSPARENT`; otherwise pass `0`. |
+
+Flags (constants are predefined, see [predefined names](predefined-names.md)):
+
+| Constant | Value | Effect |
+|---|---:|---|
+| `BLIT_FLIP_X` | 1 | Mirror left to right. |
+| `BLIT_FLIP_Y` | 2 | Mirror top to bottom. |
+| `BLIT_4BPP` | 4 | Image has 4 bits per pixel: two pixels per byte, the even pixel in the low nibble. |
+| `BLIT_PALETTE` | 8 | Convert every pixel through the `palette` array before drawing. |
+| `BLIT_TRANSPARENT` | 16 | Skip pixels whose source value equals `transparent`. |
+| `BLIT_RAM` | 32 | `source` is a RAM array instead of ROM. |
+| `BLIT_1BPP` | 64 | Image has 1 bit per pixel: eight pixels per byte, **leftmost pixel in the highest bit**. Each row starts on a new byte, so a row takes `(stride + 7) / 8` bytes. This is the same layout as Adafruit GFX `drawBitmap`. |
+
+Without `BLIT_4BPP` or `BLIT_1BPP`, each pixel is one byte.
+
+In 1bpp mode a pixel value is `0` or `1`, and that value is what gets drawn.
+That is the right color for monochrome graphics modes. In color modes, either
+map it with `BLIT_PALETTE` (put the color for `0` at `palette[0]` and the color
+for `1` at `palette[1]`) or use it as an index in a palette mode.
+
+Example: an 8x8 monochrome sprite where the `0` pixels are see-through, so
+whatever is already on screen shows behind it.
+
+```c
+const uint8_t pawn[8] = {
+    0b00011000,
+    0b00100100,
+    0b00100100,
+    0b00011000,
+    0b00111100,
+    0b01000010,
+    0b01111110,
+    0b00000000
+};
+
+blit(10, 20, 8, 8, pawn, 0, 0, 8, BLIT_1BPP | BLIT_TRANSPARENT, 0, 0);
+```
+
+Example: draw the second 8x8 sprite of a sheet that is 16 pixels wide (two
+sprites side by side). `stride` is 16 because that is the sheet width, and
+`source_x` is 8 to skip the first sprite.
+
+```c
+blit(0, 0, 8, 8, sheet, 8, 0, 16, BLIT_1BPP, 0, 0);
+```
+
+Rows outside the image, or a `width`, `height` or `stride` that is zero or
+negative, draw nothing. Source and destination rectangles are both clipped. The
+exact VM descriptor layout is in the
+[bytecode format page](../assembly/bytecode-format.md#blit-descriptor).
+`blit` cannot XOR with the screen; to invert pixels, read them with `getpixel`
+and write them with `setpixel`.
 
 ## Memory and stack
 

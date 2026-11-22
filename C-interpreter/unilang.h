@@ -1908,7 +1908,7 @@ static inline void ulvm_drawrect(UnilangVM *vm, int32_t x, int32_t y, int32_t w,
 //  5 srcx, 6 srcy (top-left of the region inside the sheet)   7 stride (sheet width in pixels)
 //  8 flags: bit0 flip X, bit1 flip Y, bit2 4bpp (low nibble = even x, else 8bpp),
 //           bit3 map colours through the RAM table at word 9, bit4 skip pixels equal to word 10,
-//           bit5 sheet is in RAM
+//           bit5 sheet is in RAM, bit6 1bpp (MSB first, each row padded to a whole byte, like Adafruit GFX)
 //  9 palette (RAM address of a table indexed by the source value)   10 transparent value
 static inline void ulvm_blit(UnilangVM *vm, uint32_t d)
 {
@@ -1951,7 +1951,15 @@ static inline void ulvm_blit(UnilangVM *vm, uint32_t d)
                 continue;
             uint64_t idx = (uint64_t)source_y * (uint32_t)stride + (uint64_t)source_x;
             uint64_t v;
-            if (fl & 4)
+            if (fl & 64)
+            {
+                uint64_t a = (uint64_t)src + (uint64_t)source_y * (((uint32_t)stride + 7) >> 3) + ((uint64_t)source_x >> 3);
+                uint32_t b = (fl & 32)
+                    ? (a < (uint32_t)ULVM_MEM_SIZE ? vm->mem[(uint32_t)a] : 0u)
+                    : (a <= UINT32_MAX ? (uint32_t)ulvm_rom_byte(vm, (uint32_t)a) : 0u);
+                v = (b >> (7 - (source_x & 7))) & 1;
+            }
+            else if (fl & 4)
             {
                 uint64_t a = (uint64_t)src + (idx >> 1);
                 uint32_t b = (fl & 32)

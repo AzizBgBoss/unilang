@@ -433,6 +433,8 @@ class Compiler:
             "KEY_UP": 1 << 0, "KEY_DOWN": 1 << 1, "KEY_LEFT": 1 << 2, "KEY_RIGHT": 1 << 3,
             "KEY_A": 1 << 4, "KEY_B": 1 << 5, "KEY_SELECT": 1 << 6, "KEY_START": 1 << 7,
             "KEY_DPAD": 0x0F, "KEY_ANY": 0xFF,
+            "BLIT_FLIP_X": 1, "BLIT_FLIP_Y": 2, "BLIT_4BPP": 4, "BLIT_PALETTE": 8,
+            "BLIT_TRANSPARENT": 16, "BLIT_RAM": 32, "BLIT_1BPP": 64,
             "FLAG_GRAPHICS": 0, "FLAG_KEYBOARD": 1, "FLAG_AUDIO": 2, "FLAG_NETWORK": 15,
             "AUDIO_OFF": 0, "AUDIO_BEEP": 1, "AUDIO_ENGINE": 2,
             "GFX_OFF": 0,
