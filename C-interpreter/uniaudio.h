@@ -18,7 +18,7 @@
 #ifndef UNIAUDIO_PCM_VOICES
 #define UNIAUDIO_PCM_VOICES 8u
 #endif
-#define UNIAUDIO_PCM_MAX_STEP 65535u   // whole source samples consumed per output sample
+#define UNIAUDIO_PCM_MAX_STEP 65535u // whole source samples consumed per output sample
 #define UNIAUDIO_PCM_MAX_LENGTH 0x7FFFFFFFu
 #define UNIAUDIO_PCM_FAIL 0xFFFFFFFFu
 #define UNIAUDIO_PCM_LOOP 1u
@@ -40,7 +40,7 @@ enum UNIAUDIO_WAVEFORMS
     UNIAUDIO_PULSE,
     UNIAUDIO_ORGAN,
     UNIAUDIO_NOISE,
-    UNIAUDIO_CUSTOM
+    UNIAUDIO_PHASER,
 };
 
 enum UNIAUDIO_EFFECTS
@@ -81,17 +81,18 @@ typedef struct
     uint32_t phase_increment;
     uint32_t phase_increment_end;
     uint32_t noise;
+    uint8_t custom;
 } UniaudioChannel;
 
 #if UNIAUDIO_PCM_VOICES > 0
 typedef struct
 {
-    const uint8_t *data;    // NULL = voice is free
+    const uint8_t *data; // NULL = voice is free
     uint32_t length;
-    uint32_t index;         // current source sample
-    uint32_t frac;          // 0..UNIAUDIO_SAMPLE_RATE-1, fraction of a source sample
-    uint32_t step_int;      // rate / UNIAUDIO_SAMPLE_RATE
-    uint32_t step_frac;     // rate % UNIAUDIO_SAMPLE_RATE
+    uint32_t index;     // current source sample
+    uint32_t frac;      // 0..UNIAUDIO_SAMPLE_RATE-1, fraction of a source sample
+    uint32_t step_int;  // rate / UNIAUDIO_SAMPLE_RATE
+    uint32_t step_frac; // rate % UNIAUDIO_SAMPLE_RATE
     uint8_t volume;
     uint8_t loop;
 } UniaudioPcm;
@@ -112,7 +113,7 @@ typedef struct
     uint8_t paused;
 #if UNIAUDIO_PCM_VOICES > 0
     UniaudioPcm pcm[UNIAUDIO_PCM_VOICES];
-    uint32_t pcm_mask;      // bit n set = voice n is playing
+    uint32_t pcm_mask; // bit n set = voice n is playing
 #endif
     uint8_t beep_active;
     uint32_t beep_phase;
@@ -126,8 +127,16 @@ static inline uint32_t uniaudio_pitch_increment(uint8_t pitch)
     double frequency = 440.0;
     const double semitone = 1.0594630943592953;
     int steps = (int)pitch - 69;
-    while (steps > 0) { frequency *= semitone; steps--; }
-    while (steps < 0) { frequency /= semitone; steps++; }
+    while (steps > 0)
+    {
+        frequency *= semitone;
+        steps--;
+    }
+    while (steps < 0)
+    {
+        frequency /= semitone;
+        steps++;
+    }
     if (frequency >= (double)UNIAUDIO_SAMPLE_RATE)
         frequency = (double)UNIAUDIO_SAMPLE_RATE - 1.0;
     return (uint32_t)(frequency * 4294967296.0 / (double)UNIAUDIO_SAMPLE_RATE);
@@ -144,41 +153,40 @@ static inline void uniaudio_init(Uniaudio *audio)
 static inline int uniaudio_load(Uniaudio *audio, uint8_t kind, uint8_t index,
                                 const uint8_t *data, uint32_t len)
 {
-    if (!data)
+    if (!audio || !data)
         return 0;
-    if (kind == 0 && index < UNIAUDIO_SFX_COUNT && len == UNIAUDIO_SFX_BYTES)
+
+    if (kind == 0 && index < UNIAUDIO_SFX_COUNT &&
+        len == UNIAUDIO_SFX_BYTES)
     {
-        uint8_t loop_start = data[2], loop_end = data[3];
-        if (loop_start > UNIAUDIO_SFX_NOTES || loop_end > UNIAUDIO_SFX_NOTES ||
-            (loop_end && loop_end <= loop_start))
-            return 0;
         memcpy(audio->sfx[index].bytes, data, len);
         audio->sfx[index].loaded = 1;
         return 1;
     }
-    if (kind == 1 && index < UNIAUDIO_MUSIC_COUNT && len == UNIAUDIO_MUSIC_BYTES)
+
+    if (kind == 1 && index < UNIAUDIO_MUSIC_COUNT &&
+        len == UNIAUDIO_MUSIC_BYTES)
     {
-        for (uint32_t channel = 0; channel < UNIAUDIO_CHANNELS; channel++)
-            if ((data[channel] & 0x7Fu) > 68u)
-                return 0;
         memcpy(audio->music[index].bytes, data, len);
         audio->music[index].loaded = 1;
         return 1;
     }
+
     return 0;
 }
 
 static inline uint16_t uniaudio_note_word(const uint8_t *sfx, uint8_t note)
 {
-    uint32_t offset = 4u + (uint32_t)note * 2u;
+    uint32_t offset = (uint32_t)note * 2u;
     return (uint16_t)(sfx[offset] | ((uint16_t)sfx[offset + 1u] << 8));
 }
 
 static inline uint32_t uniaudio_note_samples(const Uniaudio *audio, uint8_t sfx)
 {
-    uint32_t speed = audio->sfx[sfx].bytes[1];
+    uint32_t speed = audio->sfx[sfx].bytes[65];
     if (!speed)
-        speed = 16;
+        speed = 1;
+
     uint64_t samples = (uint64_t)speed * UNIAUDIO_SAMPLE_RATE / 120u;
     return samples ? (uint32_t)samples : 1u;
 }
@@ -189,7 +197,8 @@ static inline void uniaudio_start_note(Uniaudio *audio, uint8_t channel)
     const uint8_t *sfx = audio->sfx[voice->sfx].bytes;
     if (voice->note >= UNIAUDIO_SFX_NOTES)
     {
-        uint8_t loop_start = sfx[2], loop_end = sfx[3];
+        uint8_t loop_start = sfx[66] & 0x3F;
+        uint8_t loop_end = sfx[67] & 0x3F;
         if (loop_end > loop_start && loop_end <= UNIAUDIO_SFX_NOTES)
             voice->note = loop_start;
         else
@@ -201,6 +210,7 @@ static inline void uniaudio_start_note(Uniaudio *audio, uint8_t channel)
     uint16_t note = uniaudio_note_word(sfx, voice->note);
     uint8_t pitch = (uint8_t)(note & 0x3Fu);
     voice->waveform = (uint8_t)((note >> 6) & 7u);
+    voice->custom = (uint8_t)(note >> 15);
     voice->volume = (uint8_t)(((note >> 9) & 7u) * 255u / 7u);
     voice->effect = (uint8_t)((note >> 12) & 7u);
     voice->samples_total = uniaudio_note_samples(audio, voice->sfx);
@@ -214,6 +224,23 @@ static inline void uniaudio_start_note(Uniaudio *audio, uint8_t channel)
     }
     else if (voice->effect == UNIAUDIO_EFFECT_DROP)
         voice->phase_increment_end /= 2u;
+    if (voice->custom && voice->waveform < 8)
+    {
+        const uint8_t *wave = audio->sfx[voice->waveform].bytes;
+
+        if (audio->sfx[voice->waveform].loaded &&
+            (wave[66] & 0x80u) &&
+            (wave[65] & 1u))
+        {
+            voice->phase_increment >>= 1;
+            voice->phase_increment_end >>= 1;
+
+            if (!voice->phase_increment)
+                voice->phase_increment = 1;
+            if (!voice->phase_increment_end)
+                voice->phase_increment_end = 1;
+        }
+    }
 }
 
 static inline void uniaudio_start_sfx(Uniaudio *audio, uint32_t index, int32_t requested_channel)
@@ -282,8 +309,14 @@ static inline void uniaudio_play_pattern(Uniaudio *audio, uint8_t pattern)
     for (uint8_t channel = 0; channel < UNIAUDIO_CHANNELS; channel++)
     {
         audio->channels[channel].active = 0;
-        uint8_t sfx = (uint8_t)(data[channel] & 0x7Fu);
-        if (sfx < UNIAUDIO_SFX_COUNT)
+        uint8_t flags = data[channel];
+
+        if (flags & 0x40u)
+            continue;
+
+        uint8_t sfx = flags & 0x3Fu;
+
+        if (audio->sfx[sfx].loaded)
         {
             uniaudio_start_sfx(audio, sfx, channel);
             audio->music_channel_mask |= (uint8_t)(1u << channel);
@@ -350,7 +383,12 @@ static inline uint32_t uniaudio_pcm_play(Uniaudio *audio, const uint8_t *data, u
     audio->pcm_mask |= 1u << voice;
     return voice;
 #else
-    (void)audio; (void)data; (void)length; (void)rate; (void)volume; (void)flags;
+    (void)audio;
+    (void)data;
+    (void)length;
+    (void)rate;
+    (void)volume;
+    (void)flags;
     return UNIAUDIO_PCM_FAIL;
 #endif
 }
@@ -414,18 +452,18 @@ static inline uint32_t uniaudio_command(Uniaudio *audio, uint8_t command, uint32
             return audio->channels[a].sfx;
         return UINT32_MAX;
 #if UNIAUDIO_PCM_VOICES > 0
-    case 8:     // pcmstop(voice)
+    case 8: // pcmstop(voice)
         if (a >= UNIAUDIO_PCM_VOICES)
             return UINT32_MAX;
         audio->pcm[a].data = NULL;
         audio->pcm_mask &= ~(1u << a);
         break;
-    case 9:     // pcmvolume(voice, volume)
+    case 9: // pcmvolume(voice, volume)
         if (a >= UNIAUDIO_PCM_VOICES || !audio->pcm[a].data)
             return UINT32_MAX;
         audio->pcm[a].volume = (uint8_t)(b > 255u ? 255u : b);
         break;
-    case 10:    // pcmstatus(voice): 1 while playing, 0 when free
+    case 10: // pcmstatus(voice): 1 while playing, 0 when free
         if (a >= UNIAUDIO_PCM_VOICES)
             return UINT32_MAX;
         return audio->pcm[a].data ? 1u : 0u;
@@ -455,16 +493,28 @@ static inline void uniaudio_beep(Uniaudio *audio, uint32_t frequency, uint32_t d
     audio->beep_active = 1;
 }
 
-static inline int32_t uniaudio_wave_sample(UniaudioChannel *voice)
+static inline int32_t uniaudio_wave_sample(Uniaudio *audio, UniaudioChannel *voice)
 {
     uint32_t phase = voice->phase;
+
+    if (voice->custom)
+    {
+        uint8_t id = voice->waveform;
+
+        if (id >= 8 || !audio->sfx[id].loaded)
+            return 0;
+
+        uint8_t index = (uint8_t)(phase >> 26);
+        return (int32_t)(int8_t)audio->sfx[id].bytes[index] * 256;
+    }
+
     switch (voice->waveform)
     {
     case UNIAUDIO_TRIANGLE:
     {
         uint32_t p = (phase >> 16) & 0xFFFFu;
         return p < 32768u ? -32768 + (int32_t)(p * 2u)
-                           : 32767 - (int32_t)((p - 32768u) * 2u);
+                          : 32767 - (int32_t)((p - 32768u) * 2u);
     }
     case UNIAUDIO_TILTED_SAW:
     {
@@ -482,24 +532,29 @@ static inline int32_t uniaudio_wave_sample(UniaudioChannel *voice)
     case UNIAUDIO_ORGAN:
         return ((phase & 0x80000000u) ? 14000 : -14000) +
                ((phase & 0x40000000u) ? 6000 : -6000);
-    case UNIAUDIO_CUSTOM:
-    {
-        uint32_t p = (phase >> 16) & 0xFFFFu;
-        return p < 32768u ? -32768 + (int32_t)(p * 2u)
-                           : 32767 - (int32_t)((p - 32768u) * 2u);
-    }
-    default:
+    case UNIAUDIO_NOISE:
         voice->noise ^= voice->noise << 13;
         voice->noise ^= voice->noise >> 17;
         voice->noise ^= voice->noise << 5;
         return (int16_t)(voice->noise >> 16);
+    case UNIAUDIO_PHASER:
+    {
+        uint32_t p = phase + ((phase >> 5) & 0x0FFFFFFFu);
+        uint32_t v = (p >> 16) & 0xFFFFu;
+        return v < 32768u ? -32768 + (int32_t)(v * 2u)
+                          : 32767 - (int32_t)((v - 32768u) * 2u);
+    }
+    default:
+        return 0;
     }
 }
 
 static inline int16_t uniaudio_clamp_sample(int32_t sample)
 {
-    if (sample > 32767) return 32767;
-    if (sample < -32768) return -32768;
+    if (sample > 32767)
+        return 32767;
+    if (sample < -32768)
+        return -32768;
     return (int16_t)sample;
 }
 
@@ -525,7 +580,7 @@ static inline void uniaudio_render(Uniaudio *audio, int16_t *output, uint32_t sa
             UniaudioChannel *voice = &audio->channels[channel];
             if (!voice->active)
                 continue;
-            int32_t sample = uniaudio_wave_sample(voice);
+            int32_t sample = uniaudio_wave_sample(audio, voice);
             uint32_t volume = voice->volume;
             if (voice->effect == UNIAUDIO_EFFECT_FADE_IN)
                 volume = (uint32_t)((uint64_t)volume * (voice->samples_total - voice->samples_left + 1u) / voice->samples_total);
@@ -539,7 +594,7 @@ static inline void uniaudio_render(Uniaudio *audio, int16_t *output, uint32_t sa
                 uint32_t elapsed = voice->samples_total - voice->samples_left;
                 int64_t difference = (int64_t)voice->phase_increment_end - voice->phase_increment;
                 uint32_t increment = (uint32_t)((int64_t)voice->phase_increment +
-                    difference * elapsed / (voice->samples_total - 1u));
+                                                difference * elapsed / (voice->samples_total - 1u));
                 voice->phase += increment;
             }
             else if (voice->effect == UNIAUDIO_EFFECT_VIBRATO)
@@ -555,7 +610,8 @@ static inline void uniaudio_render(Uniaudio *audio, int16_t *output, uint32_t sa
                 uint32_t period = voice->effect == UNIAUDIO_EFFECT_ARP_FAST ? 96u : 192u;
                 uint32_t semitones = ((voice->samples_total - voice->samples_left) / period) & 1u ? 7u : 0u;
                 uint8_t pitch = (uint8_t)(uniaudio_note_word(audio->sfx[voice->sfx].bytes,
-                                                              voice->note) & 0x3Fu);
+                                                             voice->note) &
+                                          0x3Fu);
                 voice->phase += uniaudio_pitch_increment((uint8_t)(pitch + 12u + semitones));
             }
             else
@@ -564,8 +620,15 @@ static inline void uniaudio_render(Uniaudio *audio, int16_t *output, uint32_t sa
             {
                 voice->note++;
                 const uint8_t *sfx = audio->sfx[voice->sfx].bytes;
-                if (sfx[3] > sfx[2] && sfx[3] <= UNIAUDIO_SFX_NOTES && voice->note >= sfx[3])
-                    voice->note = sfx[2];
+                uint8_t loop_start = sfx[66] & 0x3F;
+                uint8_t loop_end = sfx[67] & 0x3F;
+
+                if (loop_end > loop_start &&
+                    loop_end <= UNIAUDIO_SFX_NOTES &&
+                    voice->note >= loop_end)
+                {
+                    voice->note = loop_start;
+                }
                 uniaudio_start_note(audio, channel);
             }
         }

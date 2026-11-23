@@ -216,6 +216,16 @@ def main():
     ap.add_argument('cart'); ap.add_argument('-o', default='smb_data.h'); ap.add_argument('--level', type=int, default=1)
     a = ap.parse_args()
     cart = Cart(read_rom(a.cart))
+    sfx = cart.mem[0x3200:0x4300]
+
+    print("SFX memory:", len(sfx), "bytes")
+
+    for i in range(4):
+        record = sfx[i * 68:(i + 1) * 68]
+        print(f"SFX {i}:", record.hex(" "))
+        print("  speed:", record[65],
+              "loop:", record[66], record[67])
+    assert len(sfx) == 64 * 68
     nq, ej, w, tb, ef = build_level(cart, a.level, cart.scenery[a.level - 1])
     W = ef
     level = [0] * (14 * W); cont = []

@@ -1,4 +1,7 @@
 // u8 PCM clips (128 = silence) played from ROM in audio mode 3
+
+#include "song.h"
+
 const uint8_t tone[64] = {
     0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0,
     0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0,
@@ -13,13 +16,13 @@ uint32_t main(void)
 
     // a clip that is not looped frees its voice by itself when it ends (64 samples, about 3 ms; the
     // wait is long because a real host only runs the mixer once per audio buffer)
-    uint8_t v = pcmplay(tone, 64, 22050, 255, 0);
+    uint8_t v = pcmplay(song_raw, song_raw_len, 8000, 255, 0);
     if (v > 7 || pcmstatus(v) != 1)
     {
         printf("pcmplay failed\n");
         return 1;
     }
-    sleep(250);
+    sleep(90 * 1000);
     if (pcmstatus(v) != 0)
     {
         printf("voice was not freed\n");
