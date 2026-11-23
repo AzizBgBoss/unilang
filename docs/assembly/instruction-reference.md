@@ -163,6 +163,7 @@ the remote endpoint.
 | `5F` | `outregsigned64` | `src:reg` | Print a register as signed decimal. |
 | `7E` | `storeregi64` | `addr_reg:reg, value_reg:reg` | Store a register's full 64-bit value to an indirect RAM address. |
 | `7F` | `numtostr64` | `value:reg, addr:u32, out_length:reg` | Convert an unsigned register to decimal text in RAM. |
+| `80` | `tilemap` | `descriptor_addr:u32` | Draw the visible tiles of a ROM/RAM map using the 12-word descriptor (see [bytecode format](bytecode-format.md#tilemap-descriptor)). |
 
 `alu64` selectors are: 1 add, 2 subtract, 3 multiply, 4 unsigned divide,
 5 unsigned remainder, 6 signed divide, 7 signed remainder, 8 AND, 9 OR,

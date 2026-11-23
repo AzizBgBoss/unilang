@@ -62,6 +62,15 @@ Combine them with `|`.
 | `BLIT_TRANSPARENT` | 16 | Skip pixels equal to the transparent value |
 | `BLIT_RAM` | 32 | Source is a RAM array |
 | `BLIT_1BPP` | 64 | 1 bit per pixel, highest bit first, rows padded to whole bytes |
+| `BLIT_2BPP` | 128 | 2 bits per pixel, highest bits first, rows padded to whole bytes |
+
+## Tilemap flags
+
+[`tilemap`](builtins.md#tilemap) accepts all the blit flags above, plus:
+
+| Name | Value | Meaning |
+|---|---:|---|
+| `TILEMAP_MAP_RAM` | 256 | The map is a RAM array (otherwise ROM) |
 
 ## Flag indices
 

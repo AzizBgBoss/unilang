@@ -58,7 +58,7 @@ ROLES = {
     "getmemsize": "w", "getflag": "iw", "randreg": "rrW", "srandreg": "r",
     "drawstring": "rrrrriww", "numtostr": "rMw", "floatop": "iirrr",
     "floatcast": "iirr", "romread64": "rww", "fillrect": "rrrrr",
-    "drawline": "rrrrr", "blit": "M", "setpalette": "rr",
+    "drawline": "rrrrr", "blit": "M", "tilemap": "M", "setpalette": "rr",
     "fillscreen": "r", "fillcircle": "rrrr", "drawrect": "rrrrr",
     "jmpreg": "r", "callreg": "r", "subroutine": "L", "return": "",
     "pushr": "r", "popr": "w",

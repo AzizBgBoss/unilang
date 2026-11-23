@@ -215,6 +215,7 @@ enum OP_CODES
     OP_BEEP,             // start a host-side tone - parameters: regfreq(1), regms(1)
     OP_AUDIO_COMMAND,    // send a host audio command - parameters: command(1), rega(1), regb(1), regresult(1)
     OP_AUDIO_LOAD,       // copy audio data to the host - parameters: regkind(1), regindex(1), regaddr(1), reglen(1), source(1), regresult(1)
+    OP_TILEMAP = 0x80,   // draw a scrolling tilemap from a ROM/RAM map and tile sheet; 12 parameter words live in RAM at desc_addr (see ulvm_tilemap) - parameters: desc_addr(4)
     OP_NET_OPEN = 0x90,  // open a host network handle - parameters: regkind(1), reglocal(1), regremote(1), reghostaddr(1), regflags(1), regresult(1)
     OP_NET_STATUS,       // query a handle state - parameters: reghandle(1), regresult(1)
     OP_NET_SEND,         // send memory bytes through a handle - parameters: reghandle(1), regaddr(1), reglen(1), regresult(1)
@@ -1908,19 +1909,15 @@ static inline void ulvm_drawrect(UnilangVM *vm, int32_t x, int32_t y, int32_t w,
 //  5 srcx, 6 srcy (top-left of the region inside the sheet)   7 stride (sheet width in pixels)
 //  8 flags: bit0 flip X, bit1 flip Y, bit2 4bpp (low nibble = even x, else 8bpp),
 //           bit3 map colours through the RAM table at word 9, bit4 skip pixels equal to word 10,
-//           bit5 sheet is in RAM, bit6 1bpp (MSB first, each row padded to a whole byte, like Adafruit GFX)
+//           bit5 sheet is in RAM, bit6 1bpp (MSB first, each row padded to a whole byte, like Adafruit GFX),
+//           bit7 2bpp (leftmost pixel in the highest bits, each row padded to a whole byte)
 //  9 palette (RAM address of a table indexed by the source value)   10 transparent value
-static inline void ulvm_blit(UnilangVM *vm, uint32_t d)
+static inline void ulvm_blit_region(UnilangVM *vm, int32_t x, int32_t y, int32_t w, int32_t h,
+                                    uint32_t src, int32_t sx, int32_t sy, int32_t stride,
+                                    uint32_t fl, uint32_t pal, uint32_t tr)
 {
     if (!vm->setpixel && !vm->blitrow_fast)
         return;
-    int32_t x = (int32_t)ulvm_load_memory(vm, d + 0, 4), y = (int32_t)ulvm_load_memory(vm, d + 4, 4);
-    int32_t w = (int32_t)ulvm_load_memory(vm, d + 8, 4), h = (int32_t)ulvm_load_memory(vm, d + 12, 4);
-    uint32_t src = ulvm_load_memory(vm, d + 16, 4);
-    int32_t sx = (int32_t)ulvm_load_memory(vm, d + 20, 4), sy = (int32_t)ulvm_load_memory(vm, d + 24, 4);
-    int32_t stride = (int32_t)ulvm_load_memory(vm, d + 28, 4);
-    uint32_t fl = ulvm_load_memory(vm, d + 32, 4), pal = ulvm_load_memory(vm, d + 36, 4);
-    uint32_t tr = ulvm_load_memory(vm, d + 40, 4);
     if (w <= 0 || h <= 0 || stride <= 0)
         return;
     int64_t maxx = ulvm_gw(vm), maxy = ulvm_gh(vm);
@@ -1959,6 +1956,14 @@ static inline void ulvm_blit(UnilangVM *vm, uint32_t d)
                     : (a <= UINT32_MAX ? (uint32_t)ulvm_rom_byte(vm, (uint32_t)a) : 0u);
                 v = (b >> (7 - (source_x & 7))) & 1;
             }
+            else if (fl & 128)
+            {
+                uint64_t a = (uint64_t)src + (uint64_t)source_y * (((uint32_t)stride + 3) >> 2) + ((uint64_t)source_x >> 2);
+                uint32_t b = (fl & 32)
+                    ? (a < (uint32_t)ULVM_MEM_SIZE ? vm->mem[(uint32_t)a] : 0u)
+                    : (a <= UINT32_MAX ? (uint32_t)ulvm_rom_byte(vm, (uint32_t)a) : 0u);
+                v = (b >> (6 - 2 * (source_x & 3))) & 3;
+            }
             else if (fl & 4)
             {
                 uint64_t a = (uint64_t)src + (idx >> 1);
@@ -1992,6 +1997,75 @@ static inline void ulvm_blit(UnilangVM *vm, uint32_t d)
     }
 }
 
+static inline void ulvm_blit(UnilangVM *vm, uint32_t d)
+{
+    ulvm_blit_region(vm,
+                     (int32_t)ulvm_load_memory(vm, d + 0, 4), (int32_t)ulvm_load_memory(vm, d + 4, 4),
+                     (int32_t)ulvm_load_memory(vm, d + 8, 4), (int32_t)ulvm_load_memory(vm, d + 12, 4),
+                     ulvm_load_memory(vm, d + 16, 4),
+                     (int32_t)ulvm_load_memory(vm, d + 20, 4), (int32_t)ulvm_load_memory(vm, d + 24, 4),
+                     (int32_t)ulvm_load_memory(vm, d + 28, 4),
+                     ulvm_load_memory(vm, d + 32, 4), ulvm_load_memory(vm, d + 36, 4),
+                     ulvm_load_memory(vm, d + 40, 4));
+}
+
+static inline int64_t ulvm_floor_div(int64_t a, int64_t b)
+{
+    int64_t q = a / b;
+    return (a % b != 0 && (a < 0) != (b < 0)) ? q - 1 : q;
+}
+
+// Tilemap. Descriptor = 12 big-endian 32-bit words in RAM at `d`:
+//  0 map (address of one byte per tile, row-major)   1 map_w, 2 map_h (in tiles)
+//  3 sheet (tile sheet address)   4 stride (sheet width in pixels)
+//  5 scroll_x, 6 scroll_y (map pixel shown at the screen's top-left; may be negative)
+//  7 tile_w, 8 tile_h (size of one tile in pixels)
+//  9 flags: the blit flags (flip, 1/2/4bpp, palette, transparent, bit5 sheet in RAM, 1bpp), applied to every tile,
+//           plus bit8 (256) map is in RAM (otherwise ROM)
+// 10 palette   11 transparent (as in blit)
+// Each tile occupies a sheet cell rounded up to a multiple of 8 in both directions (7x5 -> 8x8, 14x14 -> 16x16);
+// only the top-left tile_w x tile_h pixels of a cell are drawn. Tile i is at cell (i % cols, i / cols) with
+// cols = stride / cell_w. Only tiles that touch the screen are drawn; the map does not wrap.
+static inline void ulvm_tilemap(UnilangVM *vm, uint32_t d)
+{
+    if (!vm->setpixel && !vm->blitrow_fast)
+        return;
+    uint32_t map = ulvm_load_memory(vm, d + 0, 4);
+    int32_t map_w = (int32_t)ulvm_load_memory(vm, d + 4, 4), map_h = (int32_t)ulvm_load_memory(vm, d + 8, 4);
+    uint32_t sheet = ulvm_load_memory(vm, d + 12, 4);
+    int32_t stride = (int32_t)ulvm_load_memory(vm, d + 16, 4);
+    int32_t scroll_x = (int32_t)ulvm_load_memory(vm, d + 20, 4), scroll_y = (int32_t)ulvm_load_memory(vm, d + 24, 4);
+    int32_t tile_w = (int32_t)ulvm_load_memory(vm, d + 28, 4), tile_h = (int32_t)ulvm_load_memory(vm, d + 32, 4);
+    uint32_t fl = ulvm_load_memory(vm, d + 36, 4), pal = ulvm_load_memory(vm, d + 40, 4);
+    uint32_t tr = ulvm_load_memory(vm, d + 44, 4);
+    if (map_w <= 0 || map_h <= 0 || tile_w <= 0 || tile_h <= 0 || stride <= 0)
+        return;
+    int64_t cell_w = ((int64_t)tile_w + 7) & ~(int64_t)7, cell_h = ((int64_t)tile_h + 7) & ~(int64_t)7;
+    int64_t cols = stride / cell_w;
+    if (cols <= 0)
+        return;
+    int64_t tx0 = ulvm_floor_div(scroll_x, tile_w), tx1 = ulvm_floor_div((int64_t)scroll_x + ulvm_gw(vm) - 1, tile_w);
+    int64_t ty0 = ulvm_floor_div(scroll_y, tile_h), ty1 = ulvm_floor_div((int64_t)scroll_y + ulvm_gh(vm) - 1, tile_h);
+    if (tx0 < 0) tx0 = 0;
+    if (ty0 < 0) ty0 = 0;
+    if (tx1 > (int64_t)map_w - 1) tx1 = (int64_t)map_w - 1;
+    if (ty1 > (int64_t)map_h - 1) ty1 = (int64_t)map_h - 1;
+    uint32_t blit_flags = fl & ~256u;
+    for (int64_t ty = ty0; ty <= ty1; ty++)
+        for (int64_t tx = tx0; tx <= tx1; tx++)
+        {
+            uint64_t a = (uint64_t)map + (uint64_t)ty * (uint32_t)map_w + (uint64_t)tx;
+            uint32_t idx = (fl & 256)
+                ? (a < (uint32_t)ULVM_MEM_SIZE ? vm->mem[(uint32_t)a] : 0u)
+                : (a <= UINT32_MAX ? (uint32_t)ulvm_rom_byte(vm, (uint32_t)a) : 0u);
+            ulvm_blit_region(vm,
+                             (int32_t)(tx * tile_w - scroll_x), (int32_t)(ty * tile_h - scroll_y),
+                             tile_w, tile_h, sheet,
+                             (int32_t)((idx % cols) * cell_w), (int32_t)((idx / cols) * cell_h),
+                             stride, blit_flags, pal, tr);
+        }
+}
+
 // Dispatch. By default the interpreter loop is a plain switch. Defining
 // ULVM_COMPUTED_GOTO=1 (GCC only) switches to computed goto ("labels as
 // values") with threaded dispatch: every handler fetches the next opcode and
@@ -2016,6 +2090,7 @@ static inline void ulvm_blit(UnilangVM *vm, uint32_t d)
     [OP_ANDREG] = &&ulvm_l_OP_ANDREG, \
     [OP_ANDREGV] = &&ulvm_l_OP_ANDREGV, \
     [OP_BLIT] = &&ulvm_l_OP_BLIT, \
+    [OP_TILEMAP] = &&ulvm_l_OP_TILEMAP, \
     [OP_SETPALETTE] = &&ulvm_l_OP_SETPALETTE, \
     [OP_SAVE] = &&ulvm_l_OP_SAVE, \
     [OP_LOAD] = &&ulvm_l_OP_LOAD, \
@@ -3533,6 +3608,13 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
     {
         uint32_t d = ULVM_NEXT4BYTES();
         ulvm_blit(vm, d);
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_TILEMAP)
+    {
+        uint32_t d = ULVM_NEXT4BYTES();
+        ulvm_tilemap(vm, d);
         ULVM_NEXT();
     }
 

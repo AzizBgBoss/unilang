@@ -184,6 +184,7 @@ raw bytes.
 | 0x6C | `outreg` | reg | print a register's full numeric value |
 | 0x6D-0x6F | `sdivreg`/`smodreg`/`sshrreg` | r1, r2, dst | signed division/remainder and arithmetic right shift |
 | 0x70 | `outregsigned` | reg | print signed 32-bit register value |
+| 0x80 | `tilemap` | desc_addr | draw the visible tiles of a ROM/RAM map described by 12 RAM words |
 | 0xFF | `exit` | — | halt; `r0` becomes the VM's exit code |
 
 `floatop` formats are `7` for IEEE-754 binary32 and `8` for binary64. Its

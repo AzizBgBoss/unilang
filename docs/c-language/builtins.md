@@ -99,7 +99,7 @@ for details and the [network examples](../../examples/network/README.md).
 | 12 | 16-bit RGB555, 256x128 |
 
 Use the `setpixel`, `fillrect`, `fillscreen`, `fillcircle`, `drawrect`,
-`drawline`, `blit`, `drawchar`, `drawstring`, `drawnum`, and `getpixel`
+`drawline`, `blit`, `tilemap`, `drawchar`, `drawstring`, `drawnum`, and `getpixel`
 operations for drawing. Pixels and shapes are clipped at framebuffer edges.
 The host may optionally provide bulk `fillrect`/sprite-row callbacks; the VM
 has a per-pixel fallback.
@@ -203,8 +203,11 @@ Flags (constants are predefined, see [predefined names](predefined-names.md)):
 | `BLIT_TRANSPARENT` | 16 | Skip pixels whose source value equals `transparent`. |
 | `BLIT_RAM` | 32 | `source` is a RAM array instead of ROM. |
 | `BLIT_1BPP` | 64 | Image has 1 bit per pixel: eight pixels per byte, **leftmost pixel in the highest bit**. Each row starts on a new byte, so a row takes `(stride + 7) / 8` bytes. This is the same layout as Adafruit GFX `drawBitmap`. |
+| `BLIT_2BPP` | 128 | Image has 2 bits per pixel (values 0 to 3): four pixels per byte, **leftmost pixel in the highest bits**. Each row starts on a new byte, so a row takes `(stride + 3) / 4` bytes. |
 
-Without `BLIT_4BPP` or `BLIT_1BPP`, each pixel is one byte.
+Without `BLIT_4BPP`, `BLIT_2BPP` or `BLIT_1BPP`, each pixel is one byte. If
+several bit depths are combined, `BLIT_1BPP` wins over `BLIT_2BPP`, which wins
+over `BLIT_4BPP`.
 
 In 1bpp mode a pixel value is `0` or `1`, and that value is what gets drawn.
 That is the right color for monochrome graphics modes. In color modes, either
@@ -243,6 +246,48 @@ exact VM descriptor layout is in the
 [bytecode format page](../assembly/bytecode-format.md#blit-descriptor).
 `blit` cannot XOR with the screen; to invert pixels, read them with `getpixel`
 and write them with `setpixel`.
+
+### tilemap
+
+`tilemap` draws a whole scrolling map of tiles in one call. The VM does the
+loop, so it is much cheaper than calling `blit` once per tile.
+
+```c
+tilemap(map, map_w, map_h, sheet, stride, scroll_x, scroll_y,
+        tile_w, tile_h, flags, palette, transparent);
+```
+
+| Argument | What it means |
+|---|---|
+| `map` | One byte per tile (the tile number), row-major, `map_w * map_h` bytes. A `const` array (ROM) or a RAM array (add `TILEMAP_MAP_RAM` to `flags`). |
+| `map_w`, `map_h` | Map size in tiles. |
+| `sheet` | The tile sheet image: a `const` array (ROM) or a RAM array (add `BLIT_RAM`). |
+| `stride` | Width of the whole sheet in pixels. |
+| `scroll_x`, `scroll_y` | The map pixel shown at the top-left of the screen. May be negative; the map does not wrap, so uncovered areas keep what was already drawn. |
+| `tile_w`, `tile_h` | Size of one tile on screen, in pixels. |
+| `flags` | The `blit` flags (`BLIT_1BPP`, `BLIT_2BPP`, `BLIT_4BPP`, `BLIT_PALETTE`, `BLIT_TRANSPARENT`, `BLIT_RAM`, flips), applied to every tile, plus `TILEMAP_MAP_RAM` (256). |
+| `palette`, `transparent` | As in `blit`. |
+
+**Cell size.** Every tile occupies a cell in the sheet whose width and height
+are rounded up to a multiple of 8. A 7x5 tile uses an 8x8 cell, a 14x14 tile
+uses a 16x16 cell. Only the top-left `tile_w` x `tile_h` pixels of a cell are
+drawn, the rest is padding. Tile number `n` is in column `n % cols` and row
+`n / cols` of the cells, where `cols = stride / cell_width`, so `stride` should
+be a multiple of the cell width.
+The flip flags mirror each tile on its own, not the whole map.
+
+Only tiles that touch the screen are drawn. Use `BLIT_TRANSPARENT` to let
+what is already on the screen show through the transparent pixels.
+
+```c
+const uint8_t level[6] = {0, 1, 1, 1, 0, 1};   // 3x2 tiles
+// 7x5 tiles from a 1bpp sheet that is 16 pixels wide (two 8x8 cells)
+tilemap(level, 3, 2, tiles, 16, camera_x, camera_y, 7, 5,
+        BLIT_1BPP | BLIT_TRANSPARENT, 0, 0);
+```
+
+The VM descriptor layout is in the
+[bytecode format page](../assembly/bytecode-format.md#tilemap-descriptor).
 
 ## Memory and stack
 

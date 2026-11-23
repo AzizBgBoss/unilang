@@ -1,4 +1,1 @@
-- setpixel, fillrect, drawline and similar builtins load their arguments a negative int16_t passed to them is still misread. fix.
-- tilemap(), a builtin function that takes a tilemap, tile sheet, scroll x and y offset, tile size, and once called display the tilemap to better offload hefty rendering from VM to host. should support all type of flags and their different size per pixel and so, these can be read from RAM or ROM. also document it
-- blit should support all flags and their different BPP, tell me if it does, if it doesnt fix it
 - audio (idk maybe make a new mode), should support playing u8 PCM, maybe make it so the user can give a ROM/RAM array of PCM, size of it, choose to loop it or not, choose gain/volume, and the host will play it (maybe using the buzzer/tone function). make it so i can play many effects at once too, idk 4 or 8, whatever you see fit.

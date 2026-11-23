@@ -137,9 +137,40 @@ Flag bits: bit 0 flips horizontally; bit 1 flips vertically; bit 2 reads
 packed 4-bit pixels (low nibble first); bit 3 applies the byte palette; bit 4
 enables transparent-value skipping; bit 5 selects RAM source (otherwise ROM);
 bit 6 reads packed 1-bit pixels (highest bit first, each row padded to a whole
-byte, so a row is `(stride + 7) / 8` bytes). Bit 6 takes priority over bit 2.
+byte, so a row is `(stride + 7) / 8` bytes); bit 7 reads packed 2-bit pixels
+(highest bits first, each row padded to a whole byte, so a row is
+`(stride + 3) / 4` bytes). Bit 6 takes priority over bit 7, and bit 7 over bit 2.
 Clipping is applied to destination and source bounds. Invalid dimensions or
 stride draw nothing.
+
+## `tilemap` descriptor
+
+Opcode `0x80` takes a four-byte RAM address to twelve consecutive big-endian
+32-bit words (48 bytes total):
+
+| Word offset | Field | Meaning |
+|---:|---|---|
+| 0 | `map` | ROM or RAM address of one byte per tile, row-major |
+| 4 | `map_w` | map width in tiles |
+| 8 | `map_h` | map height in tiles |
+| 12 | `sheet` | ROM or RAM tile sheet base address |
+| 16 | `stride` | sheet row width in pixels |
+| 20 | `scroll_x` | map pixel at the screen's left edge (signed) |
+| 24 | `scroll_y` | map pixel at the screen's top edge (signed) |
+| 28 | `tile_w` | tile width in pixels |
+| 32 | `tile_h` | tile height in pixels |
+| 36 | `flags` | the `blit` flags, applied to every tile, plus bit 8 (256): map is in RAM |
+| 40 | `palette` | as in `blit` |
+| 44 | `transparent` | as in `blit` |
+
+Each tile occupies a sheet cell of `ceil(tile_w / 8) * 8` by
+`ceil(tile_h / 8) * 8` pixels. Tile `n` is at cell column `n % cols` and cell
+row `n / cols`, with `cols = stride / cell_width`, and its top-left
+`tile_w` x `tile_h` pixels are drawn through the same code as `blit`. Tile
+`(tx, ty)` lands at `(tx * tile_w - scroll_x, ty * tile_h - scroll_y)`. Only
+tiles touching the screen are visited, and the map does not wrap. A map,
+tile or stride size that is zero or negative, or a stride smaller than one
+cell, draws nothing.
 
 ## Faults and compatibility
 

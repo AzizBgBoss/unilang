@@ -32,6 +32,7 @@ EXAMPLES = [
     ("goto_math", ROOT / "examples" / "test" / "goto_math.c"),
     ("math_integer", ROOT / "examples" / "test" / "math_integer.c"),
     ("graphics_shapes", ROOT / "examples" / "test" / "graphics_shapes.c"),
+    ("tilemap", ROOT / "examples" / "test" / "tilemap.c"),
     ("predefined_names", ROOT / "examples" / "test" / "predefined_names.c"),
     ("union", ROOT / "examples" / "test" / "union.c"),
     ("system_random_time", ROOT / "examples" / "test" / "system_random_time.c"),

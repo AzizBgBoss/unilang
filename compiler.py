@@ -114,6 +114,7 @@ OPS = {
     "fillrect":        (0x24, [1, 1, 1, 1, 1]),       # regx, regy, regw, regh, regc
     "drawline":        (0x25, [1, 1, 1, 1, 1]),       # regx0, regy0, regx1, regy1, regc
     "blit":            (0x26, [4]),                   # desc_addr (11 words in RAM, see ulvm_blit)
+    "tilemap":         (0x80, [4]),                   # desc_addr (12 words in RAM, see ulvm_tilemap)
     "setpalette":      (0x27, [1, 1]),                # regindex, regcolor (RGB555), palette graphics modes only
     "save":            (0x28, [1, 1, 1]),              # regaddr, reglen, regresult
     "load":            (0x29, [1, 1, 1]),              # regaddr, reglen, regresult
@@ -434,7 +435,8 @@ class Compiler:
             "KEY_A": 1 << 4, "KEY_B": 1 << 5, "KEY_SELECT": 1 << 6, "KEY_START": 1 << 7,
             "KEY_DPAD": 0x0F, "KEY_ANY": 0xFF,
             "BLIT_FLIP_X": 1, "BLIT_FLIP_Y": 2, "BLIT_4BPP": 4, "BLIT_PALETTE": 8,
-            "BLIT_TRANSPARENT": 16, "BLIT_RAM": 32, "BLIT_1BPP": 64,
+            "BLIT_TRANSPARENT": 16, "BLIT_RAM": 32, "BLIT_1BPP": 64, "BLIT_2BPP": 128,
+            "TILEMAP_MAP_RAM": 256,
             "FLAG_GRAPHICS": 0, "FLAG_KEYBOARD": 1, "FLAG_AUDIO": 2, "FLAG_NETWORK": 15,
             "AUDIO_OFF": 0, "AUDIO_BEEP": 1, "AUDIO_ENGINE": 2,
             "GFX_OFF": 0,
@@ -577,6 +579,15 @@ class Compiler:
     # -- register-level emission helpers --------------------------------------
     def emit_load(self, addr, size, reg):
         self.emit("loadreg64" if size == 8 else f"loadreg{self._reg_width(size)}", reg, addr)
+
+    def emit_load_signed(self, addr, reg):
+        # like emit_load, but sign-extends narrow signed values (loadreg zero-extends)
+        size = self.addr_size(addr)
+        self.emit_load(addr, size, reg)
+        if self.addr_formats.get(addr) in SIGNED_FMTS and size < 4:
+            shift = 32 - 8 * size
+            self.emit("shlregv", reg, shift, reg)
+            self.emit("sshrregv", reg, shift, reg)
 
     def emit_store(self, reg, addr, size):
         self.emit("storereg64" if size == 8 else f"storereg{self._reg_width(size)}", reg, addr)
@@ -2551,7 +2562,7 @@ class Compiler:
                 if not isinstance(args[1], c_ast.Constant):
                     raise NotImplementedError("__mem_ptr() size must be a compile-time constant")
                 return self.gen_expr(args[0])
-            if name in ("flag", "setpixel", "exit", "srand", "drawchar", "drawstring", "fillrect", "fillscreen", "fillcircle", "drawrect", "drawline", "blit", "setpalette", "beep", "sfx", "music", "audiostop", "audiopause", "audioresume", "audiovolume", "push"):
+            if name in ("flag", "setpixel", "exit", "srand", "drawchar", "drawstring", "fillrect", "fillscreen", "fillcircle", "drawrect", "drawline", "blit", "tilemap", "setpalette", "beep", "sfx", "music", "audiostop", "audiopause", "audioresume", "audiovolume", "push"):
                 raise NotImplementedError(f"'{name}' does not return a value")
             return self.gen_call(node)
 
@@ -2811,8 +2822,8 @@ class Compiler:
         val_addr = self.gen_expr(val_node)
 
         # only the scratch registers: r0-r12 stay free for variables
-        self.emit_load(x_addr, self.addr_size(x_addr), RC)
-        self.emit_load(y_addr, self.addr_size(y_addr), RA)
+        self.emit_load_signed(x_addr, RC)
+        self.emit_load_signed(y_addr, RA)
         self.emit_load(val_addr, self.addr_size(val_addr), RB)
         self.emit("setpixel", RC, RA, RB)
 
@@ -2825,7 +2836,7 @@ class Compiler:
         addrs = [self.gen_expr(a) for a in args]
         regs = (11, 12, RC, RA, RB)
         for reg, a in zip(regs, addrs):
-            self.emit_load(a, self.addr_size(a), reg)
+            self.emit_load_signed(a, reg)
         self.emit(opname, *regs)
 
     def gen_shape(self, call, opname, argument_count):
@@ -2836,7 +2847,7 @@ class Compiler:
         addrs = [self.gen_expr(arg) for arg in args]
         regs = (11, 12, RC, RA, RB)[:argument_count]
         for reg, addr in zip(regs, addrs):
-            self.emit_load(addr, self.addr_size(addr), reg)
+            self.emit_load_signed(addr, reg)
         self.emit(opname, *regs)
 
     def gen_setpalette(self, call):
@@ -2859,7 +2870,20 @@ class Compiler:
         args = call.args.exprs if call.args else []
         if len(args) != 11:
             raise NotImplementedError("blit(x, y, w, h, src, srcx, srcy, stride, flags, palette, transparent) takes 11 arguments")
-        desc = self.alloc_temp(44)
+        self.emit("blit", self.gen_descriptor(args))
+
+    def gen_tilemap(self, call):
+        # tilemap(map, map_w, map_h, sheet, stride, scroll_x, scroll_y, tile_w, tile_h, flags, palette, transparent)
+        # See ulvm_tilemap() in unilang.h. `map` is a const array (ROM) or RAM array (flag 256);
+        # `sheet` is a const array (ROM) or RAM array (flag 32).
+        self.uses_graphics = True
+        args = call.args.exprs if call.args else []
+        if len(args) != 12:
+            raise NotImplementedError("tilemap(map, map_w, map_h, sheet, stride, scroll_x, scroll_y, tile_w, tile_h, flags, palette, transparent) takes 12 arguments")
+        self.emit("tilemap", self.gen_descriptor(args))
+
+    def gen_descriptor(self, args):
+        desc = self.alloc_temp(4 * len(args))
         for i, a in enumerate(args):
             if isinstance(a, c_ast.ID) and a.name in self.array_elem_bytes and a.name not in self.const_arrays \
                     and a.name in self.vars:
@@ -2870,7 +2894,7 @@ class Compiler:
                 src_fmt = self.addr_formats.get(addr, self.expr_format(a))
                 self.emit_load_int(addr, src_fmt, 4, RA)
             self.emit_store(RA, desc + 4 * i, 4)
-        self.emit("blit", desc)
+        return desc
 
     def gen_getpixel(self, call):
         self.uses_graphics = True
@@ -2879,8 +2903,8 @@ class Compiler:
             raise NotImplementedError("getpixel(x, y) takes exactly 2 arguments")
         x_addr = self.gen_expr(args[0])
         y_addr = self.gen_expr(args[1])
-        self.emit_load(x_addr, self.addr_size(x_addr), RA)
-        self.emit_load(y_addr, self.addr_size(y_addr), RB)
+        self.emit_load_signed(x_addr, RA)
+        self.emit_load_signed(y_addr, RB)
         self.emit("getpixel", RA, RB, RA)
         dest = self.alloc_temp(1)
         self.emit_store(RA, dest, 1)
@@ -4059,6 +4083,8 @@ class Compiler:
                 self.gen_shape(node, name, 5)
             elif name == "blit":
                 self.gen_blit(node)
+            elif name == "tilemap":
+                self.gen_tilemap(node)
             elif name == "setpalette":
                 self.gen_setpalette(node)
             elif name == "mul64":
