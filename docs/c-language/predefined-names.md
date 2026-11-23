@@ -90,6 +90,10 @@ Pass these as the first argument of `flag()` and `isflagsupported()`.
 | `AUDIO_OFF` | 0 | Audio disabled |
 | `AUDIO_BEEP` | 1 | `beep` tone only |
 | `AUDIO_ENGINE` | 2 | Four-channel SFX/music engine and `beep` |
+| `AUDIO_PCM` | 3 | Everything in `AUDIO_ENGINE`, plus ROM PCM voices (`pcmplay`) |
+
+`pcmplay` takes `PCM_LOOP` (1) in its `flags` argument to repeat the clip until
+it is stopped.
 
 ## Graphics modes
 

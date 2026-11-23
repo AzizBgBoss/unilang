@@ -56,6 +56,7 @@ ULVM_set_flagsupport(&vm, isflagsupported);
 ULVM_set_palette(&vm, setpalette);       /* optional */
 ULVM_set_storage(&vm, save_block, load_block); /* optional */
 ULVM_set_audio(&vm, beep, audio_command, audio_load); /* optional */
+ULVM_set_pcm(&vm, pcm_play);             /* optional, audio mode 3 */
 ```
 
 The callback typedefs and setters in `unilang.h` are authoritative for exact
@@ -101,10 +102,31 @@ medium; define atomicity and lifetime in that host's documentation.
 ### Audio
 
 `audio_command` receives command IDs: 1 SFX, 2 music, 3 stop, 4 pause,
-5 resume, 6 master volume, 7 status. `audio_load` receives one validated
+5 resume, 6 master volume, 7 status, and in audio mode 3 also 8 PCM stop,
+9 PCM volume, 10 PCM status. `audio_load` receives one validated
 record at a time; a bank-loading opcode is expanded by the VM into per-record
 callbacks. SFX records are 68 bytes and music patterns are 4 bytes. `beep`
 is separate from the SFX/music commands.
+
+PCM playback (audio mode 3) needs one more callback, registered with
+`ULVM_set_pcm`:
+
+```c
+uint32_t pcm_play(const uint8_t *data, uint32_t len, uint32_t rate,
+                  uint8_t volume, uint8_t flags);
+```
+
+`data` points into the program ROM, so it stays valid and unchanged while the
+clip plays and the host must not copy or free it. The VM calls this only when
+`vm->rom` is a flat ROM (set with `ULVM_set_rom`), the audio mode is 3, `len`
+is nonzero and the clip lies inside the ROM; `rate` is the clip's rate in Hz
+(never 0) and `flags` bit 0 means loop. Return the voice number (0 to 255), or
+`UINT32_MAX` if the clip cannot be played. The stop, volume and status
+commands arrive through `audio_command` as 8, 9 and 10. The host's
+`isflagsupported` must accept value 3 for flag 2. With `uniaudio.h` the
+callback is one call, `uniaudio_pcm_play(&engine, data, len, rate, volume,
+flags)`, made under the same lock as the other audio callbacks. A host with
+no PCM support just leaves the callback unset and `pcmplay` returns 255.
 
 [`C-interpreter/uniaudio.h`](../../C-interpreter/uniaudio.h) implements the
 reference four-channel synthesizer at 22050 Hz. It is an optional C header,

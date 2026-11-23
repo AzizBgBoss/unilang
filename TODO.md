@@ -1,1 +1,0 @@
-- audio (idk maybe make a new mode), should support playing u8 PCM, maybe make it so the user can give a ROM/RAM array of PCM, size of it, choose to loop it or not, choose gain/volume, and the host will play it (maybe using the buzzer/tone function). make it so i can play many effects at once too, idk 4 or 8, whatever you see fit.

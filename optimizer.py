@@ -64,7 +64,7 @@ ROLES = {
     "pushr": "r", "popr": "w",
     "outfmt": "Miiiii",
     "save": "rrw", "load": "rrw", "beep": "rr",
-    "audio_command": "irrw", "audio_load": "rrrriw", "memcpy": "rrri", "memset": "rrr",
+    "audio_command": "irrw", "audio_load": "rrrriw", "pcm_play": "rrrrrw", "memcpy": "rrri", "memset": "rrr",
     # Networking builtins are side-effecting VM operations; their register
     # arguments are read and the final result register is written.
     "net_open": "rrrrrw", "net_status": "rw", "net_send": "rrrw",

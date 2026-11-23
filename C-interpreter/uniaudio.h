@@ -12,6 +12,25 @@
 #define UNIAUDIO_MUSIC_COUNT 64u
 #define UNIAUDIO_MUSIC_BYTES 4u
 
+// PCM voices play u8 samples (128 = silence) straight from the program ROM, so a
+// voice only needs a pointer and a few counters (no sample buffers). Set this to 0
+// to compile PCM out, or lower it on small hosts. It must not exceed 32.
+#ifndef UNIAUDIO_PCM_VOICES
+#define UNIAUDIO_PCM_VOICES 8u
+#endif
+#define UNIAUDIO_PCM_MAX_STEP 65535u   // whole source samples consumed per output sample
+#define UNIAUDIO_PCM_MAX_LENGTH 0x7FFFFFFFu
+#define UNIAUDIO_PCM_FAIL 0xFFFFFFFFu
+#define UNIAUDIO_PCM_LOOP 1u
+
+#ifndef UNIAUDIO_READ_BYTE
+#ifdef READ_FLASH_BYTE
+#define UNIAUDIO_READ_BYTE(p) READ_FLASH_BYTE(p)
+#else
+#define UNIAUDIO_READ_BYTE(p) (*(const uint8_t *)(p))
+#endif
+#endif
+
 enum UNIAUDIO_WAVEFORMS
 {
     UNIAUDIO_TRIANGLE = 0,
@@ -64,6 +83,20 @@ typedef struct
     uint32_t noise;
 } UniaudioChannel;
 
+#if UNIAUDIO_PCM_VOICES > 0
+typedef struct
+{
+    const uint8_t *data;    // NULL = voice is free
+    uint32_t length;
+    uint32_t index;         // current source sample
+    uint32_t frac;          // 0..UNIAUDIO_SAMPLE_RATE-1, fraction of a source sample
+    uint32_t step_int;      // rate / UNIAUDIO_SAMPLE_RATE
+    uint32_t step_frac;     // rate % UNIAUDIO_SAMPLE_RATE
+    uint8_t volume;
+    uint8_t loop;
+} UniaudioPcm;
+#endif
+
 typedef struct
 {
     UniaudioSfx sfx[UNIAUDIO_SFX_COUNT];
@@ -77,6 +110,10 @@ typedef struct
     uint8_t music_channel_mask;
     uint8_t music_volume;
     uint8_t paused;
+#if UNIAUDIO_PCM_VOICES > 0
+    UniaudioPcm pcm[UNIAUDIO_PCM_VOICES];
+    uint32_t pcm_mask;      // bit n set = voice n is playing
+#endif
     uint8_t beep_active;
     uint32_t beep_phase;
     uint32_t beep_increment;
@@ -212,6 +249,11 @@ static inline void uniaudio_stop(Uniaudio *audio)
     audio->music_channel_mask = 0;
     audio->beep_active = 0;
     audio->paused = 0;
+#if UNIAUDIO_PCM_VOICES > 0
+    for (uint32_t i = 0; i < UNIAUDIO_PCM_VOICES; i++)
+        audio->pcm[i].data = NULL;
+    audio->pcm_mask = 0;
+#endif
 }
 
 static inline int uniaudio_any_channel(const Uniaudio *audio)
@@ -265,6 +307,52 @@ static inline void uniaudio_advance_music(Uniaudio *audio)
         return;
     }
     uniaudio_play_pattern(audio, next);
+}
+
+// Starts a PCM clip (u8 samples, 128 = silence) read in place from `data`, which must stay
+// valid while it plays (program ROM). `rate` is the clip's sample rate in Hz, any integer
+// from 1 up to UNIAUDIO_SAMPLE_RATE * UNIAUDIO_PCM_MAX_STEP. A clip without UNIAUDIO_PCM_LOOP
+// frees its voice by itself when it ends. If every voice is busy, the one closest to
+// finishing is replaced (looping voices never finish). Returns the voice number or
+// UNIAUDIO_PCM_FAIL.
+static inline uint32_t uniaudio_pcm_play(Uniaudio *audio, const uint8_t *data, uint32_t length,
+                                         uint32_t rate, uint32_t volume, uint32_t flags)
+{
+#if UNIAUDIO_PCM_VOICES > 0
+    if (!data || length == 0 || length > UNIAUDIO_PCM_MAX_LENGTH ||
+        rate == 0 || rate > UNIAUDIO_SAMPLE_RATE * UNIAUDIO_PCM_MAX_STEP)
+        return UNIAUDIO_PCM_FAIL;
+    uint32_t voice = UNIAUDIO_PCM_VOICES, best = 0;
+    for (uint32_t i = 0; i < UNIAUDIO_PCM_VOICES; i++)
+    {
+        const UniaudioPcm *v = &audio->pcm[i];
+        if (!v->data)
+        {
+            voice = i;
+            break;
+        }
+        uint32_t remaining = v->loop ? UINT32_MAX : v->length - v->index;
+        if (voice == UNIAUDIO_PCM_VOICES || remaining < best)
+        {
+            voice = i;
+            best = remaining;
+        }
+    }
+    UniaudioPcm *v = &audio->pcm[voice];
+    v->length = length;
+    v->index = 0;
+    v->frac = 0;
+    v->step_int = rate / UNIAUDIO_SAMPLE_RATE;
+    v->step_frac = rate % UNIAUDIO_SAMPLE_RATE;
+    v->volume = (uint8_t)(volume > 255u ? 255u : volume);
+    v->loop = (flags & UNIAUDIO_PCM_LOOP) ? 1u : 0u;
+    v->data = data;
+    audio->pcm_mask |= 1u << voice;
+    return voice;
+#else
+    (void)audio; (void)data; (void)length; (void)rate; (void)volume; (void)flags;
+    return UNIAUDIO_PCM_FAIL;
+#endif
 }
 
 static inline uint32_t uniaudio_command(Uniaudio *audio, uint8_t command, uint32_t a, uint32_t b)
@@ -325,6 +413,23 @@ static inline uint32_t uniaudio_command(Uniaudio *audio, uint8_t command, uint32
         if (a < UNIAUDIO_CHANNELS && audio->channels[a].active)
             return audio->channels[a].sfx;
         return UINT32_MAX;
+#if UNIAUDIO_PCM_VOICES > 0
+    case 8:     // pcmstop(voice)
+        if (a >= UNIAUDIO_PCM_VOICES)
+            return UINT32_MAX;
+        audio->pcm[a].data = NULL;
+        audio->pcm_mask &= ~(1u << a);
+        break;
+    case 9:     // pcmvolume(voice, volume)
+        if (a >= UNIAUDIO_PCM_VOICES || !audio->pcm[a].data)
+            return UINT32_MAX;
+        audio->pcm[a].volume = (uint8_t)(b > 255u ? 255u : b);
+        break;
+    case 10:    // pcmstatus(voice): 1 while playing, 0 when free
+        if (a >= UNIAUDIO_PCM_VOICES)
+            return UINT32_MAX;
+        return audio->pcm[a].data ? 1u : 0u;
+#endif
     default:
         return UINT32_MAX;
     }
@@ -464,6 +569,33 @@ static inline void uniaudio_render(Uniaudio *audio, int16_t *output, uint32_t sa
                 uniaudio_start_note(audio, channel);
             }
         }
+#if UNIAUDIO_PCM_VOICES > 0
+        if (audio->pcm_mask)
+            for (uint32_t v = 0; v < UNIAUDIO_PCM_VOICES; v++)
+            {
+                UniaudioPcm *pcm = &audio->pcm[v];
+                if (!pcm->data)
+                    continue;
+                mixed += ((int32_t)UNIAUDIO_READ_BYTE(pcm->data + pcm->index) - 128) * (int32_t)pcm->volume;
+                pcm->index += pcm->step_int;
+                pcm->frac += pcm->step_frac;
+                if (pcm->frac >= UNIAUDIO_SAMPLE_RATE)
+                {
+                    pcm->frac -= UNIAUDIO_SAMPLE_RATE;
+                    pcm->index++;
+                }
+                if (pcm->index >= pcm->length)
+                {
+                    if (pcm->loop)
+                        pcm->index %= pcm->length;
+                    else
+                    {
+                        pcm->data = NULL;
+                        audio->pcm_mask &= ~(1u << v);
+                    }
+                }
+            }
+#endif
         output[i] = uniaudio_clamp_sample(mixed);
         if (audio->music_playing && !uniaudio_any_channel(audio))
             uniaudio_advance_music(audio);

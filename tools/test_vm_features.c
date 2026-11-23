@@ -429,6 +429,171 @@ static void test_audio_engine(void)
     assert(audio.beep_active == 0);
 }
 
+static Uniaudio pcm_test_audio;
+
+static uint32_t pcm_test_callback(const uint8_t *data, uint32_t len, uint32_t rate, uint8_t volume, uint8_t flags)
+{
+    return uniaudio_pcm_play(&pcm_test_audio, data, len, rate, volume, flags);
+}
+
+static uint32_t pcm_test_command(uint8_t command, uint32_t a, uint32_t b)
+{
+    return uniaudio_command(&pcm_test_audio, command, a, b);
+}
+
+static void test_pcm_engine(void)
+{
+    static const uint8_t clip[4] = {138, 118, 148, 128};   // +10, -10, +20, 0
+    Uniaudio audio;
+    int16_t out[8];
+    uniaudio_init(&audio);
+
+    // a clip at the mixer rate plays one source sample per output sample, then frees its voice
+    assert(uniaudio_pcm_play(&audio, clip, 4, UNIAUDIO_SAMPLE_RATE, 255, 0) == 0);
+    assert(uniaudio_command(&audio, ULVM_AUDIO_PCM_STATUS, 0, 0) == 1);
+    uniaudio_render(&audio, out, 6);
+    assert(out[0] == 10 * 255 && out[1] == -10 * 255 && out[2] == 20 * 255 && out[3] == 0 && out[4] == 0 && out[5] == 0);
+    assert(uniaudio_command(&audio, ULVM_AUDIO_PCM_STATUS, 0, 0) == 0 && audio.pcm_mask == 0);
+
+    // half the mixer rate: every source sample lasts two output samples
+    assert(uniaudio_pcm_play(&audio, clip, 4, UNIAUDIO_SAMPLE_RATE / 2, 1, 0) == 0);
+    uniaudio_render(&audio, out, 8);
+    assert(out[0] == 10 && out[1] == 10 && out[2] == -10 && out[3] == -10 && out[4] == 20 && out[5] == 20 && out[6] == 0);
+    assert(audio.pcm_mask == 0);
+
+    // twice the mixer rate skips every other source sample
+    assert(uniaudio_pcm_play(&audio, clip, 4, UNIAUDIO_SAMPLE_RATE * 2, 1, 0) == 0);
+    uniaudio_render(&audio, out, 4);
+    assert(out[0] == 10 && out[1] == 20 && out[2] == 0 && audio.pcm_mask == 0);
+
+    // 1 Hz: the first source sample lasts exactly UNIAUDIO_SAMPLE_RATE output samples
+    assert(uniaudio_pcm_play(&audio, clip, 4, 1, 1, 0) == 0);
+    for (uint32_t i = 0; i < UNIAUDIO_SAMPLE_RATE - 1; i++)
+        uniaudio_render(&audio, out, 1);
+    assert(audio.pcm[0].index == 0);
+    uniaudio_render(&audio, out, 1);
+    assert(audio.pcm[0].index == 1 && out[0] == 10);
+    assert(uniaudio_command(&audio, ULVM_AUDIO_PCM_STOP, 0, 0) == 0 && audio.pcm_mask == 0);
+
+    // an odd rate stays exact: 3 clip samples per 2 output samples at 33075 Hz
+    assert(uniaudio_pcm_play(&audio, clip, 4, UNIAUDIO_SAMPLE_RATE * 3 / 2, 1, UNIAUDIO_PCM_LOOP) == 0);
+    uniaudio_render(&audio, out, 4);
+    assert(out[0] == 10 && out[1] == -10 && out[2] == 0 && out[3] == 10);
+    uniaudio_command(&audio, ULVM_AUDIO_PCM_STOP, 0, 0);
+
+    // loops wrap, even when one output sample consumes more than the whole clip
+    assert(uniaudio_pcm_play(&audio, clip, 4, UNIAUDIO_SAMPLE_RATE, 1, UNIAUDIO_PCM_LOOP) == 0);
+    uniaudio_render(&audio, out, 6);
+    assert(out[0] == 10 && out[3] == 0 && out[4] == 10 && out[5] == -10 && audio.pcm_mask == 1);
+    uniaudio_command(&audio, ULVM_AUDIO_PCM_STOP, 0, 0);
+    assert(uniaudio_pcm_play(&audio, clip, 2, UNIAUDIO_SAMPLE_RATE * 5, 1, UNIAUDIO_PCM_LOOP) == 0);
+    uniaudio_render(&audio, out, 3);
+    assert(out[0] == 10 && out[1] == -10 && out[2] == 10 && audio.pcm[0].index < 2);
+    uniaudio_command(&audio, ULVM_AUDIO_PCM_STOP, 0, 0);
+
+    // volume, mixing and clamping
+    uniaudio_pcm_play(&audio, clip, 4, UNIAUDIO_SAMPLE_RATE, 128, 0);
+    assert(uniaudio_command(&audio, ULVM_AUDIO_PCM_VOLUME, 0, 64) == 0);
+    uniaudio_pcm_play(&audio, clip, 4, UNIAUDIO_SAMPLE_RATE, 1, 0);
+    uniaudio_render(&audio, out, 1);
+    assert(out[0] == 10 * 64 + 10);
+    static const uint8_t loud[1] = {255};
+    for (int i = 0; i < 4; i++)
+        uniaudio_pcm_play(&audio, loud, 1, UNIAUDIO_SAMPLE_RATE, 255, UNIAUDIO_PCM_LOOP);
+    uniaudio_render(&audio, out, 1);
+    assert(out[0] == 32767);
+    uniaudio_command(&audio, 3, 0, 0);   // audiostop frees every PCM voice
+    assert(audio.pcm_mask == 0);
+    assert(uniaudio_command(&audio, ULVM_AUDIO_PCM_VOLUME, 0, 10) == UINT32_MAX);   // a free voice has no volume
+
+    // pause holds voices where they are
+    uniaudio_pcm_play(&audio, clip, 4, UNIAUDIO_SAMPLE_RATE, 1, 0);
+    assert(uniaudio_command(&audio, 4, 0, 0) == 0);
+    uniaudio_render(&audio, out, 3);
+    assert(out[0] == 0 && audio.pcm[0].index == 0);
+    assert(uniaudio_command(&audio, 5, 0, 0) == 0);
+    uniaudio_render(&audio, out, 1);
+    assert(out[0] == 10 && audio.pcm[0].index == 1);
+    uniaudio_command(&audio, 3, 0, 0);
+
+    // invalid clips and voices
+    assert(uniaudio_pcm_play(&audio, NULL, 4, 22050, 1, 0) == UNIAUDIO_PCM_FAIL);
+    assert(uniaudio_pcm_play(&audio, clip, 0, 22050, 1, 0) == UNIAUDIO_PCM_FAIL);
+    assert(uniaudio_pcm_play(&audio, clip, 4, 0, 1, 0) == UNIAUDIO_PCM_FAIL);
+    assert(uniaudio_pcm_play(&audio, clip, 4, UNIAUDIO_SAMPLE_RATE * UNIAUDIO_PCM_MAX_STEP + 1, 1, 0) == UNIAUDIO_PCM_FAIL);
+    assert(uniaudio_pcm_play(&audio, clip, UNIAUDIO_PCM_MAX_LENGTH + 1, 22050, 1, 0) == UNIAUDIO_PCM_FAIL);
+    assert(uniaudio_pcm_play(&audio, clip, 4, UNIAUDIO_SAMPLE_RATE * UNIAUDIO_PCM_MAX_STEP, 1, 0) == 0);
+    uniaudio_render(&audio, out, 1);   // the fastest rate must not read past the clip
+    assert(audio.pcm_mask == 0);
+    assert(uniaudio_command(&audio, ULVM_AUDIO_PCM_STATUS, UNIAUDIO_PCM_VOICES, 0) == UINT32_MAX);
+    assert(uniaudio_command(&audio, ULVM_AUDIO_PCM_STOP, 200, 0) == UINT32_MAX);
+
+    // all voices busy: the one closest to finishing is replaced; looping voices never finish
+    uniaudio_command(&audio, 3, 0, 0);
+    static uint8_t long_clip[100];
+    memset(long_clip, 128, sizeof(long_clip));
+    for (uint32_t i = 0; i < UNIAUDIO_PCM_VOICES; i++)
+        assert(uniaudio_pcm_play(&audio, long_clip, 50 + i, 22050, 1, i == 5 ? 0 : UNIAUDIO_PCM_LOOP) == i);
+    assert(uniaudio_pcm_play(&audio, long_clip, 10, 22050, 1, UNIAUDIO_PCM_LOOP) == 5);   // the only voice that ends
+    assert(uniaudio_pcm_play(&audio, long_clip, 10, 22050, 1, UNIAUDIO_PCM_LOOP) == 0);   // all loop: the first one goes
+    assert(audio.pcm_mask == (1u << UNIAUDIO_PCM_VOICES) - 1u);
+}
+
+static void test_pcm_opcode(void)
+{
+    uint8_t program[] = {
+        0x40, 0, 0, 0, 0, 38,        /* setreg r0, 38 (clip address) */
+        0x40, 1, 0, 0, 0, 4,         /* setreg r1, 4 (length) */
+        0x40, 2, 0, 0, 0x56, 0x22,   /* setreg r2, 22050 (rate) */
+        0x40, 3, 0, 0, 0, 255,       /* setreg r3, 255 (volume) */
+        0x40, 4, 0, 0, 0, 1,         /* setreg r4, 1 (loop) */
+        0x81, 0, 1, 2, 3, 4, 5,      /* pcm_play r0..r4 -> r5 */
+        0xFF,                        /* exit */
+        138, 118, 148, 128           /* clip at 38 */
+    };
+    UnilangVM vm;
+    for (int pass = 0; pass < 4; pass++)
+    {
+        uniaudio_init(&pcm_test_audio);
+        ULVM_init(&vm, output_char, read_byte);
+        vm.rom = program;
+        vm.rom_size = sizeof(program);
+        ULVM_set_pcm(&vm, pass == 3 ? NULL : pcm_test_callback);
+        uint8_t mode = pass == 1 ? 2 : 3;
+        vm.flags[1] = (uint8_t)((vm.flags[1] & 0x0F) | (mode << 4));
+        program[5] = pass == 2 ? 39 : 38;   // pass 2 runs past the end of the ROM
+        while (vm.running)
+            ULVM_run(&vm, 16);
+        assert(!vm.faulted);
+        if (pass == 0)
+        {
+            assert(vm.reg[5] == 0 && pcm_test_audio.pcm_mask == 1);
+            assert(pcm_test_audio.pcm[0].data == program + 38 && pcm_test_audio.pcm[0].length == 4);
+            assert(pcm_test_audio.pcm[0].volume == 255 && pcm_test_audio.pcm[0].loop == 1);
+            assert(pcm_test_audio.pcm[0].step_int == 1 && pcm_test_audio.pcm[0].step_frac == 0);
+        }
+        else
+            assert(vm.reg[5] == 255 && pcm_test_audio.pcm_mask == 0);   // wrong mode, out of ROM, or no host support
+    }
+
+    // pcmstop/pcmvolume/pcmstatus (audio commands 8 to 10) only work in mode 3
+    uint8_t status[] = {0x40, 0, 0, 0, 0, 0, 0x2B, 10, 0, 1, 2, 0xFF};
+    for (int pass = 0; pass < 3; pass++)
+    {
+        ULVM_init(&vm, output_char, read_byte);
+        vm.rom = status;
+        vm.rom_size = sizeof(status);
+        ULVM_set_audio(&vm, NULL, pcm_test_command, NULL);
+        uint8_t mode = pass == 0 ? 3 : 2;
+        vm.flags[1] = (uint8_t)((vm.flags[1] & 0x0F) | (mode << 4));
+        status[7] = pass == 2 ? 6 : 10;   // pass 2 is the tracker's audiovolume, which works in mode 2
+        while (vm.running)
+            ULVM_run(&vm, 16);
+        assert(!vm.faulted);
+        assert(vm.reg[2] == (pass == 1 ? UINT32_MAX : 0));
+    }
+}
+
 static void test_music_markers(void)
 {
     Uniaudio audio;
@@ -653,6 +818,8 @@ int main(void)
     test_indirect_control_flow();
     test_value_stack();
     test_audio_engine();
+    test_pcm_engine();
+    test_pcm_opcode();
     test_music_markers();
     test_network_api();
     test_network_vm_opcodes();

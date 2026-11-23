@@ -361,6 +361,16 @@ static uint32_t my_audio_command(uint8_t command, uint32_t a, uint32_t b)
     return result;
 }
 
+static uint32_t my_pcm_play(const uint8_t *data, uint32_t len, uint32_t rate, uint8_t volume, uint8_t flags)
+{
+    if (!audio_device)
+        return UINT32_MAX;
+    SDL_LockAudioDevice(audio_device);
+    uint32_t voice = uniaudio_pcm_play(&audio_engine, data, len, rate, volume, flags);
+    SDL_UnlockAudioDevice(audio_device);
+    return voice;
+}
+
 static int my_audio_load(uint8_t kind, uint8_t index, const uint8_t *data, uint32_t len)
 {
     if (!audio_device)
@@ -490,7 +500,7 @@ static int my_isflagsupported(uint8_t flag, uint8_t val)
     }
     else if (flag == 2)
     {
-        supported = audio_device && (val == 1 || val == 2);
+        supported = audio_device && (val >= 1 && val <= 3);
     }
 
     DEBUG_PRINT("[debug] isflagsupported(%u, %u) -> %s\n",
@@ -717,6 +727,7 @@ int main(int argc, char **argv)
     ULVM_set_palette(&vm, my_setpalette);
     ULVM_set_storage(&vm, my_save, my_load);
     ULVM_set_audio(&vm, my_beep, my_audio_command, my_audio_load);
+    ULVM_set_pcm(&vm, my_pcm_play);
 
     // Run in batches and handle window events between them: far cheaper than
     // polling SDL after every single instruction.

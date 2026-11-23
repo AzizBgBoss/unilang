@@ -115,6 +115,7 @@ OPS = {
     "drawline":        (0x25, [1, 1, 1, 1, 1]),       # regx0, regy0, regx1, regy1, regc
     "blit":            (0x26, [4]),                   # desc_addr (11 words in RAM, see ulvm_blit)
     "tilemap":         (0x80, [4]),                   # desc_addr (12 words in RAM, see ulvm_tilemap)
+    "pcm_play":        (0x81, [1, 1, 1, 1, 1, 1]),    # regaddr (ROM), reglen, regrate, regvolume, regflags, regresult
     "setpalette":      (0x27, [1, 1]),                # regindex, regcolor (RGB555), palette graphics modes only
     "save":            (0x28, [1, 1, 1]),              # regaddr, reglen, regresult
     "load":            (0x29, [1, 1, 1]),              # regaddr, reglen, regresult
@@ -438,7 +439,7 @@ class Compiler:
             "BLIT_TRANSPARENT": 16, "BLIT_RAM": 32, "BLIT_1BPP": 64, "BLIT_2BPP": 128,
             "TILEMAP_MAP_RAM": 256,
             "FLAG_GRAPHICS": 0, "FLAG_KEYBOARD": 1, "FLAG_AUDIO": 2, "FLAG_NETWORK": 15,
-            "AUDIO_OFF": 0, "AUDIO_BEEP": 1, "AUDIO_ENGINE": 2,
+            "AUDIO_OFF": 0, "AUDIO_BEEP": 1, "AUDIO_ENGINE": 2, "AUDIO_PCM": 3, "PCM_LOOP": 1,
             "GFX_OFF": 0,
             "GFX_MONO_64X64": 1, "GFX_GRAY_64X64": 2, "GFX_PAL2_64X64": 3,
             "GFX_RGB332_64X64": 4, "GFX_PAL8_64X64": 5,
@@ -2540,6 +2541,10 @@ class Compiler:
                 return self.gen_storage(node, name)
             if name == "audiostatus":
                 return self.gen_audio_command(node, 7)
+            if name == "pcmstatus":
+                return self.gen_audio_command(node, 10)
+            if name == "pcmplay":
+                return self.gen_pcmplay(node)
             if name == "audioload":
                 return self.gen_audio_load(node)
             if name == "__mem_load":
@@ -2562,7 +2567,7 @@ class Compiler:
                 if not isinstance(args[1], c_ast.Constant):
                     raise NotImplementedError("__mem_ptr() size must be a compile-time constant")
                 return self.gen_expr(args[0])
-            if name in ("flag", "setpixel", "exit", "srand", "drawchar", "drawstring", "fillrect", "fillscreen", "fillcircle", "drawrect", "drawline", "blit", "tilemap", "setpalette", "beep", "sfx", "music", "audiostop", "audiopause", "audioresume", "audiovolume", "push"):
+            if name in ("flag", "setpixel", "exit", "srand", "drawchar", "drawstring", "fillrect", "fillscreen", "fillcircle", "drawrect", "drawline", "blit", "tilemap", "setpalette", "beep", "sfx", "music", "audiostop", "audiopause", "audioresume", "audiovolume", "pcmstop", "pcmvolume", "push"):
                 raise NotImplementedError(f"'{name}' does not return a value")
             return self.gen_call(node)
 
@@ -3130,9 +3135,10 @@ class Compiler:
 
     def gen_audio_command(self, call, command):
         args = call.args.exprs if call.args else []
-        required = 1 if command in (2, 6, 7) else 2 if command == 1 else 0
+        required = 1 if command in (2, 6, 7, 8, 10) else 2 if command in (1, 9) else 0
         if len(args) != required:
-            labels = {1: "sfx(id, channel)", 2: "music(pattern)", 6: "audiovolume(volume)", 7: "audiostatus(channel)"}
+            labels = {1: "sfx(id, channel)", 2: "music(pattern)", 6: "audiovolume(volume)", 7: "audiostatus(channel)",
+                      8: "pcmstop(voice)", 9: "pcmvolume(voice, volume)", 10: "pcmstatus(voice)"}
             label = labels.get(command, "audio command")
             raise NotImplementedError(f"{label} takes exactly {required} argument(s)")
         regs = [RA, RB]
@@ -3142,10 +3148,26 @@ class Compiler:
         if len(args) < 2:
             self.emit_set_const(RB, 0)
         self.emit("audio_command", command, RA, RB, RC)
-        if command != 7:
+        if command not in (7, 10):
             return None
         result = self.alloc_temp(INT_SIZE)
         self.emit_store(RC, result, INT_SIZE)
+        return result
+
+    def gen_pcmplay(self, call):
+        # pcmplay(data, size, rate, volume, flags): data is a const (ROM) u8 PCM array, rate is any
+        # integer in Hz. Returns the voice number (0-7), or 255 when it could not be played.
+        args = call.args.exprs if call.args else []
+        if len(args) != 5:
+            raise NotImplementedError("pcmplay(data, size, rate, volume, flags) takes exactly 5 arguments")
+        if not self.expr_is_rom(args[0]):
+            raise NotImplementedError("pcmplay() data must be a const (ROM) array")
+        addrs = [self.gen_expr(arg) for arg in args]
+        for reg, addr in zip((RA, RB, RC, 9, 10), addrs):
+            self.emit_load(addr, self.addr_size(addr), reg)
+        self.emit("pcm_play", RA, RB, RC, 9, 10, 11)
+        result = self.alloc_temp(1)
+        self.emit_store(11, result, 1)
         return result
 
     def gen_audio_load(self, call):
@@ -4109,6 +4131,10 @@ class Compiler:
                 self.gen_audio_command(node, 5)
             elif name == "audiovolume":
                 self.gen_audio_command(node, 6)
+            elif name == "pcmstop":
+                self.gen_audio_command(node, 8)
+            elif name == "pcmvolume":
+                self.gen_audio_command(node, 9)
             elif name == "sleep":
                 args = node.args.exprs if node.args else []
                 if len(args) != 1 or self.try_const(args[0]) is None:

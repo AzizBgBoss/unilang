@@ -138,6 +138,7 @@ the remote endpoint.
 | `28` | `save` | `addr:reg, length:reg, result:reg` | Host-save a validated RAM block; result is 1 on success. |
 | `29` | `load` | `addr:reg, length:reg, result:reg` | Host-load a validated RAM block; result is 1 on success. |
 | `2A` | `beep` | `frequency:reg, duration_ms:reg` | Start host tone. |
+| `81` | `pcm_play` | `addr:reg, len:reg, rate:reg, volume:reg, flags:reg, result:reg` | Play a u8 PCM clip from ROM (audio mode 3); flag bit 0 loops it. Result is the voice number or 255. |
 | `2B` | `audio_command` | `command:u8, a:reg, b:reg, result:reg` | Send audio command to host and store result. |
 | `2C` | `audio_load` | `kind:reg, index:reg, addr:reg, length:reg, source:u8, result:reg` | Copy sound records from RAM (`0`) or ROM (`1`) into host. |
 | `2D` | `memcpy` | `dst:reg, src:reg, length:reg, source:u8` | Copy RAM (`0`) or ROM (`1`) bytes to validated RAM destination. RAM overlap uses memmove semantics. |
@@ -177,7 +178,13 @@ Division by zero leaves `dst` unchanged. `INT64_MIN / -1` produces
 `INT64_MIN`; its remainder is zero.
 
 `audio_command` command IDs are 1 `sfx`, 2 `music`, 3 `stop`, 4 `pause`,
-5 `resume`, 6 `volume`, and 7 `status`. Audio callback details and SFX/music
+5 `resume`, 6 `volume`, and 7 `status`. Commands 8 `pcmstop`, 9 `pcmvolume`
+and 10 `pcmstatus` only reach the host when audio mode (flag 2) is 3; in other
+modes the result is `0xFFFFFFFF`. `pcm_play` (opcode `81`) starts a PCM clip:
+it reads ROM address, length, rate, volume and flags from five registers and
+writes the voice number, or 255 on failure, to the sixth. It fails unless the
+audio mode is 3, the host registered a PCM callback and has a flat ROM, and
+the clip lies inside the ROM. Audio callback details and SFX/music
 record sizes are in [host integration](../vm/host-integration.md) and
 [builtins](../c-language/builtins.md).
 

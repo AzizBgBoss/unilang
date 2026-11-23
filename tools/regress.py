@@ -24,6 +24,7 @@ EXAMPLES = [
     ("network_pong_host", ROOT / "examples" / "network" / "pong_multiplayer.c"),
     ("network_pong_join", ROOT / "examples" / "network" / "pong_multiplayer.c"),
     ("audio", ROOT / "examples" / "audio" / "audio.c"),
+    ("pcm", ROOT / "examples" / "audio" / "pcm.c"),
     ("save_counter", ROOT / "examples" / "save_counter" / "save_counter.c"),
     ("offscreen", ROOT / "examples" / "offscreen" / "offscreen.c"),
     ("test", ROOT / "examples" / "test" / "test.c"),
@@ -116,6 +117,8 @@ def main() -> int:
             args = [str(headless), str(bytecode), "-frames", "1", "-instr", "20000000", "-quiet"]
             if name == "uint64_core":
                 args.extend(["-time-start", "5000000000"])
+            elif name == "pcm":
+                args.extend(["-wav", str(output_dir / "pcm.wav")])   # the host only runs the mixer when it captures audio
             run = subprocess.run(args,
                                  cwd=ROOT, capture_output=True, text=True, timeout=30)
             diagnostic = run.stdout + run.stderr

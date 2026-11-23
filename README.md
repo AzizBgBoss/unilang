@@ -185,6 +185,7 @@ raw bytes.
 | 0x6D-0x6F | `sdivreg`/`smodreg`/`sshrreg` | r1, r2, dst | signed division/remainder and arithmetic right shift |
 | 0x70 | `outregsigned` | reg | print signed 32-bit register value |
 | 0x80 | `tilemap` | desc_addr | draw the visible tiles of a ROM/RAM map described by 12 RAM words |
+| 0x81 | `pcm_play` | regaddr, reglen, regrate, regvolume, regflags, regresult | play a u8 PCM clip from ROM (audio mode 3); result is the voice or 255 |
 | 0xFF | `exit` | — | halt; `r0` becomes the VM's exit code |
 
 `floatop` formats are `7` for IEEE-754 binary32 and `8` for binary64. Its
@@ -401,6 +402,11 @@ live across statements.
   - `audiostop();`, `audiopause();`, `audioresume();` — stop all sounds, pause
     synthesis, or resume it.
   - `audiovolume(0..255);` — set the master volume.
+  - `pcmplay(data, size, rate, volume, flags)` — with `flag(2, 3)`, play a u8
+    PCM clip from a `const` ROM array at any integer `rate` in Hz; returns a
+    voice `0..7`, or `255` on failure. `flags` is `0` or `PCM_LOOP`. Clips
+    that do not loop free their voice when they end. `pcmstop(voice)`,
+    `pcmvolume(voice, volume)` and `pcmstatus(voice)` control the voice.
   - `audiostatus(channel)` — return the playing SFX slot on channel `0..3`,
     `-1` for the current music pattern, or `0xFFFFFFFF` when nothing is
     playing.
@@ -567,6 +573,7 @@ ULVM_set_flagsupport(&vm, my_isflagsupported);
 ULVM_set_palette(&vm, my_setpalette);   // optional, only for the palette modes
 ULVM_set_storage(&vm, my_save, my_load); // optional save/load handlers
 ULVM_set_audio(&vm, my_beep, my_audio_command, my_audio_load); // optional audio
+ULVM_set_pcm(&vm, my_pcm_play);          // optional, audio mode 3 (PCM clips from ROM)
 
 while (!ULVM_handlenextinstruction(&vm)) { /* runs until OP_EXIT */ }
 ```

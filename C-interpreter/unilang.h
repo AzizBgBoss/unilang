@@ -216,6 +216,7 @@ enum OP_CODES
     OP_AUDIO_COMMAND,    // send a host audio command - parameters: command(1), rega(1), regb(1), regresult(1)
     OP_AUDIO_LOAD,       // copy audio data to the host - parameters: regkind(1), regindex(1), regaddr(1), reglen(1), source(1), regresult(1)
     OP_TILEMAP = 0x80,   // draw a scrolling tilemap from a ROM/RAM map and tile sheet; 12 parameter words live in RAM at desc_addr (see ulvm_tilemap) - parameters: desc_addr(4)
+    OP_PCM_PLAY,         // start a PCM clip from ROM in audio mode 3; result is the voice or 255 - parameters: regaddr(1), reglen(1), regrate(1), regvolume(1), regflags(1), regresult(1)
     OP_NET_OPEN = 0x90,  // open a host network handle - parameters: regkind(1), reglocal(1), regremote(1), reghostaddr(1), regflags(1), regresult(1)
     OP_NET_STATUS,       // query a handle state - parameters: reghandle(1), regresult(1)
     OP_NET_SEND,         // send memory bytes through a handle - parameters: reghandle(1), regaddr(1), reglen(1), regresult(1)
@@ -354,6 +355,9 @@ typedef int      (*vm_storage)(uint8_t *data, uint32_t len);
 typedef void     (*vm_beep)(uint32_t frequency, uint32_t duration_ms);
 typedef uint32_t (*vm_audio_command)(uint8_t command, uint32_t a, uint32_t b);
 typedef int      (*vm_audio_load)(uint8_t kind, uint8_t index, const uint8_t *data, uint32_t len);
+// Start a PCM clip (u8 samples, 128 = silence) read in place from ROM, which stays valid while it plays.
+// Returns the voice number, or UINT32_MAX when it cannot be played.
+typedef uint32_t (*vm_pcm_play)(const uint8_t *data, uint32_t len, uint32_t rate, uint8_t volume, uint8_t flags);
 
 #define ULVM_NET_MAX_HANDLES 8u
 #define ULVM_NET_MAX_BUFFER 2048u
@@ -496,7 +500,10 @@ enum ULVM_AUDIO_COMMANDS
     ULVM_AUDIO_PAUSE,
     ULVM_AUDIO_RESUME,
     ULVM_AUDIO_VOLUME,
-    ULVM_AUDIO_STATUS
+    ULVM_AUDIO_STATUS,
+    ULVM_AUDIO_PCM_STOP,      // audio mode 3 only
+    ULVM_AUDIO_PCM_VOLUME,
+    ULVM_AUDIO_PCM_STATUS
 };
 
 enum ULVM_AUDIO_DATA_KINDS
@@ -561,6 +568,7 @@ struct UnilangVM
     vm_beep beep;
     vm_audio_command audio_command;
     vm_audio_load audio_load;
+    vm_pcm_play pcm_play;
     ULVMNet *net;
 
     uint32_t rand_state;
@@ -629,6 +637,12 @@ static inline void ULVM_set_audio(UnilangVM *vm, vm_beep beep,
     vm->beep = beep;
     vm->audio_command = audio_command;
     vm->audio_load = audio_load;
+}
+
+// Optional: PCM playback for audio mode 3. Needs a flat ROM (ULVM_set_rom); without one pcmplay() fails.
+static inline void ULVM_set_pcm(UnilangVM *vm, vm_pcm_play pcm_play)
+{
+    vm->pcm_play = pcm_play;
 }
 
 static inline void ULVM_set_keyboard(UnilangVM *vm, vm_getkeyboard getkeyboard)
@@ -2091,6 +2105,7 @@ static inline void ulvm_tilemap(UnilangVM *vm, uint32_t d)
     [OP_ANDREGV] = &&ulvm_l_OP_ANDREGV, \
     [OP_BLIT] = &&ulvm_l_OP_BLIT, \
     [OP_TILEMAP] = &&ulvm_l_OP_TILEMAP, \
+    [OP_PCM_PLAY] = &&ulvm_l_OP_PCM_PLAY, \
     [OP_SETPALETTE] = &&ulvm_l_OP_SETPALETTE, \
     [OP_SAVE] = &&ulvm_l_OP_SAVE, \
     [OP_LOAD] = &&ulvm_l_OP_LOAD, \
@@ -3532,7 +3547,7 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
         uint8_t rfreq = (uint8_t)ULVM_NEXTBYTE();
         uint8_t rms = (uint8_t)ULVM_NEXTBYTE();
         uint8_t mode = ulvm_getflag(vm, 2);
-        if ((mode == 1 || mode == 2) && vm->beep)
+        if (mode >= 1 && mode <= 3 && vm->beep)
             vm->beep(ULVM_R(rfreq), ULVM_R(rms));
         ULVM_NEXT();
     }
@@ -3543,8 +3558,28 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
         uint8_t ra = (uint8_t)ULVM_NEXTBYTE();
         uint8_t rb = (uint8_t)ULVM_NEXTBYTE();
         uint8_t rresult = (uint8_t)ULVM_NEXTBYTE();
-        ULVM_R(rresult) = ulvm_getflag(vm, 2) == 2 && vm->audio_command
+        uint8_t mode = ulvm_getflag(vm, 2);
+        ULVM_R(rresult) = mode >= 2 && (command < ULVM_AUDIO_PCM_STOP || mode == 3) && vm->audio_command
             ? vm->audio_command(command, ULVM_R(ra), ULVM_R(rb)) : UINT32_MAX;
+        ULVM_NEXT();
+    }
+
+    ULVM_CASE(OP_PCM_PLAY)
+    {
+        uint8_t raddr = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rlen = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rrate = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rvolume = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rflags = (uint8_t)ULVM_NEXTBYTE();
+        uint8_t rresult = (uint8_t)ULVM_NEXTBYTE();
+        uint32_t addr = ULVM_R(raddr), len = ULVM_R(rlen);
+        uint32_t volume = ULVM_R(rvolume);
+        uint32_t voice = UINT32_MAX;
+        if (ulvm_getflag(vm, 2) == 3 && vm->pcm_play && vm->rom &&
+            len && addr < vm->rom_size && len <= vm->rom_size - addr)
+            voice = vm->pcm_play(vm->rom + addr, len, ULVM_R(rrate),
+                                 (uint8_t)(volume > 255u ? 255u : volume), (uint8_t)ULVM_R(rflags));
+        ULVM_R(rresult) = voice > 255u ? 255u : voice;
         ULVM_NEXT();
     }
 
@@ -3568,7 +3603,7 @@ static inline int ULVM_run(UnilangVM *vm, uint32_t budget)
             item_size = ULVM_AUDIO_MUSIC_BYTES;
         if (item_size && len && len % item_size == 0)
             item_count = len / item_size;
-        int ok = ulvm_getflag(vm, 2) == 2 && vm->audio_load &&
+        int ok = ulvm_getflag(vm, 2) >= 2 && vm->audio_load &&
             ULVM_R32(rkind) <= UINT8_MAX && ULVM_R32(rindex) <= UINT8_MAX &&
             ULVM_R32(rindex) < 64u && item_count && item_count <= 64u - ULVM_R32(rindex) &&
             item_size <= sizeof(data) && source <= 1 && address_ok && rom_ok &&

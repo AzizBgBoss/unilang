@@ -340,7 +340,8 @@ separate return and value stacks.
 
 ## Audio functions
 
-Use `flag(2, 1)` for tones only or `flag(2, 2)` for the SFX/music engine.
+Use `flag(2, 1)` for tones only, `flag(2, 2)` for the SFX/music engine, or
+`flag(2, 3)` (`AUDIO_PCM`) for the engine plus PCM clips.
 
 - `beep(frequency_hz, duration_ms)` — start a square-wave tone.
 - `audioload(kind, index, data, length)` — load record-aligned sound data into
@@ -355,6 +356,50 @@ Use `flag(2, 1)` for tones only or `flag(2, 2)` for the SFX/music engine.
 - `audiovolume(0..255)` — set master volume.
 - `audiostatus(channel)` — return the SFX playing on channel `0..3`, the
   current music pattern for `-1`, or `0xFFFFFFFF` if idle.
+
+### PCM clips
+
+In mode 3 the host can also play raw 8-bit PCM straight from the program ROM.
+Samples are unsigned bytes where 128 is silence. The VM keeps no copy of the
+clip, so nothing is allocated in RAM.
+
+- `pcmplay(data, size, rate, volume, flags)` — start a clip and return its
+  voice number `0..7`, or `255` if it could not be played. `data` must be a
+  `const` array (the compiler rejects RAM arrays), `size` is its length in
+  bytes, `rate` is the clip's sample rate in Hz, `volume` is `0..255` and
+  `flags` is `0` or `PCM_LOOP`.
+- `pcmstop(voice)` — stop one voice.
+- `pcmvolume(voice, volume)` — change the volume of a playing voice.
+- `pcmstatus(voice)` — `1` while the voice plays, `0` when it is free, or
+  `0xFFFFFFFF` for an invalid voice.
+
+`rate` can be any integer from 1 to 1,445,046,750, so unusual clip rates
+(4000, 11025, 16000, 44100...) need no conversion. The mixer runs at 22050 Hz
+and steps through the clip at exactly `rate` samples per second without
+interpolation, so very low rates sound steppy and rates above 22050 skip
+samples without filtering.
+
+A clip without `PCM_LOOP` frees its voice by itself when it ends. A looping
+clip plays until `pcmstop`, `audiostop()` or a replacement. If all voices are
+busy, `pcmplay` replaces the voice closest to finishing (looping voices never
+finish), so a new sound is never refused for lack of a voice. `audiostop()`
+stops every voice and `audiopause()` holds them in place. Voice volumes are
+independent of `audiovolume`, and all voices are summed and clamped, so several
+loud clips at once can clip.
+
+`pcmplay` returns `255` and the other three functions return `0xFFFFFFFF`
+outside mode 3, when the host has no PCM support, or when the host cannot read
+the ROM in place. Invalid arguments (a zero `size` or `rate`, a clip past the
+end of the ROM) also return `255`.
+
+```c
+const uint8_t blip[] = { /* u8 samples */ };
+
+flag(FLAG_AUDIO, AUDIO_PCM);
+uint8_t voice = pcmplay(blip, sizeof(blip), 8000, 255, 0);
+if (voice != 255 && pcmstatus(voice) == 1)
+    pcmvolume(voice, 128);
+```
 
 The binary format is PICO-8-compatible for SFX and music records. Each SFX
 record contains filter, speed, loop start/end, and 32 little-endian 16-bit

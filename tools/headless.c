@@ -190,7 +190,7 @@ static uint64_t get_time(void) { time_calls++; headless_net_context.now_ms++; re
 static void do_sleep(uint32_t ms) { headless_net_context.now_ms += ms; advance_audio_ms(ms); }
 static int flag_ok(uint8_t f, uint8_t v)
 {
-    return f == 0 ? (v >= 1 && v <= 12) : f == 1 ? v == 1 : f == 2 ? (v == 1 || v == 2) : 0;
+    return f == 0 ? (v >= 1 && v <= 12) : f == 1 ? v == 1 : f == 2 ? (v >= 1 && v <= 3) : 0;
 }
 
 static int save_block(uint8_t *data, uint32_t len)
@@ -219,6 +219,11 @@ static void headless_beep(uint32_t frequency, uint32_t duration_ms)
 static uint32_t headless_audio_command(uint8_t command, uint32_t a, uint32_t b)
 {
     return uniaudio_command(&audio_engine, command, a, b);
+}
+
+static uint32_t headless_pcm_play(const uint8_t *data, uint32_t len, uint32_t rate, uint8_t volume, uint8_t flags)
+{
+    return uniaudio_pcm_play(&audio_engine, data, len, rate, volume, flags);
 }
 
 static int headless_audio_load(uint8_t kind, uint8_t index, const uint8_t *data, uint32_t len)
@@ -321,6 +326,7 @@ int main(int argc, char **argv)
     ULVM_set_palette(&vm, set_palette);
     ULVM_set_storage(&vm, save_block, load_block);
     ULVM_set_audio(&vm, headless_beep, headless_audio_command, headless_audio_load);
+    ULVM_set_pcm(&vm, headless_pcm_play);
 
     if (count_instr) vm.instruction_hits = calloc((size_t)romsize + 1, sizeof(uint32_t));
     uint64_t executed = 0;
