@@ -351,7 +351,16 @@ Use `flag(2, 1)` for tones only, `flag(2, 2)` for the SFX/music engine, or
   `index`. Returns 1 on success.
 - `sfx(id, channel)` — play an SFX on channel `0..3`; channel `-1` selects a
   free channel and replaces channel 0 if all four channels are busy.
-- `music(pattern)` — play a music pattern; `music(-1)` stops music.
+- `music(pattern[, fade_ms[, channel_mask]])` — play a music pattern;
+  `music(-1[, fade_ms])` stops music. `fade_ms` fades the music in (or out, when
+  stopping) over that many milliseconds. `channel_mask` is a 4-bit mask of the
+  channels music may use (`1` = channel 0, `7` = channels 0 to 2); the other
+  channels stay free for `sfx()`. `0` or omitted means all four channels. Both
+  extra arguments must be compile-time constants. A song follows the PICO-8
+  pattern flags: loop start (bit 7 of byte 0), loop back (bit 7 of byte 1, jumps
+  to the nearest loop-start pattern at or before it, else pattern 0), stop (bit 7
+  of byte 2) and channel off (bit 6 of any byte). A pattern lasts until its first
+  non-looping channel ends, and when a song stops, its other channels are cut.
 - `audiostop()`, `audiopause()`, `audioresume()` — stop, pause, or resume.
 - `audiovolume(0..255)` — set master volume.
 - `audiostatus(channel)` — return the SFX playing on channel `0..3`, the
@@ -404,8 +413,14 @@ if (voice != 255 && pcmstatus(voice) == 1)
 The binary format is PICO-8-compatible for SFX and music records. Each SFX
 record contains filter, speed, loop start/end, and 32 little-endian 16-bit
 notes. The VM passes records to the host; it does not retain the audio bank in
-RAM. The current synth approximates custom waveforms with triangle waves and
-ignores SFX filter data. See the [audio example](../../examples/audio/audio.c)
+RAM. The current synth approximates custom waveforms with triangle waves.
+The SFX filters are approximations of PICO-8's: byte 64 bit 1 is noiz, bit 2
+buzz, bits 3-4 detune (a second oscillator slightly sharp), bits 5-6 reverb (an
+echo after 2 or 4 ticks), and bit 7 of the loop bytes 66 and 67 is dampen (a low
+pass). Reverb uses about 1.5 KB of RAM per channel; compile it out with
+`#define UNIAUDIO_REVERB 0` on small hosts. Slide glides from the previous note,
+vibrato is a slow pitch wobble, and the arpeggios step through the 4-note group.
+See the [audio example](../../examples/audio/audio.c)
 and [audio guide](../../examples/audio/README.md).
 
 ## Text output

@@ -108,6 +108,11 @@ record at a time; a bank-loading opcode is expanded by the VM into per-record
 callbacks. SFX records are 68 bytes and music patterns are 4 bytes. `beep`
 is separate from the SFX/music commands.
 
+For command 2 (music), `a` is the pattern number, or `0xFFFFFFFF` to stop
+music, and `b` is `channel_mask | (fade_ms << 4)`. A `b` of zero means no fade
+and all four channels, so hosts that ignore `b` still play the music normally.
+The bundled `uniaudio.h` engine implements the fade and the channel mask.
+
 PCM playback (audio mode 3) needs one more callback, registered with
 `ULVM_set_pcm`:
 

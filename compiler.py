@@ -3136,17 +3136,27 @@ class Compiler:
     def gen_audio_command(self, call, command):
         args = call.args.exprs if call.args else []
         required = 1 if command in (2, 6, 7, 8, 10) else 2 if command in (1, 9) else 0
-        if len(args) != required:
-            labels = {1: "sfx(id, channel)", 2: "music(pattern)", 6: "audiovolume(volume)", 7: "audiostatus(channel)",
+        if len(args) != required and not (command == 2 and 1 <= len(args) <= 3):
+            labels = {1: "sfx(id, channel)", 2: "music(pattern[, fade_ms[, channel_mask]])", 6: "audiovolume(volume)", 7: "audiostatus(channel)",
                       8: "pcmstop(voice)", 9: "pcmvolume(voice, volume)", 10: "pcmstatus(voice)"}
             label = labels.get(command, "audio command")
             raise NotImplementedError(f"{label} takes exactly {required} argument(s)")
         regs = [RA, RB]
-        for i, arg in enumerate(args):
-            addr = self.gen_expr(arg)
-            self.emit_load(addr, self.addr_size(addr), regs[i])
-        if len(args) < 2:
-            self.emit_set_const(RB, 0)
+        if command == 2 and len(args) > 1:
+            # music(pattern, fade_ms, channel_mask): the host gets b = channel_mask | (fade_ms << 4)
+            fade = self.try_const(args[1])
+            mask = self.try_const(args[2]) if len(args) > 2 else 0
+            if fade is None or mask is None:
+                raise NotImplementedError("music() fade_ms and channel_mask must be constants")
+            addr = self.gen_expr(args[0])
+            self.emit_load(addr, self.addr_size(addr), RA)
+            self.emit_set_const(RB, ((fade & 0x0FFFFFFF) << 4) | (mask & 15))
+        else:
+            for i, arg in enumerate(args):
+                addr = self.gen_expr(arg)
+                self.emit_load(addr, self.addr_size(addr), regs[i])
+            if len(args) < 2:
+                self.emit_set_const(RB, 0)
         self.emit("audio_command", command, RA, RB, RC)
         if command not in (7, 10):
             return None
