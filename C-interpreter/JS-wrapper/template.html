@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>unilang</title>
+<style>
+:root{--bg:#f4f4f6;--fg:#1b1b1f;--card:#fff;--line:#d4d4da;--accent:#2f6fed;--muted:#6b6b76;--err:#c0392b;color-scheme:light dark}
+@media (prefers-color-scheme:dark){:root{--bg:#111114;--fg:#e8e8ee;--card:#1b1b20;--line:#33333b;--accent:#6b9bff;--muted:#9a9aa6;--err:#ff7b6b}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,sans-serif;-webkit-tap-highlight-color:transparent}
+main{max-width:760px;margin:0 auto;padding:10px}
+h1{font-size:18px;margin:4px 0 10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:10px}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.row+.row{margin-top:8px}
+button,.filebtn{font:inherit;color:var(--fg);background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 12px;cursor:pointer;user-select:none;-webkit-user-select:none}
+button:disabled{opacity:.45;cursor:default}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.filebtn input{display:none}
+.muted{color:var(--muted);font-size:13px}
+#screen{background:#000;border-radius:8px;overflow:hidden}
+#screen canvas{display:block;width:100%;height:auto;image-rendering:pixelated;outline:none}
+#pad{display:flex;justify-content:space-between;align-items:center;gap:12px;touch-action:none}
+#pad button{touch-action:none;min-width:56px;min-height:48px;padding:6px;font-size:18px}
+.dpad{display:grid;grid-template-columns:repeat(3,56px);grid-template-rows:repeat(3,48px);gap:4px}
+.dpad .up{grid-column:2;grid-row:1}
+.dpad .left{grid-column:1;grid-row:2}
+.dpad .right{grid-column:3;grid-row:2}
+.dpad .down{grid-column:2;grid-row:3}
+.acts{display:grid;grid-template-columns:repeat(2,minmax(64px,auto));gap:6px}
+.acts button{font-size:15px}
+#console{height:220px;overflow:auto;background:#0b0b0d;color:#d7d7de;border-radius:8px;padding:8px;font:12px/1.35 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-word}
+#console .err{color:#ff8f80}
+#console .info{color:#7fb0ff}
+label.chk{display:flex;gap:6px;align-items:center}
+</style>
+</head>
+<body>
+<main>
+<h1>unilang</h1>
+
+<div class="card">
+  <div class="row">
+    <label class="filebtn">Load ULC<input type="file" id="ulc"></label>
+    <label class="filebtn">Load ULS<input type="file" id="uls"></label>
+    <button id="dlsave" disabled>Download ULS</button>
+  </div>
+  <div class="row">
+    <button id="run" class="primary" disabled>Run</button>
+    <button id="stop" disabled>Stop</button>
+    <label class="chk"><input type="checkbox" id="debug"> debug</label>
+  </div>
+  <div class="muted" id="status">No program loaded.</div>
+</div>
+
+<div class="card">
+  <div id="screen"><canvas id="canvas" width="256" height="128" tabindex="-1"></canvas></div>
+</div>
+
+<div class="card" id="pad">
+  <div class="dpad">
+    <button class="up" data-code="ArrowUp">&#9650;</button>
+    <button class="left" data-code="ArrowLeft">&#9664;</button>
+    <button class="right" data-code="ArrowRight">&#9654;</button>
+    <button class="down" data-code="ArrowDown">&#9660;</button>
+  </div>
+  <div class="acts">
+    <button data-code="KeyC">C</button>
+    <button data-code="KeyV">V</button>
+    <button data-code="Backspace">Back</button>
+    <button data-code="Enter">Enter</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="row" style="justify-content:space-between">
+    <strong>Console</strong>
+    <button id="clear">Clear</button>
+  </div>
+  <div id="console"></div>
+</div>
+</main>
+
+<script>/*__UNILANG_JS__*/</script>
+<script>
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+  var con = $('console'), runBtn = $('run'), stopBtn = $('stop'), dlBtn = $('dlsave'), statusEl = $('status');
+  var ulc = null;        // {name, data}
+  var uls = null;        // Uint8Array
+  var inst = null;       // current Emscripten module
+  var token = 0;         // invalidates callbacks of old runs
+  var lastSave = null;   // last snapshot of the save file
+  var curSavePath = null;
+  var pollTimer = null;
+  var lines = 0, MAX_LINES = 1500;
+
+  function log(text, cls) {
+    var d = document.createElement('div');
+    if (cls) d.className = cls;
+    d.textContent = text;
+    con.appendChild(d);
+    if (++lines > MAX_LINES) { con.removeChild(con.firstChild); lines--; }
+    con.scrollTop = con.scrollHeight;
+  }
+
+  function safeName(n) {
+    n = (n || 'program.ulc').replace(/[^A-Za-z0-9._-]/g, '_');
+    if (n.charAt(0) === '.') n = '_' + n;
+    return n || 'program.ulc';
+  }
+  // Same rule as my_save_path() in main.c: replace the last extension with .uls
+  function saveNameFor(n) {
+    var i = n.lastIndexOf('.');
+    return (i > 0 ? n.slice(0, i) : n) + '.uls';
+  }
+  function put(m, name, data) {
+    if (m.FS_createDataFile) m.FS_createDataFile('/', name, data, true, true, true);
+    else m.FS.writeFile('/' + name, data);
+  }
+  function setRunning(on) {
+    stopBtn.disabled = !on;
+    runBtn.disabled = !ulc;
+  }
+  function snapshot() {
+    if (!inst || !curSavePath) return;
+    try {
+      if (inst.FS.analyzePath(curSavePath).exists) {
+        lastSave = inst.FS.readFile(curSavePath);
+        dlBtn.disabled = false;
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  function stop(quiet) {
+    if (!inst) return;
+    snapshot();
+    var m = inst;
+    inst = null;
+    token++;
+    clearInterval(pollTimer);
+    try { m._emscripten_force_exit(0); } catch (e) { /* already exited */ }
+    setRunning(false);
+    if (!quiet) log('[stopped]', 'info');
+  }
+
+  async function run() {
+    if (!ulc) return;
+    if (typeof createUnilang !== 'function') {
+      log('Emscripten module missing. Run build.bat first.', 'err');
+      return;
+    }
+    stop(true);
+    var my = ++token;
+    lastSave = null;
+    dlBtn.disabled = true;
+
+    // fresh canvas so a new WebGL context never collides with the old one
+    var old = $('canvas');
+    var canvas = document.createElement('canvas');
+    canvas.id = 'canvas';
+    canvas.width = 256; canvas.height = 128;
+    canvas.tabIndex = -1;
+    canvas.addEventListener('webglcontextlost', function (e) { e.preventDefault(); });
+    old.replaceWith(canvas);
+
+    var name = safeName(ulc.name);
+    var args = [name];
+    if ($('debug').checked) args.push('-debug');
+    curSavePath = '/' + saveNameFor(name);
+    statusEl.textContent = 'Running ' + name;
+    stopBtn.disabled = false;
+    runBtn.disabled = true;
+
+    var opts = {
+      canvas: canvas,
+      arguments: args,
+      print: function (t) { if (my === token) log(t); },
+      printErr: function (t) { if (my === token) log(t, 'err'); },
+      preRun: [function () {
+        put(opts, name, ulc.data);
+        if (uls) put(opts, saveNameFor(name), uls);
+      }],
+      onExit: function (code) {
+        if (my !== token) return;
+        snapshot();
+        clearInterval(pollTimer);
+        log('[exited with code ' + code + ']', 'info');
+        statusEl.textContent = 'Finished ' + name;
+        setRunning(false);
+      }
+    };
+    try {
+      var m = await createUnilang(opts);
+      if (my !== token) { try { m._emscripten_force_exit(0); } catch (e) {} return; }
+      inst = m;
+      pollTimer = setInterval(snapshot, 500);
+    } catch (e) {
+      if (my === token) {
+        log('Failed to start: ' + (e && e.message ? e.message : e), 'err');
+        setRunning(false);
+      }
+    }
+  }
+
+  $('ulc').addEventListener('change', async function (e) {
+    var f = e.target.files[0];
+    if (!f) return;
+    ulc = { name: f.name, data: new Uint8Array(await f.arrayBuffer()) };
+    statusEl.textContent = 'ULC: ' + f.name + ' (' + f.size + ' bytes)' + (uls ? ' + ULS loaded' : '');
+    runBtn.disabled = false;
+  });
+  $('uls').addEventListener('change', async function (e) {
+    var f = e.target.files[0];
+    if (!f) return;
+    uls = new Uint8Array(await f.arrayBuffer());
+    log('[ULS loaded: ' + f.name + ', ' + f.size + ' bytes; used on next Run]', 'info');
+  });
+
+  runBtn.addEventListener('click', run);
+  stopBtn.addEventListener('click', function () { stop(false); });
+  $('clear').addEventListener('click', function () { con.textContent = ''; lines = 0; });
+
+  dlBtn.addEventListener('click', function () {
+    if (!lastSave) return;
+    var blob = new Blob([lastSave], { type: 'application/octet-stream' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = saveNameFor(safeName(ulc ? ulc.name : 'program.ulc'));
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  });
+
+  // On-screen keys: dispatch synthetic keyboard events that SDL listens for.
+  var KEYS = { ArrowUp: 'ArrowUp', ArrowDown: 'ArrowDown', ArrowLeft: 'ArrowLeft', ArrowRight: 'ArrowRight',
+               KeyC: 'c', KeyV: 'v', Backspace: 'Backspace', Enter: 'Enter' };
+  function fire(type, code) {
+    window.dispatchEvent(new KeyboardEvent(type, { code: code, key: KEYS[code] || code, bubbles: true, cancelable: true }));
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('#pad button'), function (b) {
+    var code = b.getAttribute('data-code'), down = false;
+    function press(e) {
+      e.preventDefault();
+      if (down) return;
+      down = true;
+      try { b.setPointerCapture(e.pointerId); } catch (x) {}
+      fire('keydown', code);
+    }
+    function release(e) {
+      e.preventDefault();
+      if (!down) return;
+      down = false;
+      fire('keyup', code);
+    }
+    b.addEventListener('pointerdown', press);
+    b.addEventListener('pointerup', release);
+    b.addEventListener('pointercancel', release);
+    b.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+  });
+})();
+</script>
+</body>
+</html>
