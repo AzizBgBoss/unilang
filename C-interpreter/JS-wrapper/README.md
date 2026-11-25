@@ -24,7 +24,9 @@ Double click `build.bat` (or run `python build.py`). It produces `unilang.html`,
 - Load ULC: pick the bytecode file, then press Run.
 - Load ULS: optional save file, used on the next Run.
 - Download ULS: enabled once the program has a save file.
-- On-screen buttons send the keys the VM reads: arrows, C, V, Backspace, Enter.
+- On-screen controls: D-pad, A, B, Select, Start (keyboard: arrows, C, V, Backspace, Enter). The D-pad is a single touch area, so you can slide across it and press diagonals.
+- The canvas follows the aspect ratio of the current screen mode and is scaled by whole device pixels per VM pixel, so pixels stay sharp on any screen.
+- Fullscreen shows the screen with the controls overlaid. It uses the Fullscreen API where available and a CSS fallback otherwise (iPhone Safari). Exit with the Exit button or Esc.
 - The console shows stdout and stderr. Tick "debug" before Run to pass `-debug`.
 - Networking (`--net`) is not wired up yet, so programs that need it will not connect.
 

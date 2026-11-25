@@ -4,10 +4,12 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "..", "main.c")
-JS_OUT = os.path.join(HERE, "unilang.js")
+TMP = tempfile.mkdtemp()
+JS_OUT = os.path.join(TMP, "unilang.js")
 TEMPLATE = os.path.join(HERE, "template.html")
 HTML_OUT = os.path.join(HERE, "unilang.html")
 PLACEHOLDER = "/*__UNILANG_JS__*/"
@@ -48,4 +50,5 @@ html = html.replace(PLACEHOLDER, js)
 
 with open(HTML_OUT, "w", encoding="utf-8") as f:
     f.write(html)
+shutil.rmtree(TMP, ignore_errors=True)
 print("Wrote", HTML_OUT, "(%d KB)" % (len(html) // 1024))

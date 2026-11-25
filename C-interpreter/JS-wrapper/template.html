@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
 <title>unilang</title>
 <style>
 :root{--bg:#f4f4f6;--fg:#1b1b1f;--card:#fff;--line:#d4d4da;--accent:#2f6fed;--muted:#6b6b76;--err:#c0392b;color-scheme:light dark}
@@ -19,17 +19,34 @@ button:disabled{opacity:.45;cursor:default}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 .filebtn input{display:none}
 .muted{color:var(--muted);font-size:13px}
-#screen{background:#000;border-radius:8px;overflow:hidden}
-#screen canvas{display:block;width:100%;height:auto;image-rendering:pixelated;outline:none}
-#pad{display:flex;justify-content:space-between;align-items:center;gap:12px;touch-action:none}
-#pad button{touch-action:none;min-width:56px;min-height:48px;padding:6px;font-size:18px}
-.dpad{display:grid;grid-template-columns:repeat(3,56px);grid-template-rows:repeat(3,48px);gap:4px}
+#screen{display:flex;justify-content:center;align-items:center;background:#000;border-radius:8px;overflow:hidden}
+#screen canvas{display:block;image-rendering:crisp-edges;image-rendering:pixelated;outline:none}
+#stage{position:relative}
+#pad{display:flex;justify-content:space-between;align-items:flex-end;gap:10px;margin-top:10px;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+#pad button{touch-action:none;min-width:56px;min-height:48px;padding:6px;font-size:15px}
+#pad button.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.dpad{display:grid;grid-template-columns:repeat(3,52px);grid-template-rows:repeat(3,46px);gap:3px;touch-action:none}
+.dpad button{pointer-events:none;min-width:0;min-height:0;font-size:18px}
 .dpad .up{grid-column:2;grid-row:1}
 .dpad .left{grid-column:1;grid-row:2}
 .dpad .right{grid-column:3;grid-row:2}
 .dpad .down{grid-column:2;grid-row:3}
-.acts{display:grid;grid-template-columns:repeat(2,minmax(64px,auto));gap:6px}
-.acts button{font-size:15px}
+.mid{display:flex;gap:8px}
+.mid button{border-radius:20px;min-width:72px;min-height:40px;font-size:13px}
+.ab{display:flex;gap:10px;align-items:flex-end}
+.ab button{width:62px;height:62px;border-radius:50%;font-weight:600;font-size:18px}
+.ab .a{margin-bottom:26px}
+#exitfs{display:none;position:absolute;top:calc(8px + env(safe-area-inset-top));right:calc(8px + env(safe-area-inset-right));z-index:2;opacity:.7}
+#stage.fs{position:fixed;inset:0;z-index:100;background:#000;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+@media (orientation:portrait){#stage.fs{justify-content:flex-start;padding-top:max(env(safe-area-inset-top),8px)}}
+#stage.fs #screen{border-radius:0}
+#stage.fs #exitfs{display:block}
+#stage.fs #pad{position:absolute;left:0;right:0;bottom:0;margin:0;padding:12px 16px calc(12px + env(safe-area-inset-bottom));pointer-events:none}
+#stage.fs #pad>*{pointer-events:auto}
+#stage.fs #pad button{background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.35);color:#fff}
+#stage.fs #pad button.on{background:rgba(255,255,255,.6);color:#000}
+body.fsl{overflow:hidden}
+@media (max-width:480px){#pad{flex-wrap:wrap}.mid{order:3;flex:1 0 100%;justify-content:center}}
 #console{height:220px;overflow:auto;background:#0b0b0d;color:#d7d7de;border-radius:8px;padding:8px;font:12px/1.35 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-word}
 #console .err{color:#ff8f80}
 #console .info{color:#7fb0ff}
@@ -49,27 +66,32 @@ label.chk{display:flex;gap:6px;align-items:center}
   <div class="row">
     <button id="run" class="primary" disabled>Run</button>
     <button id="stop" disabled>Stop</button>
+    <button id="fs">Fullscreen</button>
     <label class="chk"><input type="checkbox" id="debug"> debug</label>
   </div>
   <div class="muted" id="status">No program loaded.</div>
 </div>
 
 <div class="card">
-  <div id="screen"><canvas id="canvas" width="256" height="128" tabindex="-1"></canvas></div>
-</div>
-
-<div class="card" id="pad">
-  <div class="dpad">
-    <button class="up" data-code="ArrowUp">&#9650;</button>
-    <button class="left" data-code="ArrowLeft">&#9664;</button>
-    <button class="right" data-code="ArrowRight">&#9654;</button>
-    <button class="down" data-code="ArrowDown">&#9660;</button>
-  </div>
-  <div class="acts">
-    <button data-code="KeyC">C</button>
-    <button data-code="KeyV">V</button>
-    <button data-code="Backspace">Back</button>
-    <button data-code="Enter">Enter</button>
+  <div id="stage">
+    <div id="screen"><canvas id="canvas" width="256" height="128" tabindex="-1"></canvas></div>
+    <button id="exitfs">Exit</button>
+    <div id="pad">
+      <div class="dpad">
+        <button class="up" data-code="ArrowUp">&#9650;</button>
+        <button class="left" data-code="ArrowLeft">&#9664;</button>
+        <button class="right" data-code="ArrowRight">&#9654;</button>
+        <button class="down" data-code="ArrowDown">&#9660;</button>
+      </div>
+      <div class="mid">
+        <button class="act" data-code="Backspace">Select</button>
+        <button class="act" data-code="Enter">Start</button>
+      </div>
+      <div class="ab">
+        <button class="act b" data-code="KeyV">B</button>
+        <button class="act a" data-code="KeyC">A</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -96,14 +118,29 @@ label.chk{display:flex;gap:6px;align-items:center}
   var curSavePath = null;
   var pollTimer = null;
   var lines = 0, MAX_LINES = 1500;
+  var pending = [], flushRaf = 0;
 
+  function flush() {
+    flushRaf = 0;
+    var atBottom = con.scrollHeight - con.scrollTop - con.clientHeight < 40;
+    var frag = document.createDocumentFragment();
+    for (var i = 0; i < pending.length; i++) {
+      var d = document.createElement('div');
+      if (pending[i][1]) d.className = pending[i][1];
+      d.textContent = pending[i][0];
+      frag.appendChild(d);
+    }
+    lines += pending.length;
+    pending = [];
+    con.appendChild(frag);
+    while (lines > MAX_LINES) { con.removeChild(con.firstChild); lines--; }
+    if (atBottom) con.scrollTop = con.scrollHeight;
+  }
+  // Batched per frame so a chatty program cannot stall the page.
   function log(text, cls) {
-    var d = document.createElement('div');
-    if (cls) d.className = cls;
-    d.textContent = text;
-    con.appendChild(d);
-    if (++lines > MAX_LINES) { con.removeChild(con.firstChild); lines--; }
-    con.scrollTop = con.scrollHeight;
+    pending.push([text, cls]);
+    if (pending.length > MAX_LINES) pending.splice(0, pending.length - MAX_LINES);
+    if (!flushRaf) flushRaf = requestAnimationFrame(flush);
   }
 
   function safeName(n) {
@@ -124,14 +161,17 @@ label.chk{display:flex;gap:6px;align-items:center}
     stopBtn.disabled = !on;
     runBtn.disabled = !ulc;
   }
+  var lastStat = '';
   function snapshot() {
     if (!inst || !curSavePath) return;
     try {
-      if (inst.FS.analyzePath(curSavePath).exists) {
-        lastSave = inst.FS.readFile(curSavePath);
-        dlBtn.disabled = false;
-      }
-    } catch (e) { /* ignore */ }
+      var st = inst.FS.stat(curSavePath);
+      var key = st.size + ':' + (+st.mtime);
+      if (key === lastStat) return;      // unchanged, skip the copy
+      lastStat = key;
+      lastSave = inst.FS.readFile(curSavePath);
+      dlBtn.disabled = false;
+    } catch (e) { /* save file not created yet */ }
   }
 
   function stop(quiet) {
@@ -141,6 +181,7 @@ label.chk{display:flex;gap:6px;align-items:center}
     inst = null;
     token++;
     clearInterval(pollTimer);
+    releaseAll();
     try { m._emscripten_force_exit(0); } catch (e) { /* already exited */ }
     setRunning(false);
     if (!quiet) log('[stopped]', 'info');
@@ -155,6 +196,7 @@ label.chk{display:flex;gap:6px;align-items:center}
     stop(true);
     var my = ++token;
     lastSave = null;
+    lastStat = '';
     dlBtn.disabled = true;
 
     // fresh canvas so a new WebGL context never collides with the old one
@@ -165,6 +207,8 @@ label.chk{display:flex;gap:6px;align-items:center}
     canvas.tabIndex = -1;
     canvas.addEventListener('webglcontextlost', function (e) { e.preventDefault(); });
     old.replaceWith(canvas);
+    watchCanvas(canvas);
+    schedule();
 
     var name = safeName(ulc.name);
     var args = [name];
@@ -196,7 +240,7 @@ label.chk{display:flex;gap:6px;align-items:center}
       var m = await createUnilang(opts);
       if (my !== token) { try { m._emscripten_force_exit(0); } catch (e) {} return; }
       inst = m;
-      pollTimer = setInterval(snapshot, 500);
+      pollTimer = setInterval(function () { if (!document.hidden) snapshot(); }, 1000);
     } catch (e) {
       if (my === token) {
         log('Failed to start: ' + (e && e.message ? e.message : e), 'err');
@@ -221,7 +265,7 @@ label.chk{display:flex;gap:6px;align-items:center}
 
   runBtn.addEventListener('click', run);
   stopBtn.addEventListener('click', function () { stop(false); });
-  $('clear').addEventListener('click', function () { con.textContent = ''; lines = 0; });
+  $('clear').addEventListener('click', function () { con.textContent = ''; lines = 0; pending = []; });
 
   dlBtn.addEventListener('click', function () {
     if (!lastSave) return;
@@ -236,32 +280,144 @@ label.chk{display:flex;gap:6px;align-items:center}
     setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
   });
 
-  // On-screen keys: dispatch synthetic keyboard events that SDL listens for.
+  // ---- Layout: canvas follows the aspect ratio of the current screen mode ----
+  // SDL sizes the canvas to wx*scale by wy*scale, so canvas.width/height carry the
+  // mode's aspect ratio. We size it in whole device pixels per VM pixel so the
+  // image stays sharp (no uneven pixel rows) on any screen or zoom level.
+  var stage = $('stage'), screenEl = $('screen'), fsBtn = $('fs');
+  var layoutRaf = 0, mo = null;
+  function schedule() { if (!layoutRaf) layoutRaf = requestAnimationFrame(layout); }
+  function layout() {
+    layoutRaf = 0;
+    var c = $('canvas');
+    var bw = c.width, bh = c.height;
+    if (!bw || !bh) return;
+    var dpr = window.devicePixelRatio || 1;
+    var fs = stage.classList.contains('fs');
+    var portrait = window.innerHeight > window.innerWidth;
+    var aw = fs ? window.innerWidth : screenEl.clientWidth;
+    var ah = fs ? (portrait ? window.innerHeight * 0.6 : window.innerHeight)
+                : Math.max(160, window.innerHeight * 0.7);
+    var w = Math.min(aw * dpr, ah * dpr * bw / bh);
+    // bw/5 is the smallest possible pixel unit across modes (scale 5 or 10 in main.c)
+    var unit = bw % 5 === 0 ? bw / 5 : 0;
+    w = unit && w >= unit ? Math.floor(w / unit) * unit : Math.floor(w);
+    c.style.width = (w / dpr) + 'px';
+    c.style.height = (w * bh / bw / dpr) + 'px';
+  }
+  function watchCanvas(c) {
+    if (mo) mo.disconnect();
+    mo = new MutationObserver(schedule);
+    mo.observe(c, { attributes: true, attributeFilter: ['width', 'height'] });
+  }
+  watchCanvas($('canvas'));
+  window.addEventListener('resize', schedule);
+  window.addEventListener('orientationchange', schedule);
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', schedule);
+  schedule();
+
+  // ---- Fullscreen with touch overlay ----
+  var apiFs = false;
+  function fsElement() { return document.fullscreenElement || document.webkitFullscreenElement; }
+  function setFs(on) {
+    if (on === stage.classList.contains('fs')) return;
+    stage.classList.toggle('fs', on);
+    document.body.classList.toggle('fsl', on);
+    var p;
+    try {
+      if (on) {
+        var req = stage.requestFullscreen || stage.webkitRequestFullscreen;
+        if (req) { apiFs = true; p = req.call(stage); }
+      } else if (fsElement()) {
+        apiFs = false;
+        p = (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+      }
+    } catch (e) { /* CSS fullscreen still applies (e.g. iPhone Safari) */ }
+    if (p && p.catch) p.catch(function () {});
+    releaseAll();
+    schedule();
+  }
+  function onFsChange() {
+    if (!fsElement() && apiFs) { apiFs = false; setFs(false); }
+  }
+  document.addEventListener('fullscreenchange', onFsChange);
+  document.addEventListener('webkitfullscreenchange', onFsChange);
+  fsBtn.addEventListener('click', function () { setFs(true); });
+  $('exitfs').addEventListener('click', function () { setFs(false); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') setFs(false); });
+
+  // ---- Touch / pointer controls: synthetic keyboard events that SDL listens for ----
+  // A = C, B = V, Select = Backspace, Start = Enter (same keys the VM reads).
   var KEYS = { ArrowUp: 'ArrowUp', ArrowDown: 'ArrowDown', ArrowLeft: 'ArrowLeft', ArrowRight: 'ArrowRight',
                KeyC: 'c', KeyV: 'v', Backspace: 'Backspace', Enter: 'Enter' };
-  function fire(type, code) {
-    window.dispatchEvent(new KeyboardEvent(type, { code: code, key: KEYS[code] || code, bubbles: true, cancelable: true }));
-  }
-  Array.prototype.forEach.call(document.querySelectorAll('#pad button'), function (b) {
-    var code = b.getAttribute('data-code'), down = false;
-    function press(e) {
-      e.preventDefault();
-      if (down) return;
-      down = true;
-      try { b.setPointerCapture(e.pointerId); } catch (x) {}
-      fire('keydown', code);
-    }
-    function release(e) {
-      e.preventDefault();
-      if (!down) return;
-      down = false;
-      fire('keyup', code);
-    }
-    b.addEventListener('pointerdown', press);
-    b.addEventListener('pointerup', release);
-    b.addEventListener('pointercancel', release);
-    b.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+  var KEYCODES = { ArrowUp: 38, ArrowDown: 40, ArrowLeft: 37, ArrowRight: 39, KeyC: 67, KeyV: 86, Backspace: 8, Enter: 13 };
+  var held = {}, btnFor = {};
+  Array.prototype.forEach.call(document.querySelectorAll('#pad [data-code]'), function (b) {
+    btnFor[b.getAttribute('data-code')] = b;
   });
+  function setKey(code, on) {
+    if (!!held[code] === on) return;
+    held[code] = on;
+    window.dispatchEvent(new KeyboardEvent(on ? 'keydown' : 'keyup', {
+      code: code, key: KEYS[code] || code, keyCode: KEYCODES[code], which: KEYCODES[code],
+      bubbles: true, cancelable: true }));
+    if (btnFor[code]) btnFor[code].classList.toggle('on', on);
+  }
+  function releaseAll() {
+    Object.keys(held).forEach(function (c) { if (held[c]) setKey(c, false); });
+  }
+  window.addEventListener('blur', releaseAll);
+  document.addEventListener('visibilitychange', function () { if (document.hidden) releaseAll(); });
+
+  function bindAct(b) {
+    var code = b.getAttribute('data-code'), id = null;
+    b.addEventListener('pointerdown', function (e) {
+      e.preventDefault();
+      id = e.pointerId;
+      try { b.setPointerCapture(id); } catch (x) {}
+      setKey(code, true);
+    });
+    ['pointerup', 'pointercancel'].forEach(function (t) {
+      b.addEventListener(t, function (e) {
+        if (e.pointerId !== id) return;
+        e.preventDefault();
+        id = null;
+        setKey(code, false);
+      });
+    });
+    b.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('#pad .act'), bindAct);
+
+  // D-pad is one touch area: slide a thumb across it to change direction or press diagonals.
+  var dp = document.querySelector('.dpad'), dpId = null;
+  function dpUpdate(e) {
+    var r = dp.getBoundingClientRect();
+    var x = (e.clientX - r.left - r.width / 2) / (r.width / 2);
+    var y = (e.clientY - r.top - r.height / 2) / (r.height / 2);
+    var t = 0.3;
+    setKey('ArrowLeft', x < -t);
+    setKey('ArrowRight', x > t);
+    setKey('ArrowUp', y < -t);
+    setKey('ArrowDown', y > t);
+  }
+  function dpRelease() {
+    dpId = null;
+    ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].forEach(function (c) { setKey(c, false); });
+  }
+  dp.addEventListener('pointerdown', function (e) {
+    e.preventDefault();
+    dpId = e.pointerId;
+    try { dp.setPointerCapture(dpId); } catch (x) {}
+    dpUpdate(e);
+  });
+  dp.addEventListener('pointermove', function (e) {
+    if (e.pointerId === dpId) { e.preventDefault(); dpUpdate(e); }
+  });
+  ['pointerup', 'pointercancel'].forEach(function (t) {
+    dp.addEventListener(t, function (e) { if (e.pointerId === dpId) dpRelease(); });
+  });
+  dp.addEventListener('contextmenu', function (e) { e.preventDefault(); });
 })();
 </script>
 </body>
