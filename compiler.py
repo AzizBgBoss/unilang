@@ -4393,7 +4393,7 @@ class Compiler:
             source += ("\nvoid drawnum(uint64_t n, uint8_t x, uint8_t y, uint8_t c)\n"
                        "{\n    uint64_t d = 1;\n    while (n / d >= 10)\n        d = d * 10;\n"
                        "    while (d > 0)\n    {\n        drawchar('0' + n / d % 10, x, y, c);\n"
-                       "        x = x + 6;\n        d = d / 10;\n    }\n}\n")
+                       "        x = x + 4;\n        d = d / 10;\n    }\n}\n")
         clean_source, self.alloc_meta = self.rewrite_alloc_syntax(source)
         clean_source = self.rewrite_mem_syntax(clean_source)
         clean_source = self.rewrite_cpp_tag_typedefs(clean_source)
