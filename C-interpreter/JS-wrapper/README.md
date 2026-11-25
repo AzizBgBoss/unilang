@@ -19,6 +19,10 @@ Close and reopen the terminal afterwards. If `emcc` is still not found, run `C:\
 
 Double click `build.bat` (or run `python build.py`). It produces `unilang.html`, a single file you can open from `file://` or copy to your phone.
 
+## Build without emscripten (e.g. Termux)
+
+If you only changed `template.html`, run `python build.py --reuse` (or just `python build.py` when `emcc` is missing). It pastes the already compiled `unilang.js` into the page, so no toolchain is needed. Keep `unilang.js` in the repo for this. A full rebuild is only needed when `main.c` or `unilang.h` change.
+
 ## Use
 
 - Load ULC: pick the bytecode file, then press Run.
